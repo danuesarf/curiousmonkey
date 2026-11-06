@@ -1,0 +1,39 @@
+{
+  "name": "curious-monkey",
+  "version": "0.1.0",
+  "description": "Curious Monkey: find what each IAM role really uses, and take away the bazooka.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "worker": "node src/worker.js",
+    "migrate": "node src/migrate.js",
+    "scan": "node src/cli.js scan",
+    "demo": "node src/cli.js demo",
+    "catalog": "node scripts/build-catalog.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-accessanalyzer": "^3.1000.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1000.0",
+    "@aws-sdk/client-cloudtrail": "^3.1000.0",
+    "@aws-sdk/client-iam": "^3.1000.0",
+    "@aws-sdk/client-organizations": "^3.1000.0",
+    "@aws-sdk/client-sts": "^3.1000.0",
+    "express": "^5.1.0",
+    "helmet": "^8.0.0",
+    "openid-client": "^5.7.1",
+    "pg": "^8.13.0",
+    "qrcode": "^1.5.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloud-copilot/iam-data": "^0.22.0",
+    "@fontsource-variable/geist": "^5.2.0",
+    "@fontsource-variable/geist-mono": "^5.2.0",
+    "embedded-postgres": "^18.0.0-beta.1"
+  }
+}

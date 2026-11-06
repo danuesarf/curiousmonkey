@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: curious-monkey
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - postgres.yaml        # remove when using RDS
+  - app.yaml
+  - worker.yaml
+# secret.yaml is applied separately (see secret.example.yaml)
+images:
+  - name: curious-monkey
+    newName: registry.example.com/curious-monkey
+    newTag: latest

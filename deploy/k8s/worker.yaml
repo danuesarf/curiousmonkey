@@ -1,0 +1,59 @@
+# Scanner worker. Separate Deployment, separate ServiceAccount, separate resources.
+# It has no Service or Ingress: nothing can reach it from outside, and the portal never depends on it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: curious-monkey-worker
+  namespace: curious-monkey
+  annotations:
+    # IRSA: this role may only sts:AssumeRole into the CuriousMonkeyScanner role of each connected account.
+    eks.amazonaws.com/role-arn: arn:aws:iam::111111111111:role/curious-monkey-worker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: curious-monkey-worker, namespace: curious-monkey }
+spec:
+  replicas: 2
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 1, maxSurge: 1 } }
+  selector: { matchLabels: { app: curious-monkey, role: worker } }
+  template:
+    metadata:
+      labels: { app: curious-monkey, role: worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: curious-monkey-worker
+      terminationGracePeriodSeconds: 60     # finish the current slice; anything left is resumed by another pod
+      securityContext: { runAsNonRoot: true, runAsUser: 100, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: curious-monkey:latest
+          command: [node, src/worker.js]
+          ports: [{ name: health, containerPort: 8081 }]
+          envFrom:
+            - configMapRef: { name: curious-monkey }
+            - secretRef: { name: curious-monkey }
+          livenessProbe: { httpGet: { path: /healthz, port: health }, initialDelaySeconds: 20, periodSeconds: 30, failureThreshold: 4 }
+          readinessProbe: { httpGet: { path: /healthz, port: health }, periodSeconds: 15 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: { requests: { cpu: 200m, memory: 384Mi }, limits: { memory: 1Gi } }
+---
+# Workers may talk to Postgres and out to AWS; nothing may talk to them except the metrics scraper.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-no-ingress, namespace: curious-monkey }
+spec:
+  podSelector: { matchLabels: { role: worker } }
+  policyTypes: [Ingress]
+  ingress:
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: monitoring } } }]
+      ports: [{ port: 8081 }]
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata: { name: curious-monkey-worker, namespace: curious-monkey }
+spec:
+  maxUnavailable: 1
+  selector: { matchLabels: { role: worker } }

@@ -1,0 +1,50 @@
+# Portal + API. Owns migrations. No AWS access needed (add a Bedrock-only role if you enable AI drafting).
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: curious-monkey-api, namespace: curious-monkey }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: curious-monkey-api, namespace: curious-monkey }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: curious-monkey, role: api } }
+  template:
+    metadata: { labels: { app: curious-monkey, role: api } }
+    spec:
+      serviceAccountName: curious-monkey-api
+      securityContext: { runAsNonRoot: true, runAsUser: 100, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: api
+          image: curious-monkey:latest        # set your registry path in kustomization.yaml
+          command: [node, src/server.js]
+          ports: [{ name: http, containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: curious-monkey }
+            - secretRef: { name: curious-monkey }
+          env: [{ name: RUN_MIGRATIONS, value: "true" }]
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 20, periodSeconds: 20 }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          resources: { requests: { cpu: 100m, memory: 192Mi }, limits: { memory: 512Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: curious-monkey, namespace: curious-monkey }
+spec:
+  selector: { app: curious-monkey, role: api }
+  ports: [{ name: http, port: 80, targetPort: http }]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: curious-monkey
+  namespace: curious-monkey
+spec:
+  # ingressClassName: nginx
+  tls: [{ hosts: [curious-monkey.example.com], secretName: curious-monkey-tls }]
+  rules:
+    - host: curious-monkey.example.com
+      http:
+        paths:
+          - { path: /, pathType: Prefix, backend: { service: { name: curious-monkey, port: { name: http } } } }

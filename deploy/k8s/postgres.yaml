@@ -1,0 +1,37 @@
+# Simple in-cluster Postgres. For production prefer RDS/Aurora and just set DATABASE_URL (then drop this file).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: curious-monkey }
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      securityContext: { fsGroup: 70 }
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports: [{ containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_USER, value: cm }
+            - { name: POSTGRES_DB, value: cm }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: curious-monkey, key: POSTGRES_PASSWORD } }
+          readinessProbe: { exec: { command: [pg_isready, -U, cm, -d, cm] }, periodSeconds: 5 }
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 20Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: curious-monkey }
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]

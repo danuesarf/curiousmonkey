@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: curious-monkey
+  namespace: curious-monkey
+data:
+  NODE_ENV: production
+  PUBLIC_URL: https://curious-monkey.example.com
+  TRUST_PROXY: "true"
+  COOKIE_SECURE: "true"
+  AWS_MODE: aws
+  # ARN of the identity the WORKER runs as (its IRSA role). Accounts trust this principal.
+  SCANNER_PRINCIPAL_ARN: arn:aws:iam::111111111111:role/curious-monkey-worker
+  DEFAULT_REGIONS: us-east-1,ap-southeast-1,ap-southeast-3
+  LOOKBACK_DAYS: "90"
+  SCAN_AT: "01:00"
+  SCAN_TZ: Asia/Jakarta
+  BEDROCK_ENABLED: "false"
+  WORKER_CONCURRENCY: "2"

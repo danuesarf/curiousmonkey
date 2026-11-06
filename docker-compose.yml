@@ -1,0 +1,65 @@
+# Curious Monkey: portal + API, scanner worker, Postgres. Three separate containers.
+#   cp .env.example .env   # set SESSION_SECRET, DATA_ENCRYPTION_KEY, POSTGRES_PASSWORD
+#   docker compose up -d --build
+# Scale scanners without touching the UI:  docker compose up -d --scale worker=3
+x-app: &app
+  build: .
+  image: curious-monkey:latest
+  env_file: .env
+  environment: &app-env
+    DATABASE_URL: postgres://cm:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/cm
+  depends_on:
+    postgres: { condition: service_healthy }
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: cm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: cm
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cm -d cm"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # Portal + API. Owns schema migrations. Never runs scans.
+  app:
+    <<: *app
+    command: ["node", "src/server.js"]
+    ports: ["8080:8080"]
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    mem_limit: 512m
+
+  # Scanner. Separate container: a slow or crashing scan cannot take the portal down.
+  # Needs AWS credentials to assume the read-only scanner role in each account.
+  worker:
+    <<: *app
+    command: ["node", "src/worker.js"]
+    environment:
+      <<: *app-env
+      WORKER_CONCURRENCY: "2"
+    # No published ports. Probes and metrics are on 8081 inside the network only.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    stop_grace_period: 60s   # lets the running slice finish; leftovers resume on another worker
+    mem_limit: 1g
+    depends_on:
+      app: { condition: service_healthy }   # schema exists before workers start
+
+volumes:
+  pgdata:
