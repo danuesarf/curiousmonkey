@@ -1,4 +1,4 @@
-import { h, get, post, num, ago, fmtDate, toast, modal, api } from '../lib.js';
+import { h, get, post, num, ago, fmtDate, toast, modal, api, confirmDialog } from '../lib.js';
 import { session } from '../main.js';
 
 const ST = { succeeded: 'b-green', running: 'b-banana', queued: 'b-neutral', failed: 'b-high', dead: 'b-high', canceled: 'b-neutral', partial: 'b-medium' };
@@ -32,7 +32,7 @@ export async function opsPage(ctx) {
   const runPanel = (d, canScan, redraw) => h('section', { class: 'card' },
     h('div', { class: 'card-h' }, h('h2', null, `${d.run.account_name}: scan ${d.run.status}`), canScan && h('div', { class: 'row' },
       d.jobs.some((j) => ['failed', 'dead', 'canceled'].includes(j.status)) && h('button', { class: 'btn sm primary', onClick: async () => { const r = await post(`/ops/runs/${d.run.id}/retry`); toast(`Requeued ${r.requeued} job(s). They resume from saved checkpoints.`); redraw(); } }, 'Retry failed jobs'),
-      ['queued', 'running'].includes(d.run.status) && h('button', { class: 'btn sm danger', onClick: async () => { if (confirm('Cancel this scan? Saved progress is kept.')) { await post(`/ops/runs/${d.run.id}/cancel`); redraw(); } } }, 'Cancel'))),
+      ['queued', 'running'].includes(d.run.status) && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: 'Cancel this scan?', message: 'Jobs that already finished keep their results, and a later scan continues from the saved checkpoints.', confirmLabel: 'Cancel scan', danger: true })) { await post(`/ops/runs/${d.run.id}/cancel`); redraw(); } } }, 'Cancel'))),
     h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Step', 'Status', 'Attempts', 'Progress', 'Error', ''].map((x) => h('th', null, x)))),
       h('tbody', null, d.jobs.map((j) => h('tr', null, h('td', null, h('span', { class: 'name' }, j.kind), j.region && h('span', { class: 'small muted mono' }, ` ${j.region}`)), h('td', null, h('span', { class: `badge ${ST[j.status]}` }, j.status)),
         h('td', null, `${j.attempts}/${j.max_attempts}`), h('td', { class: 'small' }, progress(j)),

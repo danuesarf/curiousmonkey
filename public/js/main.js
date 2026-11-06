@@ -40,7 +40,7 @@ function shell(active, content) {
         link('#/members', 'members', 'Members and roles', 'members'),
         link('#/audit', 'audit', 'Audit log', 'audit')),
       h('div', { class: 'me' }, h('span', { class: 'avatar', 'aria-hidden': 'true' }, (state.user.name || '?').slice(0, 1).toUpperCase()),
-        h('div', { class: 'stack', style: null }, h('div', { class: 'name small' }, state.user.name),
+        h('div', { class: 'who' }, h('div', { class: 'name small', title: state.user.name }, state.user.name),
           h('div', { class: 'tiny muted' }, ROLE_LABEL[state.user.role], state.user.team ? `, ${TEAM[state.user.team]}` : '')),
         h('button', { class: 'btn sm', onClick: async () => { await post('/auth/signout'); state.user = null; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
     h('main', { class: 'main', id: 'content' }, content));

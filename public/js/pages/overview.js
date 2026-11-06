@@ -39,7 +39,7 @@ export async function overview(ctx) {
     h('button', { class: 'chip', type: 'button', onClick: () => { f.dir = f.sort === key && f.dir === 'desc' ? 'asc' : 'desc'; f.sort = key; load(); } }, label, f.sort === key ? (f.dir === 'asc' ? ' ↑' : ' ↓') : ''));
 
   const table = (r) => h('div', { class: 'scroll' }, h('table', null,
-    h('thead', null, h('tr', null, sortTh('name', 'Role'), sortTh('risk', 'Risk'), h('th', null, 'Used / unused / unconfirmed'), sortTh('unused', 'Unused'), h('th', null, 'Reviewer'), sortTh('activity', 'Last activity'), h('th', null, 'Open findings'))),
+    h('thead', null, h('tr', null, sortTh('name', 'Role'), sortTh('risk', 'Risk'), h('th', null, 'Used / unused / unconfirmed'), sortTh('unused', 'Unused'), h('th', null, 'Reviewer'), sortTh('activity', 'Last activity'), h('th', null, 'Findings'))),
     h('tbody', null, r.items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/roles/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/roles/${x.id}`); } },
       h('td', null, h('div', { class: 'name' }, x.name), h('div', { class: 'tiny muted' }, `${x.account_name} · ${x.aws_account_id} · `, KIND[x.kind], x.permission_set ? ` (${x.permission_set})` : '')),
       h('td', null, riskBadge(x.risk)),
@@ -47,7 +47,7 @@ export async function overview(ctx) {
       h('td', { class: 'nowrap' }, num(x.unused_count)),
       h('td', null, teamBadge(x.reviewer_team, x.requires_both)),
       h('td', { class: 'nowrap small' }, x.last_activity_at ? ago(x.last_activity_at) : 'none seen'),
-      h('td', { class: 'nowrap small' }, x.open_flags ? `${x.decided_flags} of ${x.open_flags} decided` : 'none'))))));
+      h('td', { class: 'small' }, x.open_flags ? `${x.decided_flags} of ${x.open_flags} decided` : 'none'))))));
 
   const t = ov.totals;
   const tile = (label, value, sub) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
@@ -57,7 +57,7 @@ export async function overview(ctx) {
     tile('Unused', num(t.unused), 'safe to remove after review'),
     tile('Cannot be verified', num(t.unconfirmed), 'event history cannot prove them'));
 
-  const count = h('span', { class: 'small muted' });
+  const count = h('span', { class: 'count' });
   const search = h('input', { type: 'search', placeholder: 'Search role name or ARN', 'aria-label': 'Search roles', value: f.q });
   search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { f.q = search.value; f.page = 1; load(); }, 250); });
   const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: f[key] === v }, l))); s.addEventListener('change', () => { f[key] = s.value; f.page = 1; load(); }); return s; };

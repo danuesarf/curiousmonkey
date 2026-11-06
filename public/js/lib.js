@@ -1,3 +1,6 @@
+// replaceChildren would print `false`/`null` from `cond && node`. Drop them everywhere.
+const nativeReplace = Element.prototype.replaceChildren;
+Element.prototype.replaceChildren = function (...kids) { return nativeReplace.apply(this, kids.flat(Infinity).filter((k) => k != null && k !== false)); };
 // Tiny DOM helpers. Everything goes in as text nodes, so data from the API can never become markup.
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
@@ -77,4 +80,18 @@ export function busy(btn, fn) {
     const t = btn.textContent; btn.disabled = true;
     try { return await fn(...a); } catch (e) { toast(e.message, true); } finally { btn.disabled = false; btn.textContent = t; }
   };
+}
+
+// In-app replacement for window.confirm. Resolves true or false.
+export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger = false }) {
+  return new Promise((resolve) => {
+    let bg;
+    const done = (v) => { document.removeEventListener('keydown', onKey); bg.remove(); resolve(v); };
+    const onKey = (e) => { if (e.key === 'Escape') done(false); };
+    const ok = h('button', { class: `btn ${danger ? 'danger-solid' : 'primary'}`, onClick: () => done(true) }, confirmLabel);
+    bg = modal(title, h('p', null, message), h('div', { class: 'actions' }, ok, h('button', { class: 'btn', onClick: () => done(false) }, 'Cancel')));
+    bg.firstChild.classList.add('confirm');
+    document.addEventListener('keydown', onKey);
+    ok.focus();
+  });
 }
