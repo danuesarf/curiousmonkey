@@ -9,11 +9,11 @@ Curious Monkey works like AWS IAM Access Analyzer, across many AWS accounts. For
 Needs Docker. The scanner runs in its **own container**, so a heavy scan never slows the portal or API.
 
 ```sh
-cp .env.example .env            # set SESSION_SECRET and DATA_ENCRYPTION_KEY (openssl rand -base64 48)
+cp .env.example .env            # set POSTGRES_PASSWORD, SESSION_SECRET, DATA_ENCRYPTION_KEY (openssl rand -base64 48)
 docker compose up --build       # postgres, app (UI + API), worker
 ```
 
-Open http://localhost:8080 and sign up. **The first person to sign up becomes the owner.** After that, sign-up is by invite link only.
+Open http://localhost:8080 (change `HOST_PORT` in `.env` if the port is taken) and sign up. **The first person to sign up becomes the owner.** After that, sign-up is by invite link only.
 
 Try it without AWS credentials: set `AWS_MODE=demo` in `.env`, then `docker compose exec app node src/cli.js demo`. This adds two fake accounts and queues their first scans.
 

@@ -6,8 +6,13 @@ pg.types.setTypeParser(20, (v) => Number(v));
 // Keep DATE columns as plain 'YYYY-MM-DD' strings so time zones never shift a day.
 pg.types.setTypeParser(1082, (v) => v);
 
+// DB_PASSWORD (with DB_HOST etc.) wins over DATABASE_URL, so a password with / + = or @ needs no URL escaping.
+const conn = process.env.DB_PASSWORD
+  ? { host: process.env.DB_HOST || 'postgres', port: Number(process.env.DB_PORT || 5432), user: process.env.DB_USER || 'cm',
+      password: process.env.DB_PASSWORD, database: process.env.DB_NAME || 'cm' }
+  : { connectionString: config.databaseUrl };
 export const pool = new pg.Pool({
-  connectionString: config.databaseUrl,
+  ...conn,
   max: Number(process.env.DATABASE_POOL_MAX || 10),
   ssl: config.databaseSsl ? { rejectUnauthorized: false } : undefined,
 });

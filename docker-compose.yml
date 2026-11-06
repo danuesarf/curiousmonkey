@@ -7,7 +7,10 @@ x-app: &app
   image: curious-monkey:latest
   env_file: .env
   environment: &app-env
-    DATABASE_URL: postgres://cm:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/cm
+    DB_HOST: postgres
+    DB_USER: cm
+    DB_NAME: cm
+    DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
   depends_on:
     postgres: { condition: service_healthy }
   restart: unless-stopped
@@ -31,7 +34,7 @@ services:
   app:
     <<: *app
     command: ["node", "src/server.js"]
-    ports: ["8080:8080"]
+    ports: ["${HOST_PORT:-8080}:8080"]
     environment:
       <<: *app-env
       RUN_MIGRATIONS: "true"
