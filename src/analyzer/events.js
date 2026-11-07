@@ -1,5 +1,5 @@
 // Parse one CloudTrail record (the JSON inside a LookupEvents result) into what the scanner needs.
-import { eventToAction, isDenied } from './actionNames.js';
+import { mapEvent, isDenied } from './actionNames.js';
 
 const ROLE_ARN_RE = /arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@\/-]+/g;
 const ASSUME = new Set(['AssumeRole', 'AssumeRoleWithSAML', 'AssumeRoleWithWebIdentity']);
@@ -9,6 +9,13 @@ export function issuerRoleArn(rec) {
   const ui = rec.userIdentity;
   if (ui?.type !== 'AssumedRole') return null;
   return ui.sessionContext?.sessionIssuer?.arn || null;
+}
+
+/** Some events carry an AssumedRole identity without sessionContext. The role name is still in the session ARN. */
+export function issuerRoleName(rec) {
+  const ui = rec.userIdentity;
+  if (ui?.type !== 'AssumedRole') return null;
+  return ui.arn?.match(/:assumed-role\/([^/]+)\//)?.[1] || null;
 }
 
 export function parseEvent(rec) {
@@ -32,11 +39,14 @@ export function parseEvent(rec) {
     };
   }
   const roleArn = issuerRoleArn(rec);
-  if (!roleArn) return { ...base, type: 'ignore' };
-  const action = eventToAction(rec.eventSource, rec.eventName);
+  const roleName = roleArn ? null : issuerRoleName(rec);
+  if (!roleArn && !roleName) return { ...base, type: 'ignore', why: 'not-role', eventSource: rec.eventSource };
+  const m = mapEvent(rec.eventSource, rec.eventName);
   const resources = (rec.resources || []).map((r) => r.ARN).filter(Boolean);
   return {
-    ...base, type: 'api', roleArn, action, eventSource: rec.eventSource, eventName: rec.eventName,
+    ...base, type: 'api', roleArn, roleName, action: m.action, mapped: m.mapped, noPermission: !!m.none,
+    identityType: rec.userIdentity?.type, paramKeys: Object.keys(rec.requestParameters || {}).slice(0, 12),
+    eventSource: rec.eventSource, eventName: rec.eventName,
     accessKeyId: rec.userIdentity?.accessKeyId || null,
     sessionName: rec.userIdentity?.arn?.split('/').pop() || null,
     resources, passedRoles: findPassedRoles(rec, roleArn),

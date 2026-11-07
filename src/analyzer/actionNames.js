@@ -30,3 +30,27 @@ export function eventToAction(eventSource, eventName) {
 
 export const isKnownAction = (a) => Boolean(actionInfo(a));
 export const isDenied = (errorCode) => /AccessDenied|UnauthorizedOperation|UnauthorizedAccess|Unauthorized|Forbidden/i.test(errorCode || '');
+
+// Sign-in events are logged against roles but check no IAM permission.
+const NO_PERMISSION_SOURCES = new Set(['signin.amazonaws.com']);
+const VERSION_SUFFIX = /(\d{4}_\d{2}_\d{2}|\d{8})(v\d+)?$/;   // GetDistribution2020_05_31, ListFunctions20150331v2
+
+/**
+ * Map one CloudTrail event to the IAM action it was authorised as.
+ *   { action, mapped: true }          a known IAM action
+ *   { action: null, none: true }      no permission involved (console sign-in)
+ *   { action: 'svc:Name', mapped: false }  not in the catalog. The raw key is kept so a mapping
+ *                                     (manual or Bedrock) can credit it later without a rescan.
+ */
+export function mapEvent(eventSource, eventName) {
+  if (!eventSource || !eventName) return { action: null, mapped: false };
+  if (NO_PERMISSION_SOURCES.has(eventSource)) return { action: null, mapped: true, none: true };
+  const direct = eventToAction(eventSource, eventName);
+  if (direct && isKnownAction(direct)) return { action: direct, mapped: true };
+  const base = eventName.replace(VERSION_SUFFIX, '');
+  if (base && base !== eventName) {
+    const a = eventToAction(eventSource, base);
+    if (a && isKnownAction(a)) return { action: a, mapped: true };
+  }
+  return { action: direct, mapped: false };
+}

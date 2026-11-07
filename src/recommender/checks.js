@@ -16,7 +16,7 @@ export function draftStatements(policies) {
 /** Every concrete action a draft statement allows. */
 const concrete = (st) => (st.notActions.length ? [] : st.actions.flatMap((a) => (hasWildcard(a) ? expandAction(a) : [actionInfo(a)?.action ?? a])));
 
-export function runChecks({ draftPolicies, originalPolicies, boundaryDoc = null, actions, observed, decisions = new Map() }) {
+export function runChecks({ draftPolicies, originalPolicies, boundaryDoc = null, actions, observed, incomplete = new Set(), decisions = new Map() }) {
   const results = [];
   const stmts = draftStatements(draftPolicies);
   const grants = computeGrants(originalPolicies, { permissionsBoundary: boundaryDoc });
@@ -78,6 +78,9 @@ export function runChecks({ draftPolicies, originalPolicies, boundaryDoc = null,
     const obsRes = observed.get(a.action) || [];
     const covering = stmts.filter((st) => concrete(st).includes(a.action));
     if (!covering.length) { broken.push(a.action); continue; }
+    // some calls named no resource: if the grant was on every resource, the draft must keep that
+    if (incomplete.has(a.action) && [...(grants.get(a.action)?.resources || [])].some(isMatchAll)
+      && !covering.some((st) => !st.resources.length || st.resources.some(isMatchAll))) broken.push(`${a.action} narrowed, but some calls named no resource`);
     for (const r of obsRes) {
       const covered = covering.some((st) => (st.resources.length ? st.resources : ['*']).some((p) => isMatchAll(p) || globMatch(p, r)));
       if (!covered) broken.push(`${a.action} on ${r}`);

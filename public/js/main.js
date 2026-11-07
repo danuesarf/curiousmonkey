@@ -4,7 +4,7 @@ import * as authPages from './pages/auth.js';
 import { overview } from './pages/overview.js';
 import { rolePage } from './pages/role.js';
 import { recommendationPage } from './pages/recommendation.js';
-import { accountsPage, newAccountPage, editAccountPage } from './pages/accounts.js';
+import { accountsPage, newAccountPage, editAccountPage, coveragePage } from './pages/accounts.js';
 import { membersPage } from './pages/members.js';
 import { auditPage } from './pages/audit.js';
 import { opsPage } from './pages/ops.js';
@@ -18,6 +18,7 @@ const routes = [
   [/^#\/roles\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'overview'],
   [/^#\/roles\/([\w-]+)$/, (m) => (c) => rolePage(c, m[1]), 'overview'],
   [/^#\/accounts\/new$/, () => newAccountPage, 'accounts'],
+  [/^#\/accounts\/([\w-]+)\/coverage$/, (m) => (c) => coveragePage(c, m[1]), 'accounts'],
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
   [/^#\/scans$/, () => opsPage, 'scans'],

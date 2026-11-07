@@ -8,6 +8,7 @@ import { inScope, scopeSql } from '../auth/rbac.js';
 import { enqueueRun } from '../queue.js';
 import { scannerSnippets } from '../onboarding.js';
 import { sealCredentials } from '../aws/credentials.js';
+import { suggestMappings, decideMapping } from '../recommender/eventMap.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
 export const data = Router();
@@ -186,6 +187,53 @@ data.get('/accounts/:id/data-events', requirePerm('view'), wrap(async (req, res)
   res.json({ items: r.rows, note: a.event_source === 's3' ? 'Rows marked readable belong to the trail this account reads from S3, so data-plane calls they log count as use. Calls not seen stay unconfirmed, because a trail may cover only some buckets or tables.' : 'CloudTrail Event History holds management events only. These sources record data events, which this scan cannot read, so the tool reports them but does not use them as evidence. Reading the trail from S3 would let it use them.' });
 }));
 
+// ---------- event coverage and event-name mappings ----------
+const COVER = ['events', 'assume_events', 'role_calls', 'recovered_role', 'other_role', 'not_role', 'no_permission', 'unmapped', 'no_resources'];
+data.get('/accounts/:id/coverage', requirePerm('view'), wrap(async (req, res) => {
+  const a = await accountFor(req, req.params.id);
+  const days = z.coerce.number().int().min(1).max(730).default(30).parse(req.query.days || undefined);
+  const sum = COVER.map((c) => `sum(${c})::bigint AS ${c}`).join(', ');
+  const [tot, reg, un] = await Promise.all([
+    query(`SELECT ${sum}, min(day) AS first_day, max(day) AS last_day FROM event_coverage WHERE account_id=$1 AND day >= current_date - $2::int`, [a.id, days]),
+    query(`SELECT region, ${sum} FROM event_coverage WHERE account_id=$1 AND day >= current_date - $2::int GROUP BY region ORDER BY region`, [a.id, days]),
+    query(`SELECT u.raw_action, u.event_source, u.event_name, u.count, u.first_seen, u.last_seen, u.identity_type, u.param_keys,
+             (SELECT count(DISTINCT d.role_id)::int FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=u.account_id AND d.action=u.raw_action) AS roles,
+             CASE WHEN m.raw_action IS NULL THEN NULL ELSE json_build_object('action', m.action, 'status', m.status, 'source', m.source, 'confidence', m.confidence, 'note', m.note, 'decided_at', m.decided_at) END AS mapping
+           FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
+           WHERE u.account_id=$1 ORDER BY (m.status='accepted') NULLS FIRST, u.count DESC LIMIT 500`, [a.id]),
+  ]);
+  const num = (r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, COVER.includes(k) ? Number(v || 0) : v]));
+  res.json({ days, totals: num(tot.rows[0]), regions: reg.rows.map(num), unmapped: un.rows, bedrockEnabled: config.ai.enabled });
+}));
+
+data.post('/accounts/:id/unmapped/suggest', requirePerm('decide'), wrap(async (req, res) => {
+  const a = await accountFor(req, req.params.id);
+  const b = z.object({ rawActions: z.array(z.string().max(200)).max(50).optional() }).parse(req.body || {});
+  const items = (await query(
+    `SELECT u.* FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
+     WHERE u.account_id=$1 AND (m.status IS NULL OR m.status <> 'accepted') ${b.rawActions ? 'AND u.raw_action = ANY($2)' : ''}
+     ORDER BY u.count DESC LIMIT 50`, b.rawActions ? [a.id, b.rawActions] : [a.id])).rows;
+  const out = await suggestMappings(items);
+  await audit(req, 'mapping.suggest', { type: 'account', id: a.id }, { asked: items.length, suggested: out.suggested.length, rejected: out.rejected.length });
+  res.json(out);
+}));
+
+data.put('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
+  const b = z.object({ rawAction: z.string().max(200), action: z.string().max(200).nullable(), note: z.string().max(400).optional() }).parse(req.body);
+  const seen = (await query('SELECT event_source, event_name FROM unmapped_events WHERE raw_action=$1 LIMIT 1', [b.rawAction])).rows[0];
+  if (!seen) throw NotFound();
+  const row = await decideMapping({ rawAction: b.rawAction, eventSource: seen.event_source, eventName: seen.event_name, action: b.action, userId: req.user.id, note: b.note || null });
+  await audit(req, 'mapping.accept', { type: 'event-mapping', id: b.rawAction }, { action: row.action });
+  res.json(row);
+}));
+
+data.delete('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
+  const raw = z.string().max(200).parse(req.query.raw);
+  await query('DELETE FROM event_action_map WHERE raw_action=$1', [raw]);
+  await audit(req, 'mapping.clear', { type: 'event-mapping', id: raw });
+  res.json({ ok: true });
+}));
+
 const startScan = (trigger) => wrap(async (req, res) => {
   const a = await accountFor(req, req.params.id);
   const run = await enqueueRun(a.id, { trigger, requestedBy: req.user.id });
@@ -268,7 +316,7 @@ data.get('/roles/:id/actions', requirePerm('view'), wrap(async (req, res) => {
 }));
 
 // ---------- review decisions ----------
-const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown']);
+const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 data.post('/flags/:id/decision', requirePerm('decide'), wrap(async (req, res) => {
   const f = (await query('SELECT * FROM flags WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
   if (!f) throw NotFound();

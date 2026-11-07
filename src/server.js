@@ -42,7 +42,7 @@ export function createApp() {
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (err instanceof ZodError) return res.status(400).json({ error: 'invalid_input', message: err.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ') });
-    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.code || 'error', message: err.message });
+    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.code || 'error', message: err.message, field: err.field });
     console.error(JSON.stringify({ level: 'error', msg: err.message, path: req.path, stack: err.stack?.split('\n').slice(0, 4) }));
     res.status(500).json({ error: 'server_error', message: 'Something went wrong on our side.' });
   });

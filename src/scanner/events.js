@@ -39,7 +39,8 @@ export async function runEvents(ctx) {
   }
   if (!slices.length) return { skipped: 'up to date' };
 
-  const roleIds = new Map((await query(`SELECT arn, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows.map((r) => [r.arn, r]));
+  const roleRows = (await query(`SELECT arn, name, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
+  const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.map((r) => [r.name, r])) };
   const listCache = new Map();
   const t0 = Date.now();
   let rate = null;                                             // seconds per slice, smoothed
@@ -64,14 +65,16 @@ export async function runEvents(ctx) {
       // Regions of one account fetch in parallel but write one at a time: they update the same roles' rows,
       // and two transactions taking those row locks in different orders deadlock.
       await c.query('SELECT pg_advisory_xact_lock(727100, hashtext($1))', [account.id]);
-      const parsed = raw.map(parseEvent).filter((e) => e.type !== 'ignore');
-      const ids = parsed.map((e) => e.id);
+      const all = raw.map(parseEvent).filter((e) => e.id);
       const fresh = new Set((await c.query(
         `INSERT INTO seen_events(account_id, event_id, event_time) SELECT $3, x, to_timestamp($2) FROM unnest($1::text[]) x ON CONFLICT DO NOTHING RETURNING event_id`,
-        [ids, b / 1000, account.id])).rows.map((r) => r.event_id));
+        [all.map((e) => e.id), b / 1000, account.id])).rows.map((r) => r.event_id));
+      const evs = all.filter((e) => fresh.has(e.id));
+      const cov = coverage(evs, roles);
       // assumptions first, so a session's calls can be attributed to who started it
-      const evs = parsed.filter((e) => fresh.has(e.id)).sort((x, y) => (x.type === y.type ? x.time - y.time : x.type === 'assume' ? -1 : 1));
-      await applyEvents(c, evs, roleIds);
+      const usable = evs.filter((e) => e.type !== 'ignore').sort((x, y) => (x.type === y.type ? x.time - y.time : x.type === 'assume' ? -1 : 1));
+      await applyEvents(c, usable, roles);
+      await saveCoverage(c, account.id, region, new Date(a), cov);
       await c.query(
         `INSERT INTO scan_checkpoints(account_id, region, source, first_event_time, last_event_time, events_read, gap_detected, last_run_at)
          VALUES ($1,$2,$7,to_timestamp($3),to_timestamp($4),$5,$6,now())
@@ -80,8 +83,8 @@ export async function runEvents(ctx) {
            first_event_time=LEAST(COALESCE(scan_checkpoints.first_event_time, EXCLUDED.first_event_time), EXCLUDED.first_event_time),
            events_read=scan_checkpoints.events_read+EXCLUDED.events_read,
            gap_detected=scan_checkpoints.gap_detected OR EXCLUDED.gap_detected, last_run_at=now()`,
-        [account.id, region, a / 1000, kind === 'backfill' ? (cp?.last_event_time ? new Date(cp.last_event_time).getTime() / 1000 : b / 1000) : b / 1000, evs.length, gap, src]);
-      return evs.length;
+        [account.id, region, a / 1000, kind === 'backfill' ? (cp?.last_event_time ? new Date(cp.last_event_time).getTime() / 1000 : b / 1000) : b / 1000, usable.length, gap, src]);
+      return usable.length;
     });
     total += n;
     const took = (Date.now() - sliceStart) / 1000;
@@ -108,6 +111,45 @@ function principalFrom(e) {
   return { key: `other:${c.arn || c.type}`, kind: 'other', display: c.arn || String(c.type) };
 }
 
+/** The role an event belongs to: by ARN, or by name when the event had no sessionIssuer. */
+export const roleOf = (e, roles) => (e.roleArn ? roles.byArn.get(e.roleArn) : e.roleName ? roles.byName.get(e.roleName) : null) || null;
+
+/** Count what happens to every event, so nothing is dropped without a trace. */
+export function coverage(evs, roles) {
+  const k = { events: evs.length, assume_events: 0, role_calls: 0, recovered_role: 0, other_role: 0, not_role: 0, no_permission: 0, unmapped: 0, no_resources: 0 };
+  const unmapped = new Map();
+  for (const e of evs) {
+    if (e.type === 'ignore') { k.not_role++; continue; }
+    const role = roleOf(e, roles);
+    if (!role) { k.other_role++; continue; }
+    if (e.type === 'assume') { k.assume_events++; continue; }
+    k.role_calls++;
+    if (!e.roleArn) k.recovered_role++;
+    if (e.noPermission) { k.no_permission++; continue; }
+    if (!e.mapped && e.action) {
+      k.unmapped++;
+      const u = unmapped.get(e.action) || { raw: e.action, source: e.eventSource, name: e.eventName, n: 0, first: e.time, last: e.time, identity: e.identityType, keys: e.paramKeys };
+      u.n++; if (e.time < u.first) u.first = e.time; if (e.time > u.last) u.last = e.time; unmapped.set(e.action, u);
+    }
+    if (!e.denied && !e.resources.length) k.no_resources++;
+  }
+  return { k, unmapped };
+}
+async function saveCoverage(c, accountId, region, day, { k, unmapped }) {
+  const cols = Object.keys(k);
+  await c.query(
+    `INSERT INTO event_coverage(account_id, region, day, ${cols.join(',')}) VALUES ($1,$2,$3,${cols.map((_, i) => `$${i + 4}`).join(',')})
+     ON CONFLICT (account_id, region, day) DO UPDATE SET ${cols.map((x) => `${x}=event_coverage.${x}+EXCLUDED.${x}`).join(', ')}`,
+    [accountId, region, day.toISOString().slice(0, 10), ...Object.values(k)]);
+  for (const u of unmapped.values()) await c.query(
+    `INSERT INTO unmapped_events(account_id, raw_action, event_source, event_name, count, first_seen, last_seen, identity_type, param_keys)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (account_id, raw_action) DO UPDATE SET count=unmapped_events.count+EXCLUDED.count,
+       first_seen=LEAST(unmapped_events.first_seen, EXCLUDED.first_seen), last_seen=GREATEST(unmapped_events.last_seen, EXCLUDED.last_seen),
+       param_keys=(SELECT ARRAY(SELECT DISTINCT unnest(unmapped_events.param_keys || EXCLUDED.param_keys) LIMIT 30))`,
+    [accountId, u.raw, u.source, u.name, u.n, u.first, u.last, u.identity, u.keys || []]);
+}
+
 async function applyEvents(c, evs, roles) {
   const principalIds = new Map();                     // key -> id (this slice)
   const ensurePrincipal = async (role, p, e, extra = {}) => {
@@ -125,7 +167,7 @@ async function applyEvents(c, evs, roles) {
 
   const daily = new Map(), resources = new Map(), passed = new Map();
   for (const e of evs) {
-    const role = roles.get(e.roleArn);
+    const role = roleOf(e, roles);
     if (!role) continue;
     if (e.type === 'assume') {
       if (e.denied) continue;                          // a refused AssumeRole is not a use
@@ -150,11 +192,12 @@ async function applyEvents(c, evs, roles) {
     if (e.accessKeyId) principalId = (await c.query('SELECT principal_id FROM role_sessions WHERE access_key_id=$1', [e.accessKeyId])).rows[0]?.principal_id ?? null;
     if (!principalId) principalId = await ensurePrincipal(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, { via: 'unknown (started before the window)' });
     else await c.query('UPDATE principals SET last_seen=GREATEST(last_seen,$2), first_seen=LEAST(first_seen,$2) WHERE id=$1', [principalId, e.time]);
-    if (!e.action) continue;
+    if (!e.action) continue;                           // no IAM permission involved (console sign-in)
     const day = e.time.toISOString().slice(0, 10);
     const dk = `${role.id}|${principalId}|${e.action}|${day}`;
-    const d = daily.get(dk) || { role: role.id, principal: principalId, action: e.action, day, ok: 0, err: 0 };
+    const d = daily.get(dk) || { role: role.id, principal: principalId, action: e.action, day, ok: 0, err: 0, nores: 0 };
     e.denied ? d.err++ : d.ok++; daily.set(dk, d);
+    if (!e.denied && !e.resources.length) d.nores++;
     if (e.denied) continue;                            // denied calls prove nothing was used
     for (const r of e.resources) {
       const rk = `${role.id}|${e.action}|${r}`;
@@ -169,9 +212,10 @@ async function applyEvents(c, evs, roles) {
     }
   }
   for (const d of daily.values()) await c.query(
-    `INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count) VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (role_id, principal_id, action, day) DO UPDATE SET count=activity_daily.count+EXCLUDED.count, error_count=activity_daily.error_count+EXCLUDED.error_count`,
-    [d.role, d.principal, d.action, d.day, d.ok, d.err]);
+    `INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count, no_resource_count) VALUES ($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT (role_id, principal_id, action, day) DO UPDATE SET count=activity_daily.count+EXCLUDED.count, error_count=activity_daily.error_count+EXCLUDED.error_count,
+       no_resource_count=activity_daily.no_resource_count+EXCLUDED.no_resource_count`,
+    [d.role, d.principal, d.action, d.day, d.ok, d.err, d.nores]);
   for (const x of resources.values()) await c.query(
     `INSERT INTO activity_resources(role_id, action, resource, last_seen, count) VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (role_id, action, resource) DO UPDATE SET count=activity_resources.count+EXCLUDED.count, last_seen=GREATEST(activity_resources.last_seen, EXCLUDED.last_seen)`,

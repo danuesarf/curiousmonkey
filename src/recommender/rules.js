@@ -37,7 +37,8 @@ export function ruleRows(ctx) {
     else if (resources.some(isMatchAll) && a.status === 'used') {
       const obs = ctx.observed.get(a.action) || [];
       const info = actionInfo(a.action);
-      if (obs.length && info?.hasResource && !info.wildcardOnly) resources = [...new Set(obs)].sort();
+      // only when every call named its resource; otherwise unseen targets would break
+      if (obs.length && info?.hasResource && !info.wildcardOnly && !ctx.incomplete?.has(a.action)) resources = [...new Set(obs)].sort();
     }
     const cond = g.conditions.length === 1 ? g.conditions[0].condition : g.conditions.length > 1 ? g.conditions[0].condition : null;
     rows.push({ action: a.action, resources: resources.sort(), condition: cond, group });

@@ -175,3 +175,9 @@ input[aria-invalid=true],select[aria-invalid=true]{border-color:var(--red);box-s
 details>summary{list-style:none;display:inline-flex;align-items:center;width:max-content}
 details>summary::-webkit-details-marker{display:none}
 details[open]>summary{margin-bottom:12px}
+
+/* event coverage */
+.tile.warn{border-color:#e6c98a;background:var(--amber-bg)}
+.sub-row{padding-left:16px;color:var(--ink2)}
+.alert.row{display:flex;align-items:center;gap:12px}.alert .grow,.row .grow{flex:1}
+.action-input{min-width:320px;font-family:var(--mono, ui-monospace, monospace);font-size:13px}

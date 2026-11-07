@@ -17,6 +17,7 @@ const TITLES = {
   'not-logged': (s) => `${s} actions CloudTrail cannot record`,
   'before-window': (s) => `${s} was used before the stored history starts`,
   'service-unknown': (s) => `${s} was used but the actions aren't visible`,
+  'unmapped-event': (s) => `${s} calls were seen that could not be matched to IAM actions`,
 };
 const REASONS = {
   'data-event': (s, r) => `Object/item level ${s} calls are data events. Event History only holds management events, so unused is not provable. ${r ? `Enable data events for ${r} to verify.` : ''}`.trim(),
@@ -24,6 +25,7 @@ const REASONS = {
   'not-logged': (s) => `CloudTrail has no data-event type for ${s} message calls, so no setting can confirm them.`,
   'before-window': (s) => `IAM Access Advisor says ${s} was last used before the oldest event we can read. Which action it was is unknown.`,
   'service-unknown': (s) => `IAM Access Advisor says ${s} was used recently but no matching event was found for these actions.`,
+  'unmapped-event': (s) => `This role made ${s} calls whose CloudTrail event names are not IAM action names, so any of these could be the permission they needed. Map the event names on the account's Event coverage page, then re-analyze.`,
 };
 
 export function analyze({ role, policies, boundaryDoc = null, activity, advisor = [], windowStart, now = new Date() }) {
@@ -46,6 +48,7 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     if (obs && obs.count > 0) { status = 'used'; count = obs.count; lastSeen = obs.lastSeen; }
     else if (action === 'iam:PassRole' && passed.length) { status = 'used'; reason = 'inferred'; count = passed.reduce((n, p) => n + p.count, 0); }
     else if ((reason = unloggableReason(action))) status = 'unconfirmed';
+    else if (activity.unmappedServices?.has(svc)) { status = 'unconfirmed'; reason = 'unmapped-event'; }
     else {
       const last = advisorBy.get(svc);
       if (last && last < windowStart) { status = 'unconfirmed'; reason = 'before-window'; }
@@ -70,7 +73,8 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     flags.push({
       category: cat, key, title: TITLES[cat](svc), actions: list.map((x) => x.action).sort(), resources,
       reason: REASONS[cat](svc, res), evidence: evidenceFor(cat, svc, advisorBy, activity), severity: sev,
-      suggestion: cat === 'data-event' ? 'Keep, scoped to the resources the workload needs, until data events prove otherwise.' : 'Reviewer decides: keep scoped or remove.',
+      suggestion: cat === 'data-event' ? 'Keep, scoped to the resources the workload needs, until data events prove otherwise.'
+        : cat === 'unmapped-event' ? 'Map the event names first; the actions that are really used then show as used.' : 'Reviewer decides: keep scoped or remove.',
       suggestedResources: [], decisionKind: 'action',
     });
   }
@@ -125,6 +129,7 @@ function evidenceFor(cat, svc, advisorBy, activity) {
     const d = advisorBy.get(svc);
     return d ? `Access Advisor: ${svc} last authenticated ${d.toISOString().slice(0, 10)}.` : null;
   }
+  if (cat === 'unmapped-event') return `Unmapped event names: ${(activity.unmappedServices?.get(svc) || []).slice(0, 5).join(', ')}.`;
   if (cat === 'authorization-only' && activity.passroles?.length) return `${activity.passroles.length} role(s) were passed to services in the window.`;
   return null;
 }

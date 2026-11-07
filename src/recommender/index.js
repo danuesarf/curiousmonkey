@@ -7,24 +7,34 @@ import { runChecks, hardFailures, awsValidate } from './checks.js';
 import { draftStatements } from './checks.js';
 import { expandAction, hasService } from '../analyzer/catalog.js';
 import { hasWildcard } from '../analyzer/wildcard.js';
+import { loadMappings, translate } from '../analyzer/mappings.js';
 
 export class Refusal extends Error { constructor(msg, code = 400) { super(msg); this.status = code; } }
 
 export async function loadRoleContext(roleId) {
   const role = (await query('SELECT r.*, a.name AS account_name, a.account_id AS aws_account_id FROM roles r JOIN cloud_accounts a ON a.id=r.account_id WHERE r.id=$1', [roleId])).rows[0];
   if (!role) throw new Refusal('role not found', 404);
-  const [pol, acts, res, dec] = await Promise.all([
+  const [pol, acts, res, dec, nores, maps] = await Promise.all([
     query('SELECT name, kind, aws_managed, arn, document FROM role_policies WHERE role_id=$1 ORDER BY kind, name', [roleId]),
     query('SELECT action, status, reason, access_level AS level, event_count, last_seen FROM role_actions WHERE role_id=$1', [roleId]),
     query('SELECT action, resource FROM activity_resources WHERE role_id=$1', [roleId]),
     query(`SELECT f.actions, d.decision, d.resources FROM review_decisions d JOIN flags f ON f.id=d.flag_id WHERE d.role_id=$1 AND f.status='open'`, [roleId]),
+    query('SELECT action FROM activity_daily WHERE role_id=$1 GROUP BY action HAVING sum(no_resource_count) > 0', [roleId]),
+    loadMappings(),
   ]);
   const observed = new Map();
-  for (const r of res.rows) { if (!observed.has(r.action)) observed.set(r.action, []); observed.get(r.action).push(r.resource); }
+  for (const r of res.rows) {
+    const a = translate(r.action, maps).action;
+    if (!a) continue;
+    if (!observed.has(a)) observed.set(a, []);
+    observed.get(a).push(r.resource);
+  }
+  // Some calls of these actions named no resource, so the resources seen are not the whole story.
+  const incomplete = new Set(nores.rows.map((r) => translate(r.action, maps).action).filter(Boolean));
   const decisions = new Map();
   for (const d of dec.rows) for (const a of d.actions) decisions.set(a, { decision: d.decision, resources: d.resources });
   const boundary = role.boundary_arn ? (await query('SELECT document FROM managed_policy_cache WHERE arn=$1 ORDER BY fetched_at DESC LIMIT 1', [role.boundary_arn])).rows[0]?.document : null;
-  return { role, policies: pol.rows, grants: computeGrants(pol.rows, { permissionsBoundary: boundary }), actions: acts.rows, observed, decisions, boundaryDoc: boundary };
+  return { role, policies: pol.rows, grants: computeGrants(pol.rows, { permissionsBoundary: boundary }), actions: acts.rows, observed, incomplete, decisions, boundaryDoc: boundary };
 }
 
 function buildDiff(ctx, policies) {
@@ -52,7 +62,7 @@ export async function recommend(roleId, { instruction = null, userId = null, llm
   if (ctx.role.kind === 'service-linked') throw new Refusal('Service-linked roles are managed by AWS and cannot be edited. They are reported only.', 409);
   if (!ctx.role.analyzed_at) throw new Refusal('This role has not been analysed yet', 409);
   const base = policyBase(ctx.role);
-  const origin = { originalPolicies: ctx.policies, boundaryDoc: ctx.boundaryDoc, actions: ctx.actions, observed: ctx.observed, decisions: ctx.decisions };
+  const origin = { originalPolicies: ctx.policies, boundaryDoc: ctx.boundaryDoc, actions: ctx.actions, observed: ctx.observed, incomplete: ctx.incomplete, decisions: ctx.decisions };
 
   let draft = null, model = null, note = null;
   const useAi = llm !== null && (llm || config.ai.enabled);

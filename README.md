@@ -43,6 +43,19 @@ The **Connect an AWS account** wizard has four steps. Nothing is saved until the
 
 Edit an account at any time. Switching source keeps the stored history. Widening the lookback backfills only the older days. The worker logs which AWS identity it runs as at startup, and the wizard shows it.
 
+## Event coverage
+
+Each account has an **Event coverage** page that accounts for every CloudTrail event read: role sessions, role calls, events outside scope (IAM users, root, services, roles the account doesn't have), and three cases that need care:
+
+- **Role found by name:** some events have no `sessionIssuer`, so the role is recovered from the session ARN.
+- **Unmapped event names:** CloudTrail event names don't always match IAM action names. Known mismatches are handled, including versioned names like `GetDistribution2020_05_31`.
+  - Calls under an unknown name are kept under the raw name, and the rest of that service is marked *unconfirmed (unmapped event)*, never *unused*.
+  - Map the name by hand, or with **Suggest with Bedrock** (`BEDROCK_ENABLED=true`). Bedrock only suggests: a reviewer accepts each mapping, and only real IAM actions are accepted.
+  - A mapping applies to every account and credits history already stored. No rescan is needed, only a re-analysis.
+- **Calls that named no resource:** CloudTrail fills in `resources` for some events only. If any call of an action named no resource, the draft keeps that action's granted resources instead of narrowing to the ones seen, and the replay check enforces it.
+
+Only event names and request parameter *names* are kept, never parameter values.
+
 ## Access
 
 Roles: owner, admin, reviewer, account owner, auditor. Reviewers belong to Infrastructure Security or Information Security. Identity Center roles go to Information Security, service-linked roles to Infrastructure Security. High-risk roles need both teams. Everything can be limited to some accounts. Sign-in uses scrypt passwords, TOTP two-factor (required for privileged roles) and an audit log.

@@ -1,10 +1,12 @@
 import { query, tx } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
+import { loadMappings, translate } from '../analyzer/mappings.js';
 
 const DAY = 864e5;
 
-export async function analyzeRole(role, windowStart, now = new Date()) {
+export async function analyzeRole(role, windowStart, now = new Date(), maps = null) {
+  maps = maps || await loadMappings();
   const [pol, act, prin, pass, adv, boundary] = await Promise.all([
     query('SELECT name, kind, document FROM role_policies WHERE role_id=$1', [role.id]),
     query('SELECT action, sum(count)::int AS count, max(day) AS last FROM activity_daily WHERE role_id=$1 GROUP BY action HAVING sum(count) > 0', [role.id]),
@@ -14,9 +16,17 @@ export async function analyzeRole(role, windowStart, now = new Date()) {
     role.boundary_arn ? query('SELECT document FROM managed_policy_cache WHERE arn=$1 ORDER BY fetched_at DESC LIMIT 1', [role.boundary_arn]) : { rows: [] },
   ]);
   const principals = prin.rows.map((p) => ({ ...p, trust: p.caller?.trust || matchTrust(role.trust_policy, p.caller || {}, p.via) }));
+  const actions = new Map(), unmappedServices = new Map();
+  for (const r of act.rows) {
+    const t = translate(r.action, maps);
+    if (t.none) continue;
+    if (t.unmapped) { const u = unmappedServices.get(t.unmapped) || []; u.push(r.action); unmappedServices.set(t.unmapped, u); continue; }
+    const prev = actions.get(t.action);
+    actions.set(t.action, prev ? { count: prev.count + r.count, lastSeen: prev.lastSeen > r.last ? prev.lastSeen : r.last } : { count: r.count, lastSeen: r.last });
+  }
   return analyze({
     role, policies: pol.rows, boundaryDoc: boundary.rows[0]?.document || null, windowStart, now,
-    activity: { actions: new Map(act.rows.map((r) => [r.action, { count: r.count, lastSeen: r.last }])), passroles: pass.rows, principals },
+    activity: { actions, unmappedServices, passroles: pass.rows, principals },
     advisor: adv.rows,
   });
 }
@@ -59,10 +69,11 @@ export async function runAnalyze(ctx) {
   // The oldest event we hold is the edge of what "unused" can honestly mean.
   const cp = (await query('SELECT min(first_event_time) AS t FROM scan_checkpoints WHERE account_id=$1', [ctx.job.account_id])).rows[0];
   const windowStart = cp.t ? new Date(cp.t) : new Date(Date.now() - 90 * DAY);
+  const maps = await loadMappings();
   let done = 0;
   for (const role of roles) {
     ctx.alive();
-    await persistAnalysis(role.id, await analyzeRole(role, windowStart));
+    await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps));
     await ctx.progress({ phase: 'analyze', done: ++done, total: roles.length });
   }
   return { roles: roles.length };

@@ -1,8 +1,8 @@
 import { h, svg, get, post, api, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, toast, copy, modal, KIND, TEAM, field } from '../lib.js';
 import { session, go } from '../main.js';
 
-const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
-const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown']);
+const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
+const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 
 export async function rolePage(ctx, id) {
   const d = await get(`/roles/${id}`);
