@@ -7,42 +7,63 @@ import { loadContext } from './inventory.js';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3600e3, MIN = 60e3, DAY = 24 * HOUR;
 
-/** Everything needed to resume lives in scan_checkpoints, so a retry never reads a finished slice again. */
+/** Days of history to keep reading. Event History stops at 90; an S3 trail goes as far back as its files. */
+export const lookbackFor = (account) => (account.event_source === 's3' ? account.lookback_days : Math.min(account.lookback_days || 90, 90));
+
+/**
+ * Everything needed to resume lives in scan_checkpoints, so a retry never reads a finished slice again.
+ * Forward slices continue from the newest stored event. If the window was widened (or the source switched to an
+ * S3 trail with a longer lookback), the older range is backfilled newest-first so a crash resumes where it stopped.
+ */
 export async function runEvents(ctx) {
   const { account, gw } = await loadContext(ctx.job.account_id);
   const region = ctx.job.region;
   const s = config.scanner;
+  const src = account.event_source === 's3' ? 's3' : 'event-history';
   const now = Date.now();
   const end = now - s.deliveryLagMinutes * MIN;                // newest events may not be delivered yet
-  const horizon = now - s.lookbackDays * DAY;                  // Event History keeps 90 days
+  const horizon = now - lookbackFor(account) * DAY;
+  const step = s.sliceHours * HOUR;
 
-  const cp = (await query(`SELECT * FROM scan_checkpoints WHERE account_id=$1 AND region=$2 AND source='event-history'`, [account.id, region])).rows[0];
-  let start, gap = false;
-  if (!cp) start = horizon;
-  else {
-    start = new Date(cp.last_event_time).getTime() - s.overlapMinutes * MIN;   // overlap catches late delivery; seen_events removes dupes
-    if (start < horizon) { start = horizon; gap = true; }                       // the worker was down longer than the history lasts
+  const cp = (await query(`SELECT * FROM scan_checkpoints WHERE account_id=$1 AND region=$2`, [account.id, region])).rows[0];
+  const slices = [];          // [start, end, kind]
+  let gap = false;
+  if (!cp) {
+    for (let t = horizon; t < end; t += step) slices.push([t, Math.min(t + step, end), 'forward']);
+  } else {
+    const first = new Date(cp.first_event_time || cp.last_event_time).getTime();
+    for (let t = first; t > horizon; t -= step) slices.push([Math.max(t - step, horizon), t, 'backfill']);
+    let start = new Date(cp.last_event_time).getTime() - s.overlapMinutes * MIN;   // overlap catches late delivery; seen_events removes dupes
+    if (start < horizon) { start = horizon; gap = true; }                           // the worker was down longer than the history lasts
+    for (let t = start; t < end; t += step) slices.push([t, Math.min(t + step, end), 'forward']);
   }
-  if (start >= end) return { skipped: 'up to date' };
+  if (!slices.length) return { skipped: 'up to date' };
 
-  const slices = [];
-  for (let t = start; t < end; t += s.sliceHours * HOUR) slices.push([t, Math.min(t + s.sliceHours * HOUR, end)]);
   const roleIds = new Map((await query(`SELECT arn, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows.map((r) => [r.arn, r]));
-
+  const listCache = new Map();
+  const t0 = Date.now();
+  let rate = null;                                             // seconds per slice, smoothed
   let total = 0;
   for (let i = 0; i < slices.length; i++) {
     ctx.alive();
-    const [a, b] = slices[i];
+    const [a, b, kind] = slices[i];
+    const sliceStart = Date.now();
     const raw = [];
-    let token = null;
-    do {
-      const page = await gw.lookupEventsPage({ region, start: new Date(a), end: new Date(b), token });
-      raw.push(...page.events);
-      token = page.nextToken;
-      if (token && s.lookupDelayMs) await sleep(s.lookupDelayMs);               // LookupEvents: 2 requests/second
-    } while (token);
+    if (src === 's3') raw.push(...await gw.trailEventsForSlice({ region, start: new Date(a), end: new Date(b), listCache }));
+    else {
+      let token = null;
+      do {
+        const page = await gw.lookupEventsPage({ region, start: new Date(a), end: new Date(b), token });
+        raw.push(...page.events);
+        token = page.nextToken;
+        if (token && s.lookupDelayMs) await sleep(s.lookupDelayMs);             // LookupEvents: 2 requests/second
+      } while (token);
+    }
 
     const n = await tx(async (c) => {
+      // Regions of one account fetch in parallel but write one at a time: they update the same roles' rows,
+      // and two transactions taking those row locks in different orders deadlock.
+      await c.query('SELECT pg_advisory_xact_lock(727100, hashtext($1))', [account.id]);
       const parsed = raw.map(parseEvent).filter((e) => e.type !== 'ignore');
       const ids = parsed.map((e) => e.id);
       const fresh = new Set((await c.query(
@@ -53,17 +74,22 @@ export async function runEvents(ctx) {
       await applyEvents(c, evs, roleIds);
       await c.query(
         `INSERT INTO scan_checkpoints(account_id, region, source, first_event_time, last_event_time, events_read, gap_detected, last_run_at)
-         VALUES ($1,$2,'event-history',to_timestamp($3),to_timestamp($4),$5,$6,now())
-         ON CONFLICT (account_id, region, source) DO UPDATE SET
+         VALUES ($1,$2,$7,to_timestamp($3),to_timestamp($4),$5,$6,now())
+         ON CONFLICT (account_id, region) DO UPDATE SET source=EXCLUDED.source,
            last_event_time=GREATEST(scan_checkpoints.last_event_time, EXCLUDED.last_event_time),
-           first_event_time=COALESCE(scan_checkpoints.first_event_time, EXCLUDED.first_event_time),
+           first_event_time=LEAST(COALESCE(scan_checkpoints.first_event_time, EXCLUDED.first_event_time), EXCLUDED.first_event_time),
            events_read=scan_checkpoints.events_read+EXCLUDED.events_read,
            gap_detected=scan_checkpoints.gap_detected OR EXCLUDED.gap_detected, last_run_at=now()`,
-        [account.id, region, a / 1000, b / 1000, evs.length, gap]);
+        [account.id, region, a / 1000, kind === 'backfill' ? (cp?.last_event_time ? new Date(cp.last_event_time).getTime() / 1000 : b / 1000) : b / 1000, evs.length, gap, src]);
       return evs.length;
     });
     total += n;
-    await ctx.progress({ phase: 'events', region, slice: new Date(b).toISOString(), done: i + 1, total: slices.length, events: total });
+    const took = (Date.now() - sliceStart) / 1000;
+    rate = rate == null ? took : rate * 0.8 + took * 0.2;      // recent slices count more; busy and quiet days differ
+    const elapsed = (Date.now() - t0) / 1000;
+    await ctx.progress({ phase: 'events', source: src, region, slice: new Date(kind === 'backfill' ? a : b).toISOString(), direction: kind,
+      done: i + 1, total: slices.length, events: total, elapsedSeconds: Math.round(elapsed),
+      etaSeconds: Math.round(rate * (slices.length - i - 1)), eventsPerSecond: elapsed > 0 ? Math.round(total / elapsed) : null });
   }
   await query(`DELETE FROM seen_events WHERE event_time < now() - interval '3 days'`);
   await query(`DELETE FROM role_sessions WHERE started_at < now() - interval '2 days'`);   // credentials last at most 12h

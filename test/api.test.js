@@ -27,7 +27,7 @@ class Client {
     if (json?.csrf) this.csrf = json.csrf;
     return { status: r.status, json, text, headers: r.headers };
   }
-  get(p) { return this.call('GET', p); } post(p, b, o) { return this.call('POST', p, b ?? {}, o); }
+  get(p) { return this.call('GET', p); } post(p, b, o) { return this.call('POST', p, b ?? {}, o); } patch(p, b) { return this.call('PATCH', p, b ?? {}); }
 }
 async function drain() { for (let j; (j = await q.claimJob());) { try { await w.runJob(j); } catch (e) { await q.failJob(j, e); } } }
 const PW = 'correct horse battery staple';
@@ -103,6 +103,36 @@ test('onboarding: snippets carry the ExternalId; accounts validate; duplicates a
   assert.equal(a.status, 201); accA = a.json.id; accB = b.json.id;
   assert.equal((await owner.post('/api/accounts', { name: 'dup', accountId: '111111111111' })).status, 409);
   assert.equal(a.json.role_arn, 'arn:aws:iam::111111111111:role/CuriousMonkeyScanner');
+});
+
+test('accounts: access modes, S3 source and edits; stored keys never come back', async () => {
+  // Fake key, assembled at runtime so it never sits in the source as a literal (secret scanners flag those).
+  const KEY = { accessKeyId: ['AK', 'IA', 'ABCDEFGHIJKLMNOP'].join(''), secretAccessKey: ['abcdefghijklmnop', 'qrstuvwxyz0123456789ABCD'].join('') };
+  // access-key mode needs keys; Event History cannot go past 90 days; S3 needs a bucket
+  assert.equal((await owner.post('/api/accounts', { name: 'u', accountId: '555555555555', authMode: 'access_key' })).json.field, 'credentials');
+  assert.equal((await owner.post('/api/accounts', { name: 'u', accountId: '555555555555', lookbackDays: 120 })).json.field, 'lookbackDays');
+  assert.equal((await owner.post('/api/accounts', { name: 'u', accountId: '555555555555', eventSource: 's3' })).json.field, 's3.bucket');
+  const u = await owner.post('/api/accounts', { name: 'user-mode', accountId: '555555555555', authMode: 'access_key', credentials: KEY,
+    eventSource: 's3', lookbackDays: 365, s3: { bucket: 'kbi-org-cloudtrail', prefix: 'org', orgId: 'o-abc123def4' } });
+  assert.equal(u.status, 201);
+  assert.equal(u.json.credentials_enc, undefined); assert.equal(u.json.has_credentials, true); assert.equal(u.json.credentials_hint, 'AKIA…MNOP');
+  assert.equal(u.json.role_arn, null); assert.equal(u.json.lookback_days, 365);
+  assert.doesNotMatch((await owner.get('/api/accounts')).text, /credentials_enc|abcdefghijklmnop/);
+  const stored = (await db.query('SELECT credentials_enc FROM cloud_accounts WHERE id=$1', [u.json.id])).rows[0].credentials_enc;
+  assert.doesNotMatch(stored, /abcdefghijklmnop/);                         // encrypted at rest
+  // edit: rename keeps the keys and the status; switching to an assumed role with system credentials drops the keys
+  await db.query(`UPDATE cloud_accounts SET status='connected' WHERE id=$1`, [u.json.id]);
+  const r1 = await owner.patch(`/api/accounts/${u.json.id}`, { name: 'renamed' });
+  assert.equal(r1.json.name, 'renamed'); assert.equal(r1.json.has_credentials, true); assert.equal(r1.json.status, 'connected'); assert.equal(r1.json.accessChanged, false);
+  assert.equal((await owner.patch(`/api/accounts/${u.json.id}`, { eventSource: 'event-history' })).json.field, 'lookbackDays');
+  const r2 = await owner.patch(`/api/accounts/${u.json.id}`, { authMode: 'assume_role', baseIdentity: 'system', roleName: 'CmScanner' });
+  assert.equal(r2.json.has_credentials, false); assert.equal(r2.json.status, 'pending'); assert.equal(r2.json.role_arn, 'arn:aws:iam::555555555555:role/CmScanner');
+  // snippets follow the mode and the bucket
+  const sn = await owner.get('/api/onboarding/snippets?mode=assume_role&bucket=kbi-org-cloudtrail&prefix=org&principal=arn:aws:iam::999999999999:role/cm-worker');
+  assert.match(sn.json.terraform, /NotResource/); assert.match(sn.json.terraform, /cm-worker/); assert.ok(sn.json.basePolicy);
+  assert.match((await owner.get('/api/onboarding/snippets?mode=access_key')).json.terraform, /aws_iam_user/);
+  assert.equal((await owner.get('/api/onboarding/identity')).status, 200);
+  await owner.call('DELETE', `/api/accounts/${u.json.id}`);
 });
 
 test('verify queues a scan; the worker connects the account and fills the portal', async () => {

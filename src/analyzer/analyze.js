@@ -15,7 +15,7 @@ const TITLES = {
   'data-event': (s) => `${s} data-plane actions can't be confirmed from event history`,
   'authorization-only': () => `Checked by AWS but never logged by CloudTrail`,
   'not-logged': (s) => `${s} actions CloudTrail cannot record`,
-  'before-window': (s) => `${s} was used before the 90-day window`,
+  'before-window': (s) => `${s} was used before the stored history starts`,
   'service-unknown': (s) => `${s} was used but the actions aren't visible`,
 };
 const REASONS = {

@@ -31,7 +31,10 @@ export async function runInventory(ctx) {
     }
   } catch (e) {
     // Show the reason on the account itself so the person onboarding it can fix the trust policy or ExternalId.
-    if (e.retryable === false || /AccessDenied|not authorized|ExternalId|InvalidClientTokenId/i.test(`${e.name} ${e.message}`)) {
+    if (e.name === 'CredentialsProviderError' || /Could not load credentials/i.test(e.message)) {
+      e.message = 'The worker has no AWS credentials to start from. Give the worker an instance, task or pod role, put keys in its .env, or store keys on this account (Edit account).';
+    }
+    if (e.retryable === false || /AccessDenied|not authorized|ExternalId|InvalidClientTokenId|SignatureDoesNotMatch|ExpiredToken|no AWS credentials/i.test(`${e.name} ${e.message}`)) {
       await query(`UPDATE cloud_accounts SET status='error', status_detail=$2 WHERE id=$1`,
         [ctx.job.account_id, JSON.stringify({ message: String(e.message).slice(0, 400), at: new Date().toISOString() })]);
       e.retryable = false;
@@ -95,8 +98,9 @@ export async function runInventory(ctx) {
     for (const f of found) {
       await c.query(
         `INSERT INTO data_event_sources(account_id, source_name, source_type, resource_type, arn_patterns, read_write, readable)
-         VALUES ($1,$2,$3,$4,$5,$6,false) ON CONFLICT DO NOTHING`,
-        [account.id, f.name, f.type, f.resourceType, f.arnPatterns, f.readWrite]);
+         VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING`,
+        [account.id, f.name, f.type, f.resourceType, f.arnPatterns, f.readWrite,
+         account.event_source === 's3' && !!f.bucket && f.bucket === account.s3_bucket]);   // readable: we ingest this trail's files
     }
   });
   await query(`UPDATE cloud_accounts SET status='connected', status_detail=NULL WHERE id=$1`, [account.id]);

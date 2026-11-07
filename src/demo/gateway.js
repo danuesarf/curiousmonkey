@@ -95,9 +95,16 @@ export function demoGateway(account) {
       const next = from + 50;
       return { events: all.slice(from, next), nextToken: next < all.length ? String(next) : null };
     },
+    async trailEventsForSlice({ region, start, end }) {
+      const all = [];
+      for (let h = Math.floor(start.getTime() / HOUR) * HOUR; h < end.getTime(); h += HOUR) {
+        for (const e of eventsForHour(h, region)) { const t = new Date(e.eventTime).getTime(); if (t >= start.getTime() && t < end.getTime()) all.push(e); }
+      }
+      return all;
+    },
     async discoverDataEvents() {
-      return [{ name: 'org-trail', type: 'trail', resourceType: 'AWS::S3::Object', readWrite: 'All', arnPatterns: ['arn:aws:s3:::kbi-payments-docs/'] },
-              { name: 'org-trail', type: 'trail', resourceType: 'AWS::Lambda::Function', readWrite: 'WriteOnly', arnPatterns: ['arn:aws:lambda'] }];
+      return [{ name: 'org-trail', bucket: 'kbi-org-cloudtrail', type: 'trail', resourceType: 'AWS::S3::Object', readWrite: 'All', arnPatterns: ['arn:aws:s3:::kbi-payments-docs/'] },
+              { name: 'org-trail', bucket: 'kbi-org-cloudtrail', type: 'trail', resourceType: 'AWS::Lambda::Function', readWrite: 'WriteOnly', arnPatterns: ['arn:aws:lambda'] }];
     },
   };
 }

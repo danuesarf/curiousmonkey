@@ -1,3 +1,4 @@
+import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
 import { fileURLToPath } from 'node:url';
 import { config, assertConfig } from './config.js';
@@ -103,9 +104,31 @@ export async function scheduleTick(now = new Date()) {
   }
 }
 
+/** Which AWS identity the default credential chain gives this worker. Shown during onboarding ("system credentials"). */
+async function reportIdentity() {
+  let identity;
+  if (config.awsMode === 'demo') identity = { mode: 'demo', arn: 'arn:aws:iam::000000000000:user/demo-worker', principal: 'arn:aws:iam::000000000000:user/demo-worker' };
+  else {
+    try {
+      const { STSClient, GetCallerIdentityCommand } = await import('@aws-sdk/client-sts');
+      const id = await new STSClient({ region: process.env.AWS_REGION || 'us-east-1' }).send(new GetCallerIdentityCommand({}));
+      identity = { mode: 'aws', arn: id.Arn, account: id.Account, principal: principalFromCallerArn(id.Arn) };
+      if (config.scanner.principalArn && config.scanner.principalArn !== identity.principal) {
+        log('warn', 'SCANNER_PRINCIPAL_ARN does not match the worker identity', { configured: config.scanner.principalArn, actual: identity.principal });
+      }
+    } catch (e) {
+      identity = { mode: 'aws', error: /Could not load credentials/i.test(e.message) ? 'No credentials found (no keys in the environment and no instance, task or pod role).' : e.message };
+    }
+  }
+  identity.at = new Date().toISOString();
+  await query('UPDATE workers SET aws_identity=$2 WHERE id=$1', [workerId, JSON.stringify(identity)]);
+  log(identity.error ? 'warn' : 'info', 'worker aws identity', identity);
+}
+
 export async function startWorker({ concurrency = Number(process.env.WORKER_CONCURRENCY || 2), scheduler = true } = {}) {
   const stop = { stopped: false };
   await registerWorker();
+  reportIdentity().catch(() => {});
   const timers = [
     setInterval(() => workerBeat().catch(() => {}), 15_000),
     setInterval(() => reapExpired().then((n) => n && log('warn', 'reaped expired jobs', { n })).catch(() => {}), 30_000),

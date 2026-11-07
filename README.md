@@ -27,6 +27,22 @@ Kubernetes: `kubectl apply -k deploy/k8s` (copy `secret.example.yaml` to a real 
 - CloudTrail Event History keeps 90 days. If the worker is down longer than that, the gap is shown on the account page.
 - Monitor everything under **Scan activity** (workers, queue, per-job progress, logs, retry, cancel). Prometheus metrics are on the worker at `:8081/metrics`.
 
+## Connecting an account
+
+The **Connect an AWS account** wizard has four steps. Nothing is saved until the last one.
+
+1. **Account**: name, account ID, environment, regions.
+2. **CloudTrail source**:
+   - **Event History** works out of the box. It covers at most 90 days, holds management events only, and is slow, because AWS allows 2 requests a second (about 100 events a second per region).
+   - **S3 trail** reads the trail's log files. It has no request limit, so it usually takes minutes. History goes as far back as the files exist (up to 2 years here), and it includes data events if the trail logs them.
+   - The wizard estimates the first scan's duration. Scan activity shows a live ETA while it runs.
+3. **Access**:
+   - **Assume a scanner role** (recommended). The base identity is either the worker's own credentials (instance, task or pod role, or keys in `.env`) or an access key stored encrypted on the account.
+   - **IAM user access key**: the keys of a dedicated read-only user, used directly.
+4. **Deploy and connect**: apply the Terraform or CloudFormation template, then connect. You land on Scan activity.
+
+Edit an account at any time. Switching source keeps the stored history. Widening the lookback backfills only the older days. The worker logs which AWS identity it runs as at startup, and the wizard shows it.
+
 ## Access
 
 Roles: owner, admin, reviewer, account owner, auditor. Reviewers belong to Infrastructure Security or Information Security. Identity Center roles go to Information Security, service-linked roles to Infrastructure Security. High-risk roles need both teams. Everything can be limited to some accounts. Sign-in uses scrypt passwords, TOTP two-factor (required for privileged roles) and an audit log.

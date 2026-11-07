@@ -31,7 +31,7 @@ export const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChil
 
 let csrf = '';
 export const setCsrf = (t) => { csrf = t; };
-export class ApiError extends Error { constructor(status, body) { super(body?.message || body?.error || `Request failed (${status})`); this.status = status; this.code = body?.error; } }
+export class ApiError extends Error { constructor(status, body) { super(body?.message || body?.error || `Request failed (${status})`); this.status = status; this.code = body?.error; this.field = body?.field; } }
 export async function api(method, path, body) {
   const r = await fetch(`/api${path}`, { method, credentials: 'same-origin',
     headers: { 'content-type': 'application/json', ...(csrf ? { 'x-csrf-token': csrf } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });

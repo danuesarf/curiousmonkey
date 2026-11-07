@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { query } from '../db.js';
+import { query, tx } from '../db.js';
 import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { inScope, scopeSql } from '../auth/rbac.js';
 import { enqueueRun } from '../queue.js';
 import { scannerSnippets } from '../onboarding.js';
+import { sealCredentials } from '../aws/credentials.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
 export const data = Router();
@@ -27,28 +28,143 @@ const roleFor = async (req, id) => {
 };
 
 // ---------- onboarding and accounts ----------
-data.get('/onboarding/snippets', requirePerm('accounts'), wrap(async (req, res) => {
-  const ws = (await query('SELECT external_id FROM workspace')).rows[0];
-  const roleName = z.string().regex(/^[\w+=,.@-]{1,64}$/).default(config.scanner.roleName).parse(req.query.roleName || undefined);
-  const s = scannerSnippets({ principalArn: config.scanner.principalArn, roleName, externalId: ws.external_id });
-  res.json({ roleName, externalId: ws.external_id, principalArn: config.scanner.principalArn || null, terraform: s.terraform, cloudformation: s.cloudformation, permissions: s.perms });
+const ROLE_NAME = /^[\w+=,.@-]{1,64}$/;
+const ARN = /^arn:aws[\w-]*:(iam|sts)::\d{12}:[\w+=,.@\/-]+$/;
+const S3In = z.object({
+  bucket: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'Not a valid S3 bucket name'),
+  prefix: z.string().trim().max(200).regex(/^[\w!\-.*'()/]*$/, 'Prefix has characters S3 keys cannot use').optional().nullable(),
+  orgId: z.string().trim().regex(/^o-[a-z0-9]{10,32}$/, 'Organization IDs look like o-abc123def4').optional().nullable().or(z.literal('')),
+  region: z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/).optional().nullable().or(z.literal('')),
+});
+const KeysIn = z.object({
+  accessKeyId: z.string().trim().regex(/^(AKIA|ASIA)[A-Z0-9]{12,20}$/, 'Access key IDs start with AKIA or ASIA'),
+  secretAccessKey: z.string().trim().min(30).max(128),
+  sessionToken: z.string().trim().max(4000).optional().nullable().or(z.literal('')),
+});
+const AccountFields = {
+  name: z.string().trim().min(1).max(80),
+  environment: z.enum(['production', 'staging', 'development', 'sandbox']),
+  regions: z.array(z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/)).min(1).max(20),
+  eventSource: z.enum(['event-history', 's3']),
+  lookbackDays: z.number().int().min(1).max(730),
+  s3: S3In.nullable(),
+  authMode: z.enum(['assume_role', 'access_key']),
+  baseIdentity: z.enum(['system', 'stored']),
+  roleName: z.string().regex(ROLE_NAME),
+  trustPrincipal: z.string().trim().regex(ARN, 'Use an IAM role or user ARN').nullable().or(z.literal('')),
+  credentials: KeysIn.nullable(),
+};
+const AccountIn = z.object({
+  ...AccountFields, accountId: z.string().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
+  environment: AccountFields.environment.default('production'), regions: AccountFields.regions.default(config.scanner.defaultRegions),
+  eventSource: AccountFields.eventSource.default('event-history'), lookbackDays: AccountFields.lookbackDays.default(90),
+  s3: AccountFields.s3.default(null), authMode: AccountFields.authMode.default('assume_role'), baseIdentity: AccountFields.baseIdentity.default('system'),
+  roleName: AccountFields.roleName.default(config.scanner.roleName), trustPrincipal: AccountFields.trustPrincipal.default(null),
+  credentials: AccountFields.credentials.default(null),
+});
+const AccountPatch = z.object({ ...Object.fromEntries(Object.entries(AccountFields).map(([k, v]) => [k, v.optional()])), rebuildHistory: z.boolean().optional() });
+
+const say = (res, message, field) => res.status(400).json({ error: 'invalid', message, field });
+/** Rules that span several fields. Returns an error message or null. */
+function checkAccount(x, hasStored) {
+  if (x.eventSource === 's3' && !x.s3?.bucket) return ['Name the S3 bucket your trail writes to.', 's3.bucket'];
+  if (x.eventSource === 'event-history' && x.lookbackDays > 90) return ['Event History only keeps 90 days. Pick 90 or less, or use an S3 trail.', 'lookbackDays'];
+  const needsKeys = x.authMode === 'access_key' || x.baseIdentity === 'stored';
+  if (needsKeys && !x.credentials && !hasStored) return [x.authMode === 'access_key' ? 'Enter the scanner user’s access key.' : 'Enter the access key the worker should start from.', 'credentials'];
+  return null;
+}
+function accountColumns(x, accountId, prev = {}) {
+  const needsKeys = x.authMode === 'access_key' || x.baseIdentity === 'stored';
+  const cols = {
+    name: x.name, environment: x.environment, regions: x.regions,
+    event_source: x.eventSource, lookback_days: x.lookbackDays,
+    s3_bucket: x.eventSource === 's3' ? x.s3.bucket : null, s3_prefix: x.eventSource === 's3' ? x.s3.prefix || null : null,
+    s3_org_id: x.eventSource === 's3' ? x.s3.orgId || null : null, s3_region: x.eventSource === 's3' ? x.s3.region || null : null,
+    auth_mode: x.authMode, base_identity: x.authMode === 'access_key' ? 'stored' : x.baseIdentity,
+    role_arn: x.authMode === 'assume_role' ? `arn:aws:iam::${accountId}:role/${x.roleName}` : null,
+    trust_principal: x.authMode === 'assume_role' ? x.trustPrincipal || null : null,
+  };
+  if (x.credentials) {
+    const sealed = sealCredentials({ ...x.credentials, sessionToken: x.credentials.sessionToken || undefined });
+    cols.credentials_enc = sealed.enc; cols.credentials_hint = sealed.hint;
+  } else if (!needsKeys) { cols.credentials_enc = null; cols.credentials_hint = null; }   // keys nobody uses are not kept
+  else { cols.credentials_enc = prev.credentials_enc; cols.credentials_hint = prev.credentials_hint; }
+  return cols;
+}
+/** The account as the API returns it. Stored secrets never leave the server. */
+export function publicAccount(a) {
+  const { credentials_enc, ...rest } = a;
+  return { ...rest, has_credentials: !!credentials_enc, role_name: a.role_arn ? a.role_arn.split('/').pop() : null };
+}
+
+data.get('/onboarding/identity', requirePerm('accounts'), wrap(async (req, res) => {
+  const w = (await query(`SELECT aws_identity, heartbeat_at > now() - interval '2 minutes' AS alive FROM workers
+    WHERE aws_identity IS NOT NULL ORDER BY (heartbeat_at > now() - interval '2 minutes') DESC, heartbeat_at DESC LIMIT 1`)).rows[0];
+  res.json({ awsMode: config.awsMode, configuredPrincipal: config.scanner.principalArn || null, worker: w ? { ...w.aws_identity, alive: w.alive } : null });
 }));
 
-const AccountIn = z.object({
-  name: z.string().trim().min(1).max(80), accountId: z.string().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
-  environment: z.enum(['production', 'staging', 'development', 'sandbox']).default('production'),
-  regions: z.array(z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/)).min(1).max(20).default(config.scanner.defaultRegions),
-  roleName: z.string().regex(/^[\w+=,.@-]{1,64}$/).default(config.scanner.roleName),
-});
+data.get('/onboarding/snippets', requirePerm('accounts'), wrap(async (req, res) => {
+  const ws = (await query('SELECT external_id FROM workspace')).rows[0];
+  const q = z.object({
+    mode: z.enum(['assume_role', 'access_key']).default('assume_role'),
+    roleName: z.string().regex(ROLE_NAME).default(config.scanner.roleName),
+    principal: z.string().regex(ARN).optional(),
+    bucket: z.string().optional(), prefix: z.string().optional(),
+  }).parse(Object.fromEntries(Object.entries(req.query).filter(([, v]) => v !== '')));
+  const s3 = q.bucket ? S3In.parse({ bucket: q.bucket, prefix: q.prefix || null }) : null;
+  const principal = q.principal || config.scanner.principalArn || null;
+  const s = scannerSnippets({ mode: q.mode, principalArn: principal, roleName: q.roleName, externalId: ws.external_id, s3 });
+  res.json({ ...s, roleName: q.roleName, externalId: ws.external_id, principalArn: principal, permissions: s.perms });
+}));
+
 data.post('/accounts', requirePerm('accounts'), wrap(async (req, res) => {
   const b = AccountIn.parse(req.body);
+  const bad = checkAccount(b, false);
+  if (bad) return say(res, ...bad);
   const dup = await query('SELECT 1 FROM cloud_accounts WHERE account_id=$1', [b.accountId]);
-  if (dup.rowCount) return res.status(409).json({ error: 'exists', message: 'That AWS account is already connected.' });
-  const row = (await query(
-    `INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, created_by) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-    [b.accountId, b.name, b.environment, `arn:aws:iam::${b.accountId}:role/${b.roleName}`, b.regions, req.user.id])).rows[0];
-  await audit(req, 'account.create', { type: 'account', id: row.id }, { accountId: b.accountId });
-  res.status(201).json(row);
+  if (dup.rowCount) return res.status(409).json({ error: 'exists', message: 'That AWS account is already connected.', field: 'accountId' });
+  const cols = { account_id: b.accountId, ...accountColumns(b, b.accountId), created_by: req.user.id };
+  const keys = Object.keys(cols);
+  const row = (await query(`INSERT INTO cloud_accounts(${keys.join(',')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(',')}) RETURNING *`, Object.values(cols))).rows[0];
+  await audit(req, 'account.create', { type: 'account', id: row.id }, { accountId: b.accountId, authMode: b.authMode, eventSource: b.eventSource });
+  res.status(201).json(publicAccount(row));
+}));
+
+data.get('/accounts/:id', requirePerm('view'), wrap(async (req, res) => {
+  res.json(publicAccount(await accountFor(req, req.params.id)));
+}));
+
+data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
+  const a = await accountFor(req, req.params.id);
+  const p = AccountPatch.parse(req.body);
+  const cur = {
+    name: a.name, environment: a.environment, regions: a.regions, eventSource: a.event_source, lookbackDays: a.lookback_days,
+    s3: a.s3_bucket ? { bucket: a.s3_bucket, prefix: a.s3_prefix, orgId: a.s3_org_id, region: a.s3_region } : null,
+    authMode: a.auth_mode, baseIdentity: a.base_identity, roleName: a.role_arn ? a.role_arn.split('/').pop() : config.scanner.roleName,
+    trustPrincipal: a.trust_principal, credentials: null,
+  };
+  const next = { ...cur, ...Object.fromEntries(Object.entries(p).filter(([k, v]) => v !== undefined && k !== 'rebuildHistory')) };
+  const bad = checkAccount(next, !!a.credentials_enc);
+  if (bad) return say(res, ...bad);
+  const cols = accountColumns(next, a.account_id, a);
+  const accessChanged = ['auth_mode', 'base_identity', 'role_arn', 'credentials_enc', 'event_source', 's3_bucket', 's3_prefix', 's3_org_id', 's3_region']
+    .some((k) => (cols[k] ?? null) !== (a[k] ?? null));
+  if (accessChanged) { cols.status = 'pending'; cols.status_detail = null; }
+  cols.updated_at = new Date();
+  const keys = Object.keys(cols);
+  const row = await tx(async (c) => {
+    if (p.rebuildHistory) {
+      // Start the stored history over. Analysis results are recomputed by the next scan.
+      await c.query('DELETE FROM scan_checkpoints WHERE account_id=$1', [a.id]);
+      await c.query('DELETE FROM seen_events WHERE account_id=$1', [a.id]);
+      for (const t of ['activity_daily', 'activity_resources', 'passrole_observed', 'principals']) {
+        await c.query(`DELETE FROM ${t} WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1)`, [a.id]);
+      }
+    }
+    return (await c.query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
+  });
+  await audit(req, 'account.update', { type: 'account', id: a.id }, { changed: Object.keys(p).filter((k) => k !== 'credentials'), credentialsReplaced: !!p.credentials, rebuildHistory: !!p.rebuildHistory });
+  res.json({ ...publicAccount(row), accessChanged });
 }));
 
 data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
@@ -61,13 +177,13 @@ data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
       (SELECT coalesce(json_agg(json_build_object('region', region, 'first', first_event_time, 'last', last_event_time, 'events', events_read, 'gap', gap_detected)), '[]')
          FROM scan_checkpoints WHERE account_id=a.id) AS checkpoints
     FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', p)} ORDER BY a.name`, p);
-  res.json({ items: r.rows });
+  res.json({ items: r.rows.map(publicAccount) });
 }));
 
 data.get('/accounts/:id/data-events', requirePerm('view'), wrap(async (req, res) => {
   const a = await accountFor(req, req.params.id);
   const r = await query('SELECT source_name, source_type, resource_type, arn_patterns, read_write, readable FROM data_event_sources WHERE account_id=$1 ORDER BY resource_type, source_name', [a.id]);
-  res.json({ items: r.rows, note: 'CloudTrail Event History holds management events only. These sources record data events, which this scan cannot read, so the tool reports them but does not use them as evidence.' });
+  res.json({ items: r.rows, note: a.event_source === 's3' ? 'Rows marked readable belong to the trail this account reads from S3, so data-plane calls they log count as use. Calls not seen stay unconfirmed, because a trail may cover only some buckets or tables.' : 'CloudTrail Event History holds management events only. These sources record data events, which this scan cannot read, so the tool reports them but does not use them as evidence. Reading the trail from S3 would let it use them.' });
 }));
 
 const startScan = (trigger) => wrap(async (req, res) => {

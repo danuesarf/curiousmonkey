@@ -233,6 +233,7 @@ export async function queueOverview() {
                   count(j.*)::int AS jobs,
                   count(*) FILTER (WHERE j.status='succeeded')::int AS jobs_ok,
                   count(*) FILTER (WHERE j.status IN ('failed','dead'))::int AS jobs_bad,
+                  max((j.progress->>'etaSeconds')::int) FILTER (WHERE j.status='running') AS eta_seconds,
                   count(*) FILTER (WHERE j.status='running')::int AS jobs_running
              FROM scan_runs r JOIN cloud_accounts a ON a.id=r.account_id
              LEFT JOIN scan_jobs j ON j.run_id=r.id

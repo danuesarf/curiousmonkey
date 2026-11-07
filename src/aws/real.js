@@ -4,6 +4,10 @@ import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand } from '@aws-sdk
 import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, GetRolePolicyCommand,
   ListAttachedRolePoliciesCommand, GetPolicyCommand, GetPolicyVersionCommand,
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
+import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import { gunzipSync } from 'node:zlib';
+import { baseCredentials } from './credentials.js';
+import { trailDayPrefix, fileTimeFromKey } from './trailKeys.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
   ListEventDataStoresCommand } from '@aws-sdk/client-cloudtrail';
 
@@ -11,13 +15,19 @@ const decode = (d) => (typeof d === 'string' ? JSON.parse(decodeURIComponent(d))
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function realGateway(account, { externalId, sessionName = 'curious-monkey' }) {
-  const sts = new STSClient({ region: account.regions[0] });
-  const out = await sts.send(new AssumeRoleCommand({
-    RoleArn: account.role_arn, RoleSessionName: sessionName, ExternalId: externalId, DurationSeconds: 3600 }));
-  const c = out.Credentials;
-  const credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken };
+  const base = baseCredentials(account);
+  let credentials;
+  if (account.auth_mode === 'access_key') credentials = base;
+  else {
+    const sts = new STSClient({ region: account.regions[0], credentials: base });
+    const out = await sts.send(new AssumeRoleCommand({
+      RoleArn: account.role_arn, RoleSessionName: sessionName, ExternalId: externalId, DurationSeconds: 3600 }));
+    const c = out.Credentials;
+    credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken };
+  }
   const iam = new IAMClient({ region: 'us-east-1', credentials });
   const trails = new Map();
+  let s3c = null;
   const ct = (region) => trails.get(region) || trails.set(region, new CloudTrailClient({ region, credentials })).get(region);
 
   return {
@@ -74,6 +84,38 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       const r = await ct(region).send(new LookupEventsCommand({ StartTime: start, EndTime: end, NextToken: token, MaxResults: 50 }));
       return { events: (r.Events || []).map((e) => JSON.parse(e.CloudTrailEvent)), nextToken: r.NextToken || null };
     },
+    /** All records of one time slice from the trail's S3 log files. No 2 TPS limit, and history can exceed 90 days. */
+    async trailEventsForSlice({ region, start, end, listCache = new Map() }) {
+      const s3 = s3c || (s3c = new S3Client({ region: account.s3_region || region, credentials }));
+      const from = start.getTime(), to = end.getTime() + 60 * 60e3;          // a record is published up to ~1 h after it happens
+      const keys = [];
+      for (let d = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()); d < to; d += 864e5) {
+        const prefix = trailDayPrefix(account, region, new Date(d));
+        if (!listCache.has(prefix)) {
+          const all = []; let ContinuationToken;
+          do {
+            const r = await s3.send(new ListObjectsV2Command({ Bucket: account.s3_bucket, Prefix: prefix, ContinuationToken }));
+            for (const o of r.Contents || []) all.push(o.Key);
+            ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+          } while (ContinuationToken);
+          listCache.set(prefix, all);
+        }
+        for (const k of listCache.get(prefix)) { const t = fileTimeFromKey(k); if (t == null || (t >= from && t < to)) keys.push(k); }
+      }
+      const out = [];
+      let i = 0;
+      await Promise.all(Array.from({ length: Math.min(8, keys.length) }, async () => {
+        while (i < keys.length) {
+          const Key = keys[i++];
+          const body = await (await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }))).Body.transformToByteArray();
+          for (const r of JSON.parse(gunzipSync(Buffer.from(body)).toString('utf8')).Records || []) {
+            const t = new Date(r.eventTime).getTime();
+            if (t >= from && t < end.getTime()) out.push(r);
+          }
+        }
+      }));
+      return out;
+    },
     async discoverDataEvents() {
       const found = [];
       const region = account.regions[0];
@@ -82,11 +124,11 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
         for (const a of sel.AdvancedEventSelectors || []) {
           const type = a.FieldSelectors.find((f) => f.Field === 'resources.type')?.Equals?.[0];
           if (!type) continue;
-          found.push({ name: t.Name, type: 'trail', resourceType: type, readWrite: a.FieldSelectors.find((f) => f.Field === 'readOnly')?.Equals?.[0] ?? 'All',
+          found.push({ name: t.Name, bucket: t.S3BucketName, type: 'trail', resourceType: type, readWrite: a.FieldSelectors.find((f) => f.Field === 'readOnly')?.Equals?.[0] ?? 'All',
             arnPatterns: a.FieldSelectors.find((f) => f.Field === 'resources.ARN')?.StartsWith || a.FieldSelectors.find((f) => f.Field === 'resources.ARN')?.Equals || ['*'] });
         }
         for (const s of sel.EventSelectors || []) for (const d of s.DataResources || []) {
-          found.push({ name: t.Name, type: 'trail', resourceType: d.Type, readWrite: s.ReadWriteType, arnPatterns: d.Values });
+          found.push({ name: t.Name, bucket: t.S3BucketName, type: 'trail', resourceType: d.Type, readWrite: s.ReadWriteType, arnPatterns: d.Values });
         }
       }
       for (const s of (await ct(region).send(new ListEventDataStoresCommand({}))).EventDataStores || []) {

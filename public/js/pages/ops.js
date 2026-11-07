@@ -25,16 +25,16 @@ export async function opsPage(ctx) {
         h('tbody', null, o.runs.map((r) => h('tr', { class: 'link', onClick: () => { openRun = openRun === r.id ? null : r.id; draw(); } },
           h('td', null, h('div', { class: 'name' }, r.account_name), h('div', { class: 'tiny muted' }, r.aws_account_id)), h('td', null, r.trigger), h('td', null, h('span', { class: `badge ${ST[r.status]}` }, r.status)),
           h('td', { class: 'small' }, `${r.jobs_ok}/${r.jobs} done${r.jobs_bad ? `, ${r.jobs_bad} failed` : ''}`), h('td', { class: 'small' }, ago(r.started_at || r.created_at)),
-          h('td', { class: 'small' }, r.finished_at && r.started_at ? secs(Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) : r.status === 'running' ? 'running' : '—'),
+          h('td', { class: 'small' }, r.finished_at && r.started_at ? secs(Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) : r.status === 'running' ? (r.eta_seconds != null ? `running, ${etaText(r.eta_seconds)} left` : 'running') : '—'),
           h('td', { class: 'small' }, openRun === r.id ? 'Hide' : 'Details'))))))),
       detail && runPanel(detail, canScan, draw)].filter(Boolean));
   }
   const runPanel = (d, canScan, redraw) => h('section', { class: 'card' },
-    h('div', { class: 'card-h' }, h('h2', null, `${d.run.account_name}: scan ${d.run.status}`), canScan && h('div', { class: 'row' },
+    h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, `${d.run.account_name}: scan ${d.run.status}`), runEta(d.jobs) != null && h('span', { class: 'badge b-banana' }, `${etaText(runEta(d.jobs))} left`)), canScan && h('div', { class: 'row' },
       d.jobs.some((j) => ['failed', 'dead', 'canceled'].includes(j.status)) && h('button', { class: 'btn sm primary', onClick: async () => { const r = await post(`/ops/runs/${d.run.id}/retry`); toast(`Requeued ${r.requeued} job(s). They resume from saved checkpoints.`); redraw(); } }, 'Retry failed jobs'),
       ['queued', 'running'].includes(d.run.status) && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: 'Cancel this scan?', message: 'Jobs that already finished keep their results, and a later scan continues from the saved checkpoints.', confirmLabel: 'Cancel scan', danger: true })) { await post(`/ops/runs/${d.run.id}/cancel`); redraw(); } } }, 'Cancel'))),
     h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Step', 'Status', 'Attempts', 'Progress', 'Error', ''].map((x) => h('th', null, x)))),
-      h('tbody', null, d.jobs.map((j) => h('tr', null, h('td', null, h('span', { class: 'name' }, j.kind), j.region && h('span', { class: 'small muted mono' }, ` ${j.region}`)), h('td', null, h('span', { class: `badge ${ST[j.status]}` }, j.status)),
+      h('tbody', null, d.jobs.map((j) => h('tr', null, h('td', null, h('span', { class: 'name' }, j.kind), j.region && h('span', { class: 'small muted mono nowrap' }, ` ${j.region}`)), h('td', null, h('span', { class: `badge ${ST[j.status]}` }, j.status)),
         h('td', null, `${j.attempts}/${j.max_attempts}`), h('td', { class: 'small' }, progress(j)),
         h('td', { class: 'small', style: null }, j.last_error ? h('span', { class: 'err' }, j.last_error.slice(0, 160), j.error_retryable === false ? ' (not retryable)' : '') : '', j.status === 'queued' && j.attempts > 0 && new Date(j.run_after) > new Date() && h('div', { class: 'muted' }, `retrying ${ago(j.run_after).replace('ago', '')}`)),
         h('td', null, h('div', { class: 'row' }, h('button', { class: 'btn sm', onClick: async () => { const l = await get(`/ops/jobs/${j.id}/log`); modal(`${j.kind} ${j.region || ''} log`, h('pre', null, l.items.map((x) => `${fmtDate(x.at)}  ${x.level.padEnd(5)} ${x.message}`).join('\n') || 'No log lines.')); } }, 'Log'),
@@ -46,7 +46,19 @@ export async function opsPage(ctx) {
 }
 function progress(j) {
   const p = j.progress || {};
-  if (p.total && p.done != null) return `${p.phase || j.kind}: ${p.done}/${p.total}${p.events != null ? `, ${num(p.events)} events` : ''}${p.slice ? `, up to ${p.slice.slice(0, 10)}` : ''}`;
+  if (p.phase === 'events' && p.total) {
+    const parts = [`${p.source === 's3' ? 'S3 trail' : 'Event History'}: slice ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`];
+    if (p.slice) parts.push(`${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`);
+    if (j.status === 'running' && p.eventsPerSecond != null) parts.push(`${num(p.eventsPerSecond)}/s`);
+    return h('span', null, parts.join(' · '), j.status === 'running' && p.etaSeconds != null && p.done < p.total && h('b', { class: 'eta' }, ` · ${etaText(p.etaSeconds)} left`));
+  }
+  if (p.total && p.done != null) return `${p.phase || j.kind}: ${p.done}/${p.total}`;
   if (p.finished) return 'finished';
   return j.status === 'running' ? 'starting…' : '';
+}
+const etaText = (s) => (s < 60 ? 'under a minute' : s < 3600 ? `about ${Math.round(s / 60)} min` : `about ${(Math.round(s / 1800) / 2)} h`);
+/** Longest remaining time among running event jobs. Regions run side by side, so the slowest one decides. */
+export function runEta(jobs) {
+  const etas = jobs.filter((j) => j.status === 'running' && j.progress?.etaSeconds != null).map((j) => j.progress.etaSeconds);
+  return etas.length ? Math.max(...etas) : null;
 }
