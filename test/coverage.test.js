@@ -158,3 +158,23 @@ test('built-in names settle stored unidentified calls, but never a reviewer deci
   assert.equal(m['cloudcontrolapi:GetResource'].source, 'manual');
   assert.equal(m['madeup:DoThing'], undefined);                            // unknown names stay for review
 });
+
+test('more renamed services and permissions resolve to the real IAM action', async () => {
+  const { mapEvent, COMPANIONS } = await import('../src/analyzer/actionNames.js');
+  const cases = [
+    ['amazonmq', 'ListBrokers', 'mq:ListBrokers'], ['qconnect', 'ListAssistants', 'wisdom:ListAssistants'],
+    ['multi-party-approval', 'ListIdentitySources', 'mpa:ListIdentitySources'], ['pricelist', 'GetProducts', 'pricing:GetProducts'],
+    ['chime-sdk-media-pipelines', 'ListMediaInsightsPipelineConfigurations', 'chime:ListMediaInsightsPipelineConfigurations'],
+    ['dms', 'DescribeMigrationProjects', 'dms:ListMigrationProjects'], ['dms', 'DescribeInstanceProfiles', 'dms:ListInstanceProfiles'],
+    ['detective', 'ListOrganizationAdminAccounts', 'detective:ListOrganizationAdminAccount'],
+    ['securityhub', 'GetFindingsV2', 'securityhub:GetFindings'], ['securityhub', 'GetFindingStatisticsV2', 'securityhub:GetAdhocInsightResults'],
+    ['ssm', 'CreateDataChannel', 'ssmmessages:CreateDataChannel'], ['budgets', 'DescribeBudgets', 'budgets:ViewBudget'],
+    ['budgets', 'DescribeBudgetNotificationsForAccount', 'budgets:ViewBudget'], ['budgets', 'UpdateBudget', 'budgets:ModifyBudget'],
+    ['kms', 'ReEncrypt', 'kms:ReEncryptFrom'], ['ce', 'ListReports', 'ce:DescribeReport'], ['tax', 'ListTaxExemptions', 'tax:GetExemptions'],
+    ['billingconsole', 'GetBillingNotifications', 'billing:GetBillingNotifications'], ['billingconsole', 'GetAccountInformation', 'account:GetAccountInformation'],
+  ];
+  for (const [svc, name, want] of cases) assert.deepEqual(mapEvent(`${svc}.amazonaws.com`, name), { action: want, mapped: true }, `${svc} ${name}`);
+  assert.deepEqual(COMPANIONS['kms:ReEncryptFrom'], ['kms:ReEncryptTo']);
+  assert.equal(mapEvent('ssm.amazonaws.com', 'StartSession').action, 'ssm:StartSession');
+  assert.equal(mapEvent('billingconsole.amazonaws.com', 'GetTotal').mapped, false);   // no documented permission: left for review
+});

@@ -6,7 +6,12 @@ const PREFIX = {
   'runtime.sagemaker': 'sagemaker', 'api.ecr': 'ecr', 'kinesisanalytics': 'kinesisanalytics',
   cloudcontrolapi: 'cloudformation',     // Cloud Control API's permissions use the cloudformation prefix
   pinpoint: 'mobiletargeting',           // Amazon Pinpoint's permissions use mobiletargeting
+  amazonmq: 'mq',                        // Amazon MQ
+  qconnect: 'wisdom',                    // Amazon Q in Connect kept the Wisdom prefix
+  'multi-party-approval': 'mpa',
+  pricelist: 'pricing',                  // Price List API
 };
+const CHIME_SDK = /^chime-sdk-/;          // chime-sdk-media-pipelines, -meetings, -voice, -identity, -messaging: all chime:*
 const S3_ALIAS = {
   ListBuckets: 's3:ListAllMyBuckets', HeadBucket: 's3:ListBucket', ListObjects: 's3:ListBucket',
   ListObjectsV2: 's3:ListBucket', ListObjectVersions: 's3:ListBucketVersions', HeadObject: 's3:GetObject',
@@ -39,13 +44,34 @@ const S3_ALIAS = {
 // Only names that EC2 Auto Scaling does not also have are moved; the shared ones stay ambiguous.
 const APP_AUTOSCALING = new Set(['DescribeScalableTargets', 'RegisterScalableTarget', 'DeregisterScalableTarget', 'DescribeScalingPolicies', 'DeleteScalingPolicy',
   'PutScheduledAction', 'GetPredictiveScalingForecast', 'TagResource', 'UntagResource', 'ListTagsForResource']);
-const EVENT_ALIAS = { 's3express:ListDirectoryBuckets': 's3express:ListAllMyDirectoryBuckets' };
+const BUDGETS_VIEW = ['DescribeBudget', 'DescribeBudgets', 'DescribeBudgetNotificationsForAccount', 'DescribeNotificationsForBudget',
+  'DescribeSubscribersForNotification', 'DescribeBudgetPerformanceHistory'];
+const BUDGETS_MODIFY = ['CreateBudget', 'UpdateBudget', 'DeleteBudget', 'CreateNotification', 'UpdateNotification', 'DeleteNotification',
+  'CreateSubscriber', 'UpdateSubscriber', 'DeleteSubscriber'];
+const EVENT_ALIAS = {
+  's3express:ListDirectoryBuckets': 's3express:ListAllMyDirectoryBuckets',
+  'detective:ListOrganizationAdminAccounts': 'detective:ListOrganizationAdminAccount',   // the permission is singular
+  'securityhub:GetFindingsV2': 'securityhub:GetFindings',                                 // documented by Security Hub
+  'securityhub:GetFindingStatisticsV2': 'securityhub:GetAdhocInsightResults',
+  'kms:ReEncrypt': 'kms:ReEncryptFrom',                  // plus kms:ReEncryptTo, see COMPANIONS
+  'ce:ListReports': 'ce:DescribeReport',                 // Cost Explorer saved reports
+  'tax:ListTaxExemptions': 'tax:GetExemptions',
+  'billingconsole:GetBillingNotifications': 'billing:GetBillingNotifications',
+  'billingconsole:GetAccountInformation': 'account:GetAccountInformation',
+  'billingconsole:GetPaymentPreferences': 'payments:ListPaymentPreferences',
+  ...Object.fromEntries(['CreateDataChannel', 'OpenDataChannel', 'CreateControlChannel', 'OpenControlChannel']   // Session Manager, logged under ssm
+    .map((n) => [`ssm:${n}`, `ssmmessages:${n}`])),
+  ...Object.fromEntries(BUDGETS_VIEW.map((n) => [`budgets:${n}`, 'budgets:ViewBudget'])),
+  ...Object.fromEntries(BUDGETS_MODIFY.map((n) => [`budgets:${n}`, 'budgets:ModifyBudget'])),
+};
+/** One call that IAM authorises as two permissions. Credited together wherever the first is used. */
+export const COMPANIONS = { 'kms:ReEncryptFrom': ['kms:ReEncryptTo'] };
 const APIGW_VERB = [['Get', 'GET'], ['Create', 'POST'], ['Put', 'PUT'], ['Update', 'PATCH'], ['Delete', 'DELETE'], ['Import', 'PUT'], ['Test', 'POST']];
 
 export function eventToAction(eventSource, eventName) {
   if (!eventSource || !eventName) return null;
   let svc = eventSource.replace(/\.amazonaws\.com(\.cn)?$/, '');
-  svc = PREFIX[svc] || svc;
+  svc = PREFIX[svc] || (CHIME_SDK.test(svc) ? 'chime' : svc);
   if (EVENT_ALIAS[`${svc}:${eventName}`]) return canonicalAction(EVENT_ALIAS[`${svc}:${eventName}`]);
   if (svc === 'autoscaling' && APP_AUTOSCALING.has(eventName)) return canonicalAction(`application-autoscaling:${eventName}`);
   if (svc === 'mediapackage' && /Packaging|Asset/.test(eventName)) return canonicalAction(`mediapackage-vod:${eventName}`);   // MediaPackage VOD
@@ -55,6 +81,8 @@ export function eventToAction(eventSource, eventName) {
     const v = APIGW_VERB.find(([p]) => eventName.startsWith(p));
     return v ? `apigateway:${v[1]}` : null;
   }
+  // DMS Schema Conversion: the Describe… APIs are authorised by List… permissions
+  if (svc === 'dms' && eventName.startsWith('Describe') && !actionInfo(`dms:${eventName}`) && actionInfo(`dms:List${eventName.slice(8)}`)) return canonicalAction(`dms:List${eventName.slice(8)}`);
   if (svc === 'sts' && /^AssumeRole/.test(eventName)) return canonicalAction(`sts:${eventName}`);
   return canonicalAction(`${svc}:${eventName}`);
 }

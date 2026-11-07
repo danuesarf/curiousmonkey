@@ -2,6 +2,7 @@ import { query, tx, pool } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { loadMappings, translate, applyBuiltins } from '../analyzer/mappings.js';
+import { COMPANIONS } from '../analyzer/actionNames.js';
 import { snapshotAndDiff } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
 
@@ -23,8 +24,10 @@ export async function analyzeRole(role, windowStart, now = new Date(), maps = nu
     const t = translate(r.action, maps);
     if (t.none) continue;
     if (t.unmapped) { const u = unmappedServices.get(t.unmapped) || []; u.push(r.action); unmappedServices.set(t.unmapped, u); continue; }
-    const prev = actions.get(t.action);
-    actions.set(t.action, prev ? { count: prev.count + r.count, lastSeen: prev.lastSeen > r.last ? prev.lastSeen : r.last } : { count: r.count, lastSeen: r.last });
+    for (const a of [t.action, ...(COMPANIONS[t.action] || [])]) {
+      const prev = actions.get(a);
+      actions.set(a, prev ? { count: prev.count + r.count, lastSeen: prev.lastSeen > r.last ? prev.lastSeen : r.last } : { count: r.count, lastSeen: r.last });
+    }
   }
   return analyze({
     role, policies: pol.rows, boundaryDoc: boundary.rows[0]?.document || null, windowStart, now,
