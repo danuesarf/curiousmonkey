@@ -2,6 +2,8 @@ import { query, tx, pool } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
+import { snapshotAndDiff } from '../radarHistory.js';
+import { accountComplete } from '../history.js';
 
 const DAY = 864e5;
 
@@ -81,7 +83,10 @@ export async function analyzeAccount(accountId, { alive = () => {}, progress = a
 }
 
 export async function runAnalyze(ctx) {
-  return analyzeAccount(ctx.job.account_id, { alive: ctx.alive, progress: ctx.progress });
+  const out = await analyzeAccount(ctx.job.account_id, { alive: ctx.alive, progress: ctx.progress });
+  // the final analysis of a fully read account: record what changed since the last one, and where things stand today
+  if (await accountComplete(ctx.job.account_id)) out.changes = await snapshotAndDiff(ctx.job.account_id);
+  return out;
 }
 
 /**

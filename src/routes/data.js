@@ -11,6 +11,7 @@ import { sealCredentials } from '../aws/credentials.js';
 import { suggestMappings, decideMapping, markUnresolved } from '../recommender/eventMap.js';
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
+import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
@@ -48,6 +49,7 @@ const KeysIn = z.object({
 const AccountFields = {
   name: z.string().trim().min(1).max(80),
   environment: z.enum(['production', 'staging', 'development', 'sandbox']),
+  ou: z.string().trim().max(120).nullable().or(z.literal('')),
   regions: z.array(z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/)).min(1).max(20),
   eventSource: z.enum(['event-history', 's3']),
   lookbackDays: z.number().int().min(1).max(730),
@@ -60,7 +62,7 @@ const AccountFields = {
 };
 const AccountIn = z.object({
   ...AccountFields, accountId: z.string().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
-  environment: AccountFields.environment.default('production'), regions: AccountFields.regions.default(config.scanner.defaultRegions),
+  environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null), regions: AccountFields.regions.default(config.scanner.defaultRegions),
   eventSource: AccountFields.eventSource.default('event-history'), lookbackDays: AccountFields.lookbackDays.default(90),
   s3: AccountFields.s3.default(null), authMode: AccountFields.authMode.default('assume_role'), baseIdentity: AccountFields.baseIdentity.default('system'),
   roleName: AccountFields.roleName.default(config.scanner.roleName), trustPrincipal: AccountFields.trustPrincipal.default(null),
@@ -80,7 +82,7 @@ function checkAccount(x, hasStored) {
 function accountColumns(x, accountId, prev = {}) {
   const needsKeys = x.authMode === 'access_key' || x.baseIdentity === 'stored';
   const cols = {
-    name: x.name, environment: x.environment, regions: x.regions,
+    name: x.name, environment: x.environment, ou: x.ou || null, regions: x.regions,
     event_source: x.eventSource, lookback_days: x.lookbackDays,
     s3_bucket: x.eventSource === 's3' ? x.s3.bucket : null, s3_prefix: x.eventSource === 's3' ? x.s3.prefix || null : null,
     s3_org_id: x.eventSource === 's3' ? x.s3.orgId || null : null, s3_region: x.eventSource === 's3' ? x.s3.region || null : null,
@@ -142,7 +144,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
   const a = await accountFor(req, req.params.id);
   const p = AccountPatch.parse(req.body);
   const cur = {
-    name: a.name, environment: a.environment, regions: a.regions, eventSource: a.event_source, lookbackDays: a.lookback_days,
+    name: a.name, environment: a.environment, ou: a.ou, regions: a.regions, eventSource: a.event_source, lookbackDays: a.lookback_days,
     s3: a.s3_bucket ? { bucket: a.s3_bucket, prefix: a.s3_prefix, orgId: a.s3_org_id, region: a.s3_region } : null,
     authMode: a.auth_mode, baseIdentity: a.base_identity, roleName: a.role_arn ? a.role_arn.split('/').pop() : config.scanner.roleName,
     trustPrincipal: a.trust_principal, credentials: null,
@@ -443,6 +445,23 @@ data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
     accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   });
+}));
+
+// ---- radar v3 ----
+data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user))));
+data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
+  const r = await accountRadar(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
+}));
+data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
+  const accountId = req.query.account ? uuid.parse(req.query.account) : null;
+  if (accountId && !inScope(req.user, accountId)) throw NotFound();
+  res.json(await changeFeed(req.user, { accountId, days: req.query.days }));
+}));
+data.post('/changes/seen', requirePerm('view'), wrap(async (req, res) => { await markSeen(req.user); res.json({ ok: true }); }));
+data.get('/blast/identities', requirePerm('view'), wrap(async (req, res) => res.json({ items: await identities(req.user, String(req.query.q || '').slice(0, 80)) })));
+data.get('/blast', requirePerm('view'), wrap(async (req, res) => {
+  const key = z.string().min(3).max(600).parse(req.query.key);
+  res.json(await blastRadius(req.user, key));
 }));
 
 /** Calls per day over the stored history, with how far the read has got. */

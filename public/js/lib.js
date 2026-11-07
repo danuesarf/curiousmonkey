@@ -1,6 +1,8 @@
 // replaceChildren would print `false`/`null` from `cond && node`. Drop them everywhere.
 const nativeReplace = Element.prototype.replaceChildren;
 Element.prototype.replaceChildren = function (...kids) { return nativeReplace.apply(this, kids.flat(Infinity).filter((k) => k != null && k !== false)); };
+const nativeAppend = Element.prototype.append;
+Element.prototype.append = function (...kids) { return nativeAppend.apply(this, kids.flat(Infinity).filter((k) => k != null && k !== false)); };
 // Tiny DOM helpers. Everything goes in as text nodes, so data from the API can never become markup.
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);

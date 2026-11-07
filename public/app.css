@@ -290,3 +290,15 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .zbar{display:flex;height:18px;gap:2px}.zbar button{border:0;padding:0;min-width:4px;cursor:pointer}.zbar button:disabled{cursor:default}
 @media (max-width:1200px){.zone-foot{grid-template-columns:minmax(0,1fr);height:auto}}
 .mode-sel{height:36px;background:var(--surface);border:1px solid var(--edge);color:var(--ink);font-family:var(--mono);font-size:11px;padding:0 6px}
+/* radar v3 */
+.radar3 .radar-layout{height:calc(100vh - 52px);grid-template-columns:300px minmax(0,1fr) 340px}
+.rtabs{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--edge);flex:none}
+.rtabs button{height:34px;font:inherit;font-size:12.5px;cursor:pointer;border:0;background:transparent;color:var(--ink)}
+.rtabs button[aria-selected=true]{background:var(--banana);color:#030d08;font-weight:600}
+.rval{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none}
+.pill{flex:none;font-family:var(--mono);font-size:9.5px;border:1px solid;padding:0 3px;letter-spacing:.04em}
+.feed-item{display:flex;flex-direction:column;gap:3px;text-align:left;padding:8px 10px;font:inherit;color:var(--ink);cursor:pointer;border:1px solid var(--line);border-left:3px solid var(--edge);background:var(--surface);text-decoration:none}
+.feed-item:hover{border-color:var(--edge);background:var(--raise)}
+.fresh{color:var(--banana)}
+.stat-grid{border:1px solid var(--line);background:var(--surface);padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.stat-grid>div{display:flex;flex-direction:column;gap:2px;min-width:0}

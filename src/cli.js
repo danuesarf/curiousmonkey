@@ -1,6 +1,8 @@
 // Small operator CLI.
 //   node src/cli.js demo   add two demo accounts (AWS_MODE=demo) and queue their first scans
 //   node src/cli.js scan   queue a scan for every connected account (the worker does the work)
+//   node src/cli.js demo-history   (demo only) invent 35 days of past snapshots and a few changes, so the radar's
+//                                  trails, trends and pings have something to show without waiting a month
 import { pool, closePool } from './db.js';
 import { migrate } from './migrate.js';
 import { enqueueRun } from './queue.js';
@@ -27,8 +29,12 @@ async function main() {
     const { rows } = await pool.query(`SELECT id, name FROM cloud_accounts WHERE status='connected'`);
     for (const a of rows) { await enqueueRun(a.id, { trigger: 'manual' }); console.log(`queued ${a.name}`); }
     if (!rows.length) console.log('No connected accounts.');
+  } else if (cmd === 'demo-history') {
+    if (config.awsMode !== 'demo') throw new Error('demo-history only runs with AWS_MODE=demo: it invents history.');
+    const { demoHistory } = await import('./demo/history.js');
+    console.log(await demoHistory());
   } else {
-    console.log('usage: node src/cli.js demo|scan');
+    console.log('usage: node src/cli.js demo|scan|demo-history');
     process.exitCode = 1;
   }
 }

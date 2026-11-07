@@ -50,13 +50,13 @@ export function estimate({ perDay, lookback }) {
 }
 
 const blankModel = () => ({
-  name: '', accountId: '', environment: 'production', regions: new Set(['us-east-1', 'ap-southeast-3']),
+  name: '', accountId: '', environment: 'production', ou: '', regions: new Set(['us-east-1', 'ap-southeast-3']),
   eventSource: 'event-history', lookbackDays: 90, s3: { bucket: '', prefix: '', orgId: '', region: '' }, perDay: 10000,
   authMode: 'assume_role', baseIdentity: 'system', roleName: 'CuriousMonkeyScanner', trustPrincipal: '',
   keys: { accessKeyId: '', secretAccessKey: '', sessionToken: '' }, rebuildHistory: false,
 });
 function modelFrom(a) {
-  return { ...blankModel(), name: a.name, accountId: a.account_id, environment: a.environment, regions: new Set(a.regions),
+  return { ...blankModel(), name: a.name, accountId: a.account_id, environment: a.environment, ou: a.ou || '', regions: new Set(a.regions),
     eventSource: a.event_source, lookbackDays: a.lookback_days,
     s3: { bucket: a.s3_bucket || '', prefix: a.s3_prefix || '', orgId: a.s3_org_id || '', region: a.s3_region || '' },
     authMode: a.auth_mode, baseIdentity: a.base_identity, roleName: a.role_name || 'CuriousMonkeyScanner', trustPrincipal: a.trust_principal || '' };
@@ -64,7 +64,7 @@ function modelFrom(a) {
 const keysTyped = (m) => !!(m.keys.accessKeyId || m.keys.secretAccessKey);
 function payload(m, { create }) {
   const p = {
-    name: m.name, environment: m.environment, regions: [...m.regions], eventSource: m.eventSource, lookbackDays: Number(m.lookbackDays),
+    name: m.name, environment: m.environment, ou: m.ou || null, regions: [...m.regions], eventSource: m.eventSource, lookbackDays: Number(m.lookbackDays),
     s3: m.eventSource === 's3' ? { bucket: m.s3.bucket, prefix: m.s3.prefix || null, orgId: m.s3.orgId || null, region: m.s3.region || null } : null,
     authMode: m.authMode, baseIdentity: m.authMode === 'access_key' ? 'stored' : m.baseIdentity, roleName: m.roleName, trustPrincipal: m.trustPrincipal || null,
     credentials: keysTyped(m) ? { accessKeyId: m.keys.accessKeyId, secretAccessKey: m.keys.secretAccessKey, sessionToken: m.keys.sessionToken || null } : null,
@@ -122,6 +122,7 @@ function detailsSection(m, { lockId = false } = {}) {
     lockId ? field('AWS account ID', h('input', { value: m.accountId, disabled: true }), 'The account ID cannot change. Remove the account and connect it again to use another one.')
       : field('AWS account ID', input(m, 'accountId', { 'data-f': 'accountId', inputmode: 'numeric', maxlength: '12', placeholder: '123456789012' }), 'Twelve digits, no dashes.'),
     field('Environment', env),
+    field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', placeholder: 'e.g. Workloads/Prod', maxlength: '120' }), 'The radar can group accounts by this instead of by environment. Use your AWS Organizations OU path, or any grouping your team uses.'),
     h('fieldset', null, h('legend', null, 'Regions to read CloudTrail from'), regions,
       h('span', { class: 'hint' }, 'CloudTrail keeps events per region. Keep us-east-1: IAM and sign-in events are recorded there. Add every region where this account runs workloads.')));
 }
@@ -270,7 +271,7 @@ function accountCard(a, ctx, can) {
     h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${a.environment}`)),
       h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
         can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
-        h('a', { class: 'btn sm', href: `#/?account=${a.id}` }, 'Radar'),
+        h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
         h('a', { class: 'btn sm', href: `#/accounts/${a.id}/unidentified` }, 'Unidentified calls'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),

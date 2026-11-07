@@ -4,6 +4,9 @@ import { parseEvent } from '../analyzer/events.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { loadContext } from './inventory.js';
 import { provisionalAnalyze } from './analyzeJob.js';
+import { recordNewCaller } from '../radarHistory.js';
+import { accountComplete } from '../history.js';
+
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3600e3, MIN = 60e3, DAY = 24 * HOUR;
@@ -50,6 +53,7 @@ export async function runEvents(ctx) {
   let rate = null;                                             // seconds per slice, smoothed
   let lastProvisional = Date.now();
   let total = 0;
+  const wasComplete = await accountComplete(account.id);     // pings for new callers only once the first full read is done
   for (let i = 0; i < slices.length; i++) {
     ctx.alive();
     const [a, b, kind] = slices[i];
@@ -78,7 +82,7 @@ export async function runEvents(ctx) {
       const cov = coverage(evs, roles);
       // assumptions first, so a session's calls can be attributed to who started it
       const usable = evs.filter((e) => e.type !== 'ignore').sort((x, y) => (x.type === y.type ? x.time - y.time : x.type === 'assume' ? -1 : 1));
-      await applyEvents(c, usable, roles, account.id);
+      await applyEvents(c, usable, roles, account.id, { recordNew: wasComplete && kind === 'forward' });
       await saveCoverage(c, account.id, region, new Date(a), cov);
       await c.query(
         `INSERT INTO scan_checkpoints(account_id, region, source, first_event_time, last_event_time, events_read, gap_detected, last_run_at)
@@ -162,7 +166,7 @@ async function saveCoverage(c, accountId, region, day, { k, unmapped }) {
     [accountId, u.raw, u.source, u.name, u.n, u.first, u.last, u.identity, u.keys || []]);
 }
 
-export async function applyEvents(c, evs, roles, accountId) {
+export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   const principalIds = new Map();                     // key -> id (this slice)
   const ensurePrincipal = async (role, p, e, extra = {}) => {
     const k = `${role.id}|${p.key}`;
@@ -171,8 +175,12 @@ export async function applyEvents(c, evs, roles, accountId) {
         `INSERT INTO principals(role_id, key, kind, display, via, caller, first_seen, last_seen, sessions_count, source_ips, mfa, source_identity, session_tags)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$7,0,'{}',NULL,NULL,'{}')
          ON CONFLICT (role_id, key) DO UPDATE SET first_seen=LEAST(principals.first_seen, EXCLUDED.first_seen), last_seen=GREATEST(principals.last_seen, EXCLUDED.last_seen)
-         RETURNING id`, [role.id, p.key, p.kind, p.display, extra.via || 'session', JSON.stringify(extra.caller || {}), e.time]);
+         RETURNING id, (xmax = 0) AS inserted`, [role.id, p.key, p.kind, p.display, extra.via || 'session', JSON.stringify(extra.caller || {}), e.time]);
       principalIds.set(k, r.rows[0].id);
+      // a caller never seen before, in an account whose history was already complete: ping it
+      if (r.rows[0].inserted && opts.recordNew && p.kind !== 'session' && new Date(e.time).getTime() > Date.now() - 3 * DAY) {
+        await recordNewCaller(c, accountId, role, p, extra.via, e.time);
+      }
     }
     return principalIds.get(k);
   };
