@@ -262,3 +262,5 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .track-page .track-log{height:212px;max-height:none}
 .sector-page{min-height:calc(100vh - 52px)}.sector-page>aside{max-height:none}
 [hidden]{display:none!important}
+.unk-box a,.unk-box .mono{overflow-wrap:anywhere;word-break:break-word}
+.scene-layout>aside{min-width:0;overflow-x:hidden}

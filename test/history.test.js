@@ -18,7 +18,7 @@ before(async () => {
 after(async () => { await db.closePool(); await pg.stop(); });
 
 const acct = { regions: ['us-east-1', 'ap-southeast-3'], event_source: 'event-history', lookback_days: 90 };
-const cp = (region, firstDaysAgo, lastDaysAgo, caught) => ({ region, first_event_time: new Date(Date.now() - firstDaysAgo * DAY), last_event_time: new Date(Date.now() - lastDaysAgo * DAY), caught_up_at: caught ? new Date() : null });
+const cp = (region, firstDaysAgo, lastDaysAgo, caught) => ({ region, first_event_time: new Date(Date.now() - firstDaysAgo * DAY), last_event_time: new Date(Date.now() - lastDaysAgo * DAY), caught_up_at: caught === 'now' ? new Date() : caught ? new Date(Date.now() - lastDaysAgo * DAY) : null });
 
 test('a first read in progress is provisional, with progress and how far it has read', () => {
   const s = h.historyState(acct, [cp('us-east-1', 90, 60, false), cp('ap-southeast-3', 90, 30, false)]);
@@ -31,6 +31,13 @@ test('a first read in progress is provisional, with progress and how far it has 
 test('once every region has caught up, it is complete, and it stays complete as the days pass', () => {
   assert.equal(h.historyState(acct, [cp('us-east-1', 90, 0, true), cp('ap-southeast-3', 90, 0, true)]).complete, true);
   assert.equal(h.historyState(acct, [cp('us-east-1', 89, 1.5, true), cp('ap-southeast-3', 89, 1.5, true)]).progress, 100);
+});
+
+test('a caught-up stamp with the read position far behind it is stale: still provisional', () => {
+  // e.g. stamped by a migration while the first read was mid-way, then the read resumed after a lost worker
+  const s = h.historyState(acct, [cp('us-east-1', 90, 0, true), cp('ap-southeast-3', 90, 11, 'now')]);
+  assert.equal(s.complete, false);
+  assert.equal(s.regions[1].complete, false);
 });
 
 test('widening the lookback reopens it until the older days are backfilled', () => {

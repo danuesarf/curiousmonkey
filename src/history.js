@@ -5,7 +5,8 @@ import { config } from './config.js';
 import { lookbackFor } from './scanner/events.js';
 
 const DAY = 864e5, MIN = 60e3;
-const SLACK = DAY;          // a day of tolerance at the old end, so a horizon that moves daily never reopens it
+const SLACK = DAY;
+const CATCH_UP_SLACK = 12 * 60 * MIN; // two 6-hour slices          // a day of tolerance at the old end, so a horizon that moves daily never reopens it
 
 /**
  * Pure: account + its checkpoints -> { progress 0..100, complete, readUpTo, backTo, regions }.
@@ -22,7 +23,11 @@ export function historyState(account, checkpoints, now = Date.now()) {
     const last = new Date(cp.last_event_time).getTime();
     const covered = Math.max(0, Math.min(last, end) - Math.max(first, horizon));
     const backDone = first <= horizon + SLACK;
-    const complete = backDone && !!cp.caught_up_at;
+    // caught up = the read position reached the present when caught_up_at was stamped. A stamp with the read position
+    // well behind it is stale (e.g. backfilled by a migration while a read was mid-way) and does not count.
+    const stamp = cp.caught_up_at ? new Date(cp.caught_up_at).getTime() : null;
+    const caughtUp = stamp != null && last >= stamp - config.scanner.deliveryLagMinutes * MIN - CATCH_UP_SLACK;
+    const complete = backDone && caughtUp;
     return { region, progress: complete ? 100 : Math.min(99, (covered / span) * 100), complete, first: new Date(first), last: new Date(last), gap: !!cp.gap_detected };
   });
   const complete = regions.length > 0 && regions.every((r) => r.complete);
