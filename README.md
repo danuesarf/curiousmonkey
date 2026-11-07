@@ -45,7 +45,9 @@ Edit an account at any time. Switching source keeps the stored history. Widening
 
 ## The radar
 
-The portal opens on a **radar** of every role in scope. Distance from the centre is the share of a role's permissions never called, height is call volume, and bearing groups roles by kind (custom, Identity Center, service-linked). Callers sit on the rim, linked to the roles they entered. Drag to orbit and tilt, scroll to zoom. The view is SVG drawn in 3D perspective, not WebGL.
+The portal opens on a **radar** of every role in scope, seen from above. Distance from the centre is the share of a role's permissions never called, in four zones: *Tight* (under 25%), *Loose*, *Bloated* (over 75%) and *Dead* (no calls in the history read). Each account has its own slice; shape shows the kind of role and size the permissions it holds.
+
+Built to stay readable at hundreds of roles: only roles that need attention (high risk, unidentified calls, denied calls) are bright, and the ten most urgent get a short tag (R-01…). Quiet roles that crowd together fold into numbered blobs, which split as you zoom (scroll, or click a blob). Callers are drawn only for the selected role. Names live in the ranked list on the left, with filters for high risk, unidentified, denied, bloated and dead.
 
 - **Sector scan** cuts one role into rings (access level) and sectors (service). Lit dots were called, amber dots are unconfirmed, dim dots were never called.
 - **Track** replays one role session call by call. Each session is a lane. When a session assumes another role (role chaining), the call is drawn as a jump into a new lane for the new session, linked by access key. Chains across connected accounts are linked too. Sessions in accounts you can't see are counted, not shown. Session replays are kept for `SESSION_RETENTION_DAYS` (default 30).

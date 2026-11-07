@@ -424,7 +424,7 @@ data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
             coalesce(d.calls,0)::int AS calls, coalesce(d.denied,0)::int AS denied
        FROM roles r JOIN cloud_accounts a ON a.id=r.account_id
        LEFT JOIN (SELECT role_id, sum(count) calls, sum(error_count) denied FROM activity_daily GROUP BY role_id) d ON d.role_id=r.id
-      WHERE r.deleted_at IS NULL AND ${where} ORDER BY r.risk_score DESC, r.name LIMIT 300`, p)).rows;
+      WHERE r.deleted_at IS NULL AND ${where} ORDER BY r.risk_score DESC, r.name LIMIT 3000`, p)).rows;
   const ids = roles.map((r) => r.id);
   const [acts, callers, accts, maps] = await Promise.all([
     ids.length ? query('SELECT DISTINCT role_id, action FROM activity_daily WHERE role_id = ANY($1)', [ids]) : { rows: [] },
@@ -440,6 +440,8 @@ data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
   res.json({
     roles: roles.map((r) => ({ ...r, unidentified: unk.get(r.id) || [], provisional: !hist.get(r.account_id)?.complete, progress: hist.get(r.account_id)?.progress ?? 0 })),
     callers: callers.rows,
+    accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
   });
 }));
 
