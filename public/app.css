@@ -289,3 +289,4 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .zone-foot .zf-r{padding:14px;border-left:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
 .zbar{display:flex;height:18px;gap:2px}.zbar button{border:0;padding:0;min-width:4px;cursor:pointer}.zbar button:disabled{cursor:default}
 @media (max-width:1200px){.zone-foot{grid-template-columns:minmax(0,1fr);height:auto}}
+.mode-sel{height:36px;background:var(--surface);border:1px solid var(--edge);color:var(--ink);font-family:var(--mono);font-size:11px;padding:0 6px}

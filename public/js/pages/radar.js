@@ -54,25 +54,47 @@ export async function radarPage(ctx) {
   const accounts = data.accounts.filter((a) => roles.some((r) => r.account_id === a.id));
   const provisionalAny = roles.some((r) => r.provisional);
 
-  // account slices, sized by role count
-  const span = 360 - GAP * accounts.length; let a0 = 0;
-  const slices = accounts.map((a) => {
-    const list = roles.filter((r) => r.account_id === a.id); const w = (span * list.length) / roles.length;
-    const s = { ...a, list, a0: a0 + GAP / 2, a1: a0 + GAP / 2 + w }; a0 += w + GAP; return s;
-  });
-  for (const s of slices) {
-    for (let z = 0; z < 4; z++) {
-      const inZone = s.list.filter((r) => r.zone === z).sort((a, b) => a.name.localeCompare(b.name));
-      inZone.forEach((r, k) => {
-        const ang = s.a0 + 2 + ((k + 0.2 + r.jit * 0.6) / inZone.length) * (s.a1 - s.a0 - 4);
-        const t = z === 3 ? r.jit2 : z === 0 ? r.never / 0.25 : z === 1 ? (r.never - 0.25) / 0.5 : (r.never - 0.75) / 0.25;
-        const rad = RZ[z] + 8 + Math.max(0, Math.min(1, t)) * (RZ[z + 1] - RZ[z] - 16);
-        [r.x, r.y] = P(ang, rad); r.ang = ang; r.rad = rad; r.slice = s;
-      });
+  // slices: one per account while there are few; past MAX_ACCOUNT_SLICES, one per environment (or kind), with each
+  // account a sub-arc inside it, so twenty accounts never mean twenty unreadable wedges
+  const ENV_ORDER = ['production', 'staging', 'development', 'sandbox'];
+  const envName = (e) => (e || 'other').toUpperCase();
+  function layout(mode) {
+    const defs = mode === 'account' ? accounts.map((a) => ({ id: a.id, name: a.name, accounts: [a], href: `#/?account=${a.id}`, of: (r) => r.account_id === a.id }))
+      : mode === 'kind' ? Object.keys(KIND_LABEL).map((k) => ({ id: k, name: KIND_LABEL[k].toUpperCase(), accounts, of: (r) => r.kind === k }))
+      : [...new Set(accounts.map((a) => a.environment || 'other'))].sort((x, y) => (ENV_ORDER.indexOf(x) + 1 || 9) - (ENV_ORDER.indexOf(y) + 1 || 9) || x.localeCompare(y))
+        .map((e) => ({ id: e, name: envName(e), accounts: accounts.filter((a) => (a.environment || 'other') === e), of: (r) => (byAcct.get(r.account_id)?.environment || 'other') === e }));
+    const groups = defs.map((d) => ({ ...d, list: roles.filter(d.of) })).filter((g) => g.list.length);
+    const span = 360 - GAP * groups.length; let a0 = 0;
+    for (const g of groups) {
+      const w = (span * g.list.length) / roles.length; g.a0 = a0 + GAP / 2; g.a1 = g.a0 + w; a0 += w + GAP;
+      g.complete = g.accounts.every((a) => a.complete);
+      g.progress = Math.floor(g.accounts.reduce((t, a) => t + a.progress, 0) / g.accounts.length);
+      const subs = g.accounts.map((a) => ({ account: a, list: g.list.filter((r) => r.account_id === a.id) })).filter((x) => x.list.length);
+      const SUBGAP = subs.length > 1 ? Math.min(0.8, (w * 0.15) / subs.length) : 0; let b0 = g.a0;
+      const inner = w - SUBGAP * (subs.length - 1);
+      for (const sub of subs) { sub.a0 = b0; sub.a1 = b0 + (inner * sub.list.length) / g.list.length; b0 = sub.a1 + SUBGAP; sub.group = g; }
+      g.subs = subs;
+      for (const sub of subs) {
+        const pad = Math.min(2, (sub.a1 - sub.a0) * 0.15);
+        for (let z = 0; z < 4; z++) {
+          const inZone = sub.list.filter((r) => r.zone === z).sort((x, y) => x.name.localeCompare(y.name));
+          inZone.forEach((r, k) => {
+            const ang = sub.a0 + pad + ((k + 0.2 + r.jit * 0.6) / inZone.length) * (sub.a1 - sub.a0 - 2 * pad);
+            const t = z === 3 ? r.jit2 : z === 0 ? r.never / 0.25 : z === 1 ? (r.never - 0.25) / 0.5 : (r.never - 0.75) / 0.25;
+            const rad = RZ[z] + 8 + Math.max(0, Math.min(1, t)) * (RZ[z + 1] - RZ[z] - 16);
+            [r.x, r.y] = P(ang, rad); r.ang = ang; r.rad = rad; r.sub = sub;
+          });
+        }
+      }
     }
+    return groups;
   }
+  const byAcct = new Map(accounts.map((a) => [a.id, a]));
+  const MAX_ACCOUNT_SLICES = 8;
+  let groups = [];
 
-  const st = { sel: ranked[0].id, filter: null, fold: true, zoom: 1, cx: CX, cy: CY, search: '', callers: [] };
+  const st = { mode: accounts.length > MAX_ACCOUNT_SLICES ? 'environment' : 'account', sel: ranked[0].id, filter: null, fold: true, zoom: 1, cx: CX, cy: CY, search: '', callers: [] };
+  groups = layout(st.mode);
   const attention = (r) => r.risk === 'High' || r.unidentified.length > 0 || r.denied > 0;
   const fnOf = () => (st.filter ? FILTERS.find((f) => f[0] === st.filter)[2] : null);
   const litOf = () => { const fn = fnOf(); return (r) => (fn ? fn(r) : attention(r)); };
@@ -80,7 +102,7 @@ export async function radarPage(ctx) {
 
   // ---- the scope ----
   const stage = svg('svg', { class: 'stage', viewBox: '-110 0 1020 800', preserveAspectRatio: 'xMidYMid meet', role: 'img',
-    'aria-label': 'Radar of roles seen from above. Distance from the centre is the share of permissions never called, in four zones; each account has its own slice.' });
+    'aria-label': 'Radar of roles seen from above. Distance from the centre is the share of permissions never called, in four zones; slices group roles by account, environment or kind.' });
   const hud = h('div', { class: 'hud' });
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -93,20 +115,36 @@ export async function radarPage(ctx) {
       svg('radialGradient', { id: 'sw2', cx: 0, cy: 0, r: 330, gradientUnits: 'userSpaceOnUse' },
         svg('stop', { offset: 0, 'stop-color': '#f6e016', 'stop-opacity': 0.16 }), svg('stop', { offset: 1, 'stop-color': '#f6e016', 'stop-opacity': 0.02 }))));
     ZONES.forEach((z, i) => k.push(svg('path', { d: `${disc(RZ[i + 1])} ${i ? disc(RZ[i]) : ''}`, fill: z.fill, 'fill-rule': 'evenodd', stroke: '#1a4231' })));
-    for (const s of slices) {
-      const [ex0, ey0] = P(s.a0 - GAP / 2, RZ[0]), [ex1, ey1] = P(s.a0 - GAP / 2, 322), [ax0, ay0] = P(s.a0, 322), [ax1, ay1] = P(s.a1, 322);
-      const mid = (s.a0 + s.a1) / 2; const [lx, lyRaw] = P(mid, 340); const ly = r1(lyRaw + (lyRaw < CY ? -8 : 6));
+    const selSub = byId.get(st.sel).sub;
+    for (const g of groups) {
+      const [ex0, ey0] = P(g.a0 - GAP / 2, RZ[0]), [ex1, ey1] = P(g.a0 - GAP / 2, 322);
+      if (groups.length > 1) k.push(svg('path', { d: `M${ex0} ${ey0} L${ex1} ${ey1}`, stroke: '#2a5c45', 'stroke-width': 1.2 }));
+      // each account is a stretch of the rim; colour alternates so neighbours read apart
+      g.subs.forEach((sub, i) => {
+        const [ax0, ay0] = P(sub.a0, 322), [ax1, ay1] = P(sub.a1, 322); const hot = sub === selSub;
+        k.push(svg('path', { d: `M${ax0} ${ay0} A322 322 0 ${sub.a1 - sub.a0 > 180 ? 1 : 0} 1 ${ax1} ${ay1}`, fill: 'none', 'stroke-width': hot ? 5 : 3,
+          stroke: hot ? '#f6e016' : !sub.account.complete ? '#8a7d12' : i % 2 ? '#24573f' : '#3a8a64', 'stroke-dasharray': !hot && !sub.account.complete ? '6 4' : null,
+          style: 'cursor:pointer', onClick: () => go(`#/?account=${sub.account.id}`) },
+          svg('title', null, `${sub.account.name} · ${sub.list.length} roles${sub.account.complete ? '' : ` · ${sub.account.progress}% read`}. Click to show only this account.`)));
+      });
+      if (g.a1 - g.a0 < 12) continue;      // too narrow to label; the rim tooltip still names it
+      const mid = (g.a0 + g.a1) / 2; const [lx, lyRaw] = P(mid, 342); const ly = r1(lyRaw + (lyRaw < CY ? -8 : 6));
       const anchor = Math.abs(lx - CX) < 40 ? 'middle' : lx > CX ? 'start' : 'end';
-      const sub = `${s.list.length} roles · ${s.list.filter((r) => r.zone >= 2).length} bloated or dead${s.complete ? '' : ` · ${s.progress}% read`}`;
+      const nb = g.list.filter((r) => r.zone >= 2).length;
+      const sub = `${g.accounts.length > 1 ? `${g.subs.length} accts · ` : ''}${g.list.length} roles${g.complete ? '' : ` · ${g.progress}% read`}`;
       const fit = (w) => (anchor === 'start' ? Math.min(lx, 906 - w) : anchor === 'end' ? Math.max(lx, -106 + w) : lx);
-      const lxc = fit(s.name.length * 7.3), lxs = fit(sub.length * 5.6);
-      const g = svg('g', { style: 'cursor:pointer', onClick: () => go(`#/?account=${s.id}`) },
-        svg('title', null, `Show only ${s.name}`),
-        slices.length > 1 ? svg('path', { d: `M${ex0} ${ey0} L${ex1} ${ey1}`, stroke: '#2a5c45', 'stroke-width': 1.2 }) : null,
-        svg('path', { d: `M${ax0} ${ay0} A322 322 0 ${s.a1 - s.a0 > 180 ? 1 : 0} 1 ${ax1} ${ay1}`, fill: 'none', stroke: s.complete ? '#2f6e52' : '#8a7d12', 'stroke-width': 3, 'stroke-dasharray': s.complete ? null : '6 4' }),
-        svg('text', { x: r1(lxc), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': 12 }, s.name),
-        svg('text', { x: r1(lxs), y: ly + 14, 'text-anchor': anchor, fill: '#7e978a', 'font-size': 11 }, sub));
-      k.push(g);
+      const t = svg('g', g.href ? { style: 'cursor:pointer', onClick: () => go(g.href) } : null,
+        svg('title', null, `${g.name}: ${g.subs.length} account${g.subs.length > 1 ? 's' : ''}, ${g.list.length} roles, ${nb} bloated or dead`),
+        svg('text', { x: r1(fit(g.name.length * 7.3)), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': 12 }, g.name),
+        svg('text', { x: r1(fit(sub.length * 5.6)), y: ly + 14, 'text-anchor': anchor, fill: '#7e978a', 'font-size': 11 }, sub));
+      k.push(t);
+    }
+    // name the selected role's account on its stretch of rim when slices are not accounts
+    if (st.mode !== 'account' && selSub) {
+      const mid = (selSub.a0 + selSub.a1) / 2; const [x, y] = P(mid, 309); const t = selSub.account.name;
+      const bw = t.length * 6.2 + 8;
+      k.push(svg('rect', { x: r1(x - bw / 2), y: r1(y - 9), width: r1(bw), height: 14, fill: '#030d08', stroke: '#f6e016', 'stroke-width': 0.8, 'pointer-events': 'none' }),
+        svg('text', { x, y: r1(y + 2), 'text-anchor': 'middle', fill: '#f6e016', 'font-family': 'Geist Mono, monospace', 'font-size': 10, 'pointer-events': 'none' }, t));
     }
     if (!still) k.push(svg('g', { transform: `translate(${CX} ${CY})`, 'pointer-events': 'none' }, svg('g', null,
       svg('path', { d: 'M0 0 L330 0 A330 330 0 0 0 285.8 -165 Z', fill: 'url(#sw2)' }), svg('path', { d: 'M0 0 L330 0', stroke: '#f6e016', 'stroke-opacity': 0.55, 'stroke-width': 2 }),
@@ -120,12 +158,12 @@ export async function radarPage(ctx) {
     });
 
     // quiet roles: fold crowded bins; bins get finer as you zoom in, so blobs split
-    const perSlice = Math.max(3, Math.round(3 * st.zoom * st.zoom));
     const bins = new Map();
     for (const r of roles) {
       if (lit(r) || r.id === sel.id) continue;
-      const s = r.slice; const b = Math.min(perSlice - 1, Math.floor(((r.ang - s.a0) / (s.a1 - s.a0)) * perSlice));
-      const key = `${s.id}:${r.zone}:${b}`; if (!bins.has(key)) bins.set(key, []); bins.get(key).push(r);
+      const s = r.sub; const per = Math.max(1, Math.round(((s.a1 - s.a0) / 12) * st.zoom * st.zoom));
+      const b = Math.min(per - 1, Math.floor(((r.ang - s.a0) / Math.max(s.a1 - s.a0, 0.001)) * per));
+      const key = `${s.group.id}:${s.account.id}:${r.zone}:${b}`; if (!bins.has(key)) bins.set(key, []); bins.get(key).push(r);
     }
     const dim = fn ? 0.25 : 0.55;
     for (const list of bins.values()) {
@@ -143,8 +181,10 @@ export async function radarPage(ctx) {
     }
 
     // selected role's callers (filled in once its details arrive)
+    const callerBoxes = [];
     st.callers.forEach((c, i, all) => {
       const ang = sel.ang + (i - (all.length - 1) / 2) * 14; const [x, y] = P(ang, 330); const left = x < CX;
+      const cw = Math.min(c.name.length, 26) * 6.8 + 12; callerBoxes.push(left ? [x - cw, y - 12, x, y + 14] : [x, y - 12, x + cw, y + 14]);
       const [mx, my] = P((ang + sel.ang) / 2, (330 + sel.rad) / 2 + 20);
       k.push(svg('path', { d: `M${x} ${y} Q${mx} ${my} ${sel.x} ${sel.y}`, fill: 'none', stroke: c.ok ? '#6fe3b0' : '#f0b45a', 'stroke-width': 1.5, class: still ? null : 'live' }),
         svg('path', { d: `M${x} ${y - 5} L${x + 5} ${y} L${x} ${y + 5} L${x - 5} ${y} Z`, fill: '#e3efe8' }),
@@ -167,7 +207,7 @@ export async function radarPage(ctx) {
     }
 
     // tags, pushed outward, skipping collisions (sizes divided by zoom so they stay readable)
-    const zf = 1 / Math.sqrt(st.zoom), placed = [...zoneBoxes];
+    const zf = 1 / Math.sqrt(st.zoom), placed = [...zoneBoxes, ...callerBoxes];
     const tagged = roles.filter((r) => tagOf.has(r.id)).sort((a, b) => a.rank - b.rank);
     if (!tagOf.has(sel.id)) tagged.unshift(sel);
     for (const r of tagged) {
@@ -189,9 +229,9 @@ export async function radarPage(ctx) {
     const vw = 1020 / st.zoom, vh = 800 / st.zoom;
     stage.setAttribute('viewBox', `${r1(st.cx - vw / 2)} ${r1(st.cy - vh / 2)} ${r1(vw)} ${r1(vh)}`);
     hud.replaceChildren(
-      h('div', { class: 'hot' }, `● RADAR · ${slices.length} ACCOUNT${slices.length > 1 ? 'S' : ''} · ${num(roles.length)} ROLES${provisionalAny ? ' · FILLING IN' : ''}`),
+      h('div', { class: 'hot' }, `● RADAR · ${accounts.length} ACCOUNT${accounts.length > 1 ? 'S' : ''} · ${num(roles.length)} ROLES${provisionalAny ? ' · FILLING IN' : ''}`),
       h('div', null, `${roles.filter(attention).length} NEED ATTENTION · ${tagOf.size} TAGGED · ${st.fold ? 'QUIET ROLES FOLDED' : 'ALL DOTS'}`),
-      h('div', null, `DISTANCE = SHARE NEVER CALLED · SLICE = ACCOUNT${st.zoom > 1.05 ? ` · ZOOM ${st.zoom.toFixed(1)}×` : ''}`));
+      h('div', null, `DISTANCE = SHARE NEVER CALLED · SLICE = ${{ account: 'ACCOUNT', environment: 'ENVIRONMENT', kind: 'ROLE KIND' }[st.mode]}${st.zoom > 1.05 ? ` · ZOOM ${st.zoom.toFixed(1)}×` : ''}`));
   }
 
   // ---- zoom and pan ----
@@ -211,7 +251,10 @@ export async function radarPage(ctx) {
   });
   stage.addEventListener('pointerup', () => { drag = null; });
   const foldBtn = h('button', { 'aria-pressed': 'true', style: 'width:auto;padding:0 10px;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em', onClick: () => { st.fold = !st.fold; foldBtn.setAttribute('aria-pressed', String(st.fold)); foldBtn.textContent = st.fold ? 'FOLDED' : 'ALL DOTS'; draw(); } }, 'FOLDED');
-  const tools = h('div', { class: 'scene-tools', style: 'align-items:flex-end' }, foldBtn,
+  const modeSel = h('select', { 'aria-label': 'Slice the radar by', class: 'mode-sel' },
+    [['account', 'Slice: account'], ['environment', 'Slice: environment'], ['kind', 'Slice: role kind']].map(([v, t]) => h('option', { value: v, selected: v === st.mode }, t)));
+  modeSel.addEventListener('change', () => { st.mode = modeSel.value; groups = layout(st.mode); zoomAt(CX, CY, 1); });
+  const tools = h('div', { class: 'scene-tools', style: 'align-items:flex-end' }, modeSel, foldBtn,
     h('button', { 'aria-label': 'Zoom in', onClick: () => zoomAt(st.cx, st.cy, st.zoom * 1.4) }, '+'),
     h('button', { 'aria-label': 'Zoom out', onClick: () => zoomAt(st.cx, st.cy, st.zoom / 1.4) }, '−'),
     h('button', { 'aria-label': 'Reset view', onClick: () => zoomAt(CX, CY, 1) }, '⟲'));
@@ -325,8 +368,8 @@ export async function radarPage(ctx) {
         return h('span', { class: 'row', style: 'gap:6px' }, sw, h('b', { style: 'color:var(--ink);font-weight:500' }, z.name), `${roles.filter((r) => r.zone === i).length} roles · ${z.range}`);
       }))),
       h('div', { class: 'zf-r' }, h('div', { class: 'eyebrow' }, 'HISTORY'),
-        h('div', { class: 'tiny muted' }, slices.every((s) => s.complete) ? `All ${slices.length} account${slices.length > 1 ? 's' : ''} read · results final`
-          : `${slices.filter((s) => !s.complete).map((s) => `${s.name} ${s.progress}%`).join(' · ')} · results provisional`),
+        h('div', { class: 'tiny muted' }, accounts.every((a) => a.complete) ? `All ${accounts.length} account${accounts.length > 1 ? 's' : ''} read · results final`
+          : `${accounts.filter((a) => a.complete).length} of ${accounts.length} accounts read · ${accounts.filter((a) => !a.complete).slice(0, 3).map((a) => `${a.name} ${a.progress}%`).join(' · ')}${accounts.filter((a) => !a.complete).length > 3 ? ' …' : ''} · provisional`),
         h('a', { href: '#/scans', class: 'tiny' }, 'Open scans')));
   }
 

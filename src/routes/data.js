@@ -440,7 +440,7 @@ data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
   res.json({
     roles: roles.map((r) => ({ ...r, unidentified: unk.get(r.id) || [], provisional: !hist.get(r.account_id)?.complete, progress: hist.get(r.account_id)?.progress ?? 0 })),
     callers: callers.rows,
-    accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
+    accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   });
 }));

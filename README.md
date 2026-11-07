@@ -45,7 +45,7 @@ Edit an account at any time. Switching source keeps the stored history. Widening
 
 ## The radar
 
-The portal opens on a **radar** of every role in scope, seen from above. Distance from the centre is the share of a role's permissions never called, in four zones: *Tight* (under 25%), *Loose*, *Bloated* (over 75%) and *Dead* (no calls in the history read). Each account has its own slice; shape shows the kind of role and size the permissions it holds.
+The portal opens on a **radar** of every role in scope, seen from above. Distance from the centre is the share of a role's permissions never called, in four zones: *Tight* (under 25%), *Loose*, *Bloated* (over 75%) and *Dead* (no calls in the history read). With up to 8 accounts each has its own slice; with more, slices are environments (production, staging, …) and each account is a stretch of the rim inside its environment, named when one of its roles is selected. You can also slice by role kind. Shape shows the kind of role and size the permissions it holds.
 
 Built to stay readable at hundreds of roles: only roles that need attention (high risk, unidentified calls, denied calls) are bright, and the ten most urgent get a short tag (R-01…). Quiet roles that crowd together fold into numbered blobs, which split as you zoom (scroll, or click a blob). Callers are drawn only for the selected role. Names live in the ranked list on the left, with filters for high risk, unidentified, denied, bloated and dead.
 
