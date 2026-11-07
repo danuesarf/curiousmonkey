@@ -12,6 +12,7 @@ import { suggestMappings, decideMapping, markUnresolved } from '../recommender/e
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
+import { trustMap, toCsv } from '../trustmap.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
@@ -445,6 +446,17 @@ data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
     accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
       .sort((a, b) => a.name.localeCompare(b.name)),
   });
+}));
+
+// ---- trust map: who can reach each role, and what is wrong with it ----
+data.get('/trust', requirePerm('view'), wrap(async (req, res) => {
+  res.json(await trustMap(req.user, String(req.query.q || '').slice(0, 500)));
+}));
+data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
+  const m = await trustMap(req.user, String(req.query.q || '').slice(0, 500), { limit: 100000 });
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="trust-map.csv"');
+  res.send(toCsv(m.rows));
 }));
 
 // ---- radar v3 ----

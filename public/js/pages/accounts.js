@@ -272,6 +272,7 @@ function accountCard(a, ctx, can) {
       h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
         can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
         h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
+        h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}` }, 'Trust map'),
         h('a', { class: 'btn sm', href: `#/accounts/${a.id}/unidentified` }, 'Unidentified calls'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),

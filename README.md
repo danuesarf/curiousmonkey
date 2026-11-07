@@ -60,6 +60,27 @@ The portal opens on a **radar** with three views:
 
 The radar and role pages show data as soon as the first slices are read. Until an account's history is fully read, its results are marked **provisional**: used counts are "at least", never-called counts are "at most". The status bar shows how much is read and the time left. A provisional analysis runs every `PROVISIONAL_EVERY_SECONDS` (default 300). **Approval is blocked until history is complete.**
 
+## Trust map
+
+**Trust** in the rail lists every way into every role, read from the trust policies. Each (statement × principal) is one row, with:
+
+- where it comes from: the same account, your other connected accounts, AWS accounts outside your estate, OIDC (GitHub Actions, Bitbucket Pipelines, GitLab, EKS service accounts, Terraform Cloud…), SAML, Google, AWS services, or anyone;
+- the conditions on the way in, and what was actually seen coming in through it;
+- findings: trusts a whole account (`:root`) instead of a role; principal `*` or `NotPrincipal`; an account outside your estate with no `sts:ExternalId`; OIDC with no `sub` condition, or a broad wildcard `sub`; no `aud`; SAML with no `SAML:aud`; an IAM user; a deleted identity; `sts:*`; never used.
+
+Everything is a query, so a view is a shareable link and a CSV export:
+
+```
+finding:account-root                      roles that trust a whole account
+from:123456789012                         roles that trust that account (or a connected account's name)
+account:payments-prod source:oidc         OIDC ways into one account's roles
+provider:github finding:oidc-broad-sub    GitHub Actions trust with a wildcard subject
+source:external -cond:ExternalId          outside accounts with no ExternalId condition
+role:deploy has:findings used:no          …
+```
+
+Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `cond` `env` `has` `no` `used`; prefix `-` to exclude; anything else is free text.
+
 ## Unidentified calls
 
 Each account has an **Unidentified calls** page. It accounts for every CloudTrail event read: role sessions, role calls, and events outside scope (IAM users, root, services, roles the account doesn't have). It also covers three cases that need care:

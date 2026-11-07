@@ -89,3 +89,18 @@ test('a new caller after the first full read is a ping; the same caller again is
   const feed = await api.changeFeed(owner, { accountId: B });
   assert.equal(feed.items[0].role_name, 'data-reader');
 });
+
+test('trust map over the database: scope, query, what was seen, CSV', async () => {
+  const tm = await import('../src/trustmap.js');
+  await db.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count, trust_policy) VALUES ($1,'arn:aws:iam::222222222222:role/cross','cross','custom',5,$2)`,
+    [B, JSON.stringify({ Statement: [{ Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::111111111111:root' }, Action: 'sts:AssumeRole' }] })]);
+  const all = await tm.trustMap(owner, 'finding:account-root');
+  assert.deepEqual(all.rows.map((e) => [e.role, e.group, e.principalAccountName]), [['cross', 'connected-account', 'payments-prod']]);
+  assert.equal(all.summary[0].sources[0].query, 'from:111111111111');
+  const scoped = await tm.trustMap({ scope_accounts: [A] }, 'finding:account-root');
+  assert.equal(scoped.total, 0);
+  const named = await tm.trustMap(owner, 'role:ops-admin');
+  assert.equal(named.rows[0].type, 'aws-role');
+  assert.equal(named.rows[0].group, 'same-account');
+  assert.match(tm.toCsv(all.rows).split('\n')[1], /^"data-stg","222222222222","cross"/);
+});
