@@ -302,3 +302,11 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .fresh{color:var(--banana)}
 .stat-grid{border:1px solid var(--line);background:var(--surface);padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .stat-grid>div{display:flex;flex-direction:column;gap:2px;min-width:0}
+/* findings on the role page */
+.finding{display:flex;flex-direction:column;gap:10px;padding:16px 18px;border:1px solid var(--line);border-left:3px solid var(--edge);background:var(--panel)}
+.finding.high{border-left-color:var(--red)}.finding.medium{border-left-color:var(--amber)}.finding.low{border-left-color:var(--green)}
+.finding>.row h3{font-size:15px;font-weight:500;flex:1 1 260px;min-width:0}
+.finding>p{margin:0;line-height:1.5;max-width:90ch}
+.finding input{width:100%;max-width:720px}
+.finding .row .btn{flex:none}
+.chart{width:100%;height:120px;display:block}.chart rect.bad{fill:var(--red)}

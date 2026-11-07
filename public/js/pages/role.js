@@ -106,7 +106,7 @@ function findingsTab(d, ctx, openIdentify) {
       try { await post(`/flags/${f.id}/decision`, { decision, note: note.value || undefined, resources: decision === 'keep_scoped' && res.value ? res.value.split(',').map((s) => s.trim()).filter(Boolean) : undefined });
         toast('Decision saved'); ctx.reload(); } catch (e) { toast(e.message, true); }
     };
-    return h('article', { class: `flag ${f.severity}` },
+    return h('article', { class: `finding ${f.severity}` },
       h('div', { class: 'row' }, h('span', { class: 'badge b-neutral' }, CAT[f.category] || f.category), h('span', { class: `badge b-${f.severity}` }, f.severity), h('h3', null, f.title),
         f.decision && h('span', { class: 'badge b-green' }, `${f.decision.replace('_', ' ')} by ${f.decided_by || 'someone'}`)),
       h('p', null, f.reason), f.evidence && h('p', { class: 'small muted' }, f.evidence),
