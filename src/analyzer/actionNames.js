@@ -4,6 +4,8 @@ import { canonicalAction, actionInfo } from './catalog.js';
 const PREFIX = {
   monitoring: 'cloudwatch', email: 'ses', tagging: 'tag', 'sso-directory': 'sso-directory',
   'runtime.sagemaker': 'sagemaker', 'api.ecr': 'ecr', 'kinesisanalytics': 'kinesisanalytics',
+  cloudcontrolapi: 'cloudformation',     // Cloud Control API's permissions use the cloudformation prefix
+  pinpoint: 'mobiletargeting',           // Amazon Pinpoint's permissions use mobiletargeting
 };
 const S3_ALIAS = {
   ListBuckets: 's3:ListAllMyBuckets', HeadBucket: 's3:ListBucket', ListObjects: 's3:ListBucket',
@@ -11,13 +13,42 @@ const S3_ALIAS = {
   GetBucketLocation: 's3:GetBucketLocation', CreateMultipartUpload: 's3:PutObject', UploadPart: 's3:PutObject',
   CompleteMultipartUpload: 's3:PutObject', ListMultipartUploads: 's3:ListBucketMultipartUploads',
   ListParts: 's3:ListMultipartUploadParts', DeleteObjects: 's3:DeleteObject', CopyObject: 's3:PutObject',
+  UploadPartCopy: 's3:PutObject', SelectObjectContent: 's3:GetObject',
+  // bucket configuration: the event says Bucket…, the permission says …Configuration
+  GetBucketEncryption: 's3:GetEncryptionConfiguration', PutBucketEncryption: 's3:PutEncryptionConfiguration', DeleteBucketEncryption: 's3:PutEncryptionConfiguration',
+  GetBucketLifecycle: 's3:GetLifecycleConfiguration', GetBucketLifecycleConfiguration: 's3:GetLifecycleConfiguration',
+  PutBucketLifecycle: 's3:PutLifecycleConfiguration', PutBucketLifecycleConfiguration: 's3:PutLifecycleConfiguration', DeleteBucketLifecycle: 's3:PutLifecycleConfiguration',
+  GetBucketReplication: 's3:GetReplicationConfiguration', PutBucketReplication: 's3:PutReplicationConfiguration', DeleteBucketReplication: 's3:PutReplicationConfiguration',
+  GetBucketCors: 's3:GetBucketCORS', PutBucketCors: 's3:PutBucketCORS', DeleteBucketCors: 's3:PutBucketCORS',
+  GetBucketAccelerateConfiguration: 's3:GetAccelerateConfiguration', PutBucketAccelerateConfiguration: 's3:PutAccelerateConfiguration',
+  GetBucketIntelligentTieringConfiguration: 's3:GetIntelligentTieringConfiguration', ListBucketIntelligentTieringConfigurations: 's3:GetIntelligentTieringConfiguration',
+  PutBucketIntelligentTieringConfiguration: 's3:PutIntelligentTieringConfiguration', DeleteBucketIntelligentTieringConfiguration: 's3:PutIntelligentTieringConfiguration',
+  GetBucketAnalyticsConfiguration: 's3:GetAnalyticsConfiguration', ListBucketAnalyticsConfigurations: 's3:GetAnalyticsConfiguration',
+  PutBucketAnalyticsConfiguration: 's3:PutAnalyticsConfiguration', DeleteBucketAnalyticsConfiguration: 's3:PutAnalyticsConfiguration',
+  GetBucketInventoryConfiguration: 's3:GetInventoryConfiguration', ListBucketInventoryConfigurations: 's3:GetInventoryConfiguration',
+  PutBucketInventoryConfiguration: 's3:PutInventoryConfiguration', DeleteBucketInventoryConfiguration: 's3:PutInventoryConfiguration',
+  GetBucketMetricsConfiguration: 's3:GetMetricsConfiguration', ListBucketMetricsConfigurations: 's3:GetMetricsConfiguration',
+  PutBucketMetricsConfiguration: 's3:PutMetricsConfiguration', DeleteBucketMetricsConfiguration: 's3:PutMetricsConfiguration',
+  GetBucketNotificationConfiguration: 's3:GetBucketNotification', PutBucketNotificationConfiguration: 's3:PutBucketNotification',
+  GetObjectLockConfiguration: 's3:GetBucketObjectLockConfiguration', PutObjectLockConfiguration: 's3:PutBucketObjectLockConfiguration',
+  GetPublicAccessBlock: 's3:GetBucketPublicAccessBlock', PutPublicAccessBlock: 's3:PutBucketPublicAccessBlock', DeletePublicAccessBlock: 's3:PutBucketPublicAccessBlock',
+  DeleteBucketTagging: 's3:PutBucketTagging', DeleteBucketOwnershipControls: 's3:PutBucketOwnershipControls',
+  ListDirectoryBuckets: 's3express:ListAllMyDirectoryBuckets',
 };
+// one event source, two services: Application Auto Scaling logs as autoscaling.amazonaws.com too.
+// Only names that EC2 Auto Scaling does not also have are moved; the shared ones stay ambiguous.
+const APP_AUTOSCALING = new Set(['DescribeScalableTargets', 'RegisterScalableTarget', 'DeregisterScalableTarget', 'DescribeScalingPolicies', 'DeleteScalingPolicy',
+  'PutScheduledAction', 'GetPredictiveScalingForecast', 'TagResource', 'UntagResource', 'ListTagsForResource']);
+const EVENT_ALIAS = { 's3express:ListDirectoryBuckets': 's3express:ListAllMyDirectoryBuckets' };
 const APIGW_VERB = [['Get', 'GET'], ['Create', 'POST'], ['Put', 'PUT'], ['Update', 'PATCH'], ['Delete', 'DELETE'], ['Import', 'PUT'], ['Test', 'POST']];
 
 export function eventToAction(eventSource, eventName) {
   if (!eventSource || !eventName) return null;
   let svc = eventSource.replace(/\.amazonaws\.com(\.cn)?$/, '');
   svc = PREFIX[svc] || svc;
+  if (EVENT_ALIAS[`${svc}:${eventName}`]) return canonicalAction(EVENT_ALIAS[`${svc}:${eventName}`]);
+  if (svc === 'autoscaling' && APP_AUTOSCALING.has(eventName)) return canonicalAction(`application-autoscaling:${eventName}`);
+  if (svc === 'mediapackage' && /Packaging|Asset/.test(eventName)) return canonicalAction(`mediapackage-vod:${eventName}`);   // MediaPackage VOD
   if (svc === 's3') return canonicalAction(S3_ALIAS[eventName] || `s3:${eventName}`);
   if (svc === 'lambda') return canonicalAction(`lambda:${eventName.replace(/\d{8}.*$/, '')}`); // GetFunction20150331v2
   if (svc === 'apigateway') {

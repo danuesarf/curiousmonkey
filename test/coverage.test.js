@@ -124,3 +124,37 @@ test("can't resolve keeps the service unconfirmed and needs a note; the draft ho
   assert.ok(draft.diff.heldBack.count > 10 && draft.diff.heldBack.services.includes('quicksight'));
   assert.equal(draft.checks.find((c) => c.id === 'held-back').status, 'warn');
 });
+
+test('names CloudTrail and IAM spell differently map to the real permission', async () => {
+  const { mapEvent } = await import('../src/analyzer/actionNames.js');
+  const cases = [
+    ['cloudcontrolapi.amazonaws.com', 'GetResource', 'cloudformation:GetResource'], ['cloudcontrolapi.amazonaws.com', 'ListResources', 'cloudformation:ListResources'],
+    ['s3.amazonaws.com', 'GetBucketEncryption', 's3:GetEncryptionConfiguration'], ['s3.amazonaws.com', 'GetBucketLifecycle', 's3:GetLifecycleConfiguration'],
+    ['s3.amazonaws.com', 'GetBucketReplication', 's3:GetReplicationConfiguration'], ['autoscaling.amazonaws.com', 'DescribeScalableTargets', 'application-autoscaling:DescribeScalableTargets'],
+    ['autoscaling.amazonaws.com', 'DescribeScalingPolicies', 'application-autoscaling:DescribeScalingPolicies'], ['autoscaling.amazonaws.com', 'DescribeAutoScalingGroups', 'autoscaling:DescribeAutoScalingGroups'],
+    ['pinpoint.amazonaws.com', 'GetApps', 'mobiletargeting:GetApps'], ['s3express.amazonaws.com', 'ListDirectoryBuckets', 's3express:ListAllMyDirectoryBuckets'],
+    ['mediapackage.amazonaws.com', 'ListPackagingGroups', 'mediapackage-vod:ListPackagingGroups'],
+  ];
+  for (const [src, name, want] of cases) assert.deepEqual(mapEvent(src, name), { action: want, mapped: true }, `${src} ${name}`);
+});
+
+test('built-in names settle stored unidentified calls, but never a reviewer decision', async () => {
+  const { applyBuiltins } = await import('../src/analyzer/mappings.js');
+  const ins = (raw, src, name) => db.query(`INSERT INTO unmapped_events(account_id, raw_action, event_source, event_name, count, first_seen, last_seen)
+    VALUES ($1,$2,$3,$4,1,now(),now()) ON CONFLICT DO NOTHING`, [A, raw, src, name]);
+  await ins('s3:GetBucketReplication', 's3.amazonaws.com', 'GetBucketReplication');
+  await ins('pinpoint:GetApps', 'pinpoint.amazonaws.com', 'GetApps');
+  await ins('cloudcontrolapi:GetResource', 'cloudcontrolapi.amazonaws.com', 'GetResource');
+  await ins('madeup:DoThing', 'madeup.amazonaws.com', 'DoThing');
+  await db.query(`INSERT INTO event_action_map(raw_action, event_source, event_name, action, status, source) VALUES
+    ('pinpoint:GetApps','pinpoint.amazonaws.com','GetApps','mobiletargeting:GetApps','suggested','bedrock'),
+    ('cloudcontrolapi:GetResource','cloudcontrolapi.amazonaws.com','GetResource','cloudformation:ListResources','accepted','manual')
+    ON CONFLICT (raw_action) DO NOTHING`);
+  await applyBuiltins();
+  const m = Object.fromEntries((await db.query(`SELECT raw_action, action, status, source FROM event_action_map`)).rows.map((r) => [r.raw_action, r]));
+  assert.deepEqual(m['s3:GetBucketReplication'], { raw_action: 's3:GetBucketReplication', action: 's3:GetReplicationConfiguration', status: 'accepted', source: 'builtin' });
+  assert.equal(m['pinpoint:GetApps'].source, 'builtin');                   // a suggestion is replaced
+  assert.equal(m['cloudcontrolapi:GetResource'].action, 'cloudformation:ListResources'); // a reviewer's call stands
+  assert.equal(m['cloudcontrolapi:GetResource'].source, 'manual');
+  assert.equal(m['madeup:DoThing'], undefined);                            // unknown names stay for review
+});

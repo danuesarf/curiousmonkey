@@ -52,6 +52,9 @@ export function createApp() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   assertConfig();
   if (process.env.RUN_MIGRATIONS !== 'false') await migrate((m) => console.log(JSON.stringify({ level: 'info', msg: m })));
+  // event names a newer version knows how to map: settle them now, so the Unidentified list is right before the next scan
+  try { const n = await (await import('./analyzer/mappings.js')).applyBuiltins(); if (n) console.log(JSON.stringify({ level: 'info', msg: `settled ${n} event names with built-in mappings` })); }
+  catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `built-in mappings: ${e.message}` })); }
   const srv = createApp().listen(config.port, '0.0.0.0', () => console.log(JSON.stringify({ level: 'info', msg: `listening on :${config.port}` })));
   const stop = () => srv.close(async () => { await closePool(); process.exit(0); });
   process.on('SIGTERM', stop); process.on('SIGINT', stop);

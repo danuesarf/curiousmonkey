@@ -1,7 +1,7 @@
 import { query, tx, pool } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
-import { loadMappings, translate } from '../analyzer/mappings.js';
+import { loadMappings, translate, applyBuiltins } from '../analyzer/mappings.js';
 import { snapshotAndDiff } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
 
@@ -72,6 +72,7 @@ export async function analyzeAccount(accountId, { alive = () => {}, progress = a
   // The oldest event we hold is the edge of what "unused" can honestly mean.
   const cp = (await query('SELECT min(first_event_time) AS t FROM scan_checkpoints WHERE account_id=$1', [accountId])).rows[0];
   const windowStart = cp.t ? new Date(cp.t) : new Date(Date.now() - 90 * DAY);
+  await applyBuiltins();                 // names learned by a newer version settle before history is credited
   const maps = await loadMappings();
   let done = 0;
   for (const role of roles) {
