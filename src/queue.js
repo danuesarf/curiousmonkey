@@ -7,9 +7,10 @@ import { query, tx } from './db.js';
 export const LEASE_SECONDS = 90;
 export const workerId = `${os.hostname()}:${process.pid}:${crypto.randomBytes(3).toString('hex')}`;
 
-// Errors worth retrying: throttling, network, 5xx. Credential/permission problems are not.
-const NON_RETRYABLE = /AccessDenied|UnauthorizedOperation|InvalidClientTokenId|ExpiredToken|ValidationError|InvalidParameter|NoSuchEntity|not_found|ExternalId/i;
-const RETRYABLE = /Throttl|Rate exceeded|TooManyRequests|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|ServiceUnavailable|InternalFailure|RequestTimeout|5\d\d/i;
+// Errors worth retrying: throttling, network, 5xx, and an expired role session (a new attempt assumes the role again).
+// Credential and permission problems are not. Expired *base* keys are raised as non-retryable by the credentials module.
+const NON_RETRYABLE = /AccessDenied|UnauthorizedOperation|InvalidClientTokenId|ValidationError|InvalidParameter|NoSuchEntity|not_found|ExternalId/i;
+const RETRYABLE = /ExpiredToken|security token included in the request is expired|Throttl|Rate exceeded|TooManyRequests|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|ServiceUnavailable|InternalFailure|RequestTimeout|5\d\d/i;
 
 export function classifyError(e) {
   const text = `${e?.name || ''} ${e?.code || ''} ${e?.message || ''}`;

@@ -6,7 +6,7 @@ import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, G
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { gunzipSync } from 'node:zlib';
-import { baseCredentials } from './credentials.js';
+import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, fileTimeFromKey } from './trailKeys.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
   ListEventDataStoresCommand } from '@aws-sdk/client-cloudtrail';
@@ -20,10 +20,14 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
   if (account.auth_mode === 'access_key') credentials = base;
   else {
     const sts = new STSClient({ region: account.regions[0], credentials: base });
-    const out = await sts.send(new AssumeRoleCommand({
-      RoleArn: account.role_arn, RoleSessionName: sessionName, ExternalId: externalId, DurationSeconds: 3600 }));
-    const c = out.Credentials;
-    credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken };
+    credentials = refreshingRoleCredentials({
+      assume: async () => {
+        const c = (await sts.send(new AssumeRoleCommand({
+          RoleArn: account.role_arn, RoleSessionName: sessionName, ExternalId: externalId, DurationSeconds: 3600 }))).Credentials;
+        return { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: new Date(c.Expiration) };
+      },
+    });
+    await credentials();                                      // fail fast: a wrong trust policy or ExternalId shows at once
   }
   const iam = new IAMClient({ region: 'us-east-1', credentials });
   const trails = new Map();

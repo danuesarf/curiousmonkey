@@ -29,3 +29,29 @@ export function principalFromCallerArn(arn) {
   if (m) return `arn:${m[1]}:iam::${m[2]}:role/${m[3]}`;
   return arn || null;
 }
+
+const REFRESH_BEFORE_MS = 5 * 60e3;
+/**
+ * Credentials for the scanner role that renew themselves. Scans can run for hours, longer than one role session,
+ * so every SDK call asks this provider, which re-assumes the role 5 minutes before the session ends.
+ * Concurrent callers share one AssumeRole call.
+ */
+export function refreshingRoleCredentials({ assume, now = () => Date.now() }) {
+  let current = null, pending = null;
+  return async () => {
+    if (current && current.expiration.getTime() - now() > REFRESH_BEFORE_MS) return current;
+    if (!pending) {
+      pending = assume()
+        .then((c) => { current = c; return c; })
+        .catch((e) => {
+          if (/ExpiredToken|security token included in the request is expired/i.test(`${e.name} ${e.message}`)) {
+            throw Object.assign(new Error('The credentials used to assume the scanner role have expired. They are temporary keys (in the worker’s .env, or saved on this account). Replace them with long-lived keys or give the worker a role, then retry the scan.'),
+              { name: 'BaseCredentialsExpired', retryable: false });
+          }
+          throw e;
+        })
+        .finally(() => { pending = null; });
+    }
+    return pending;
+  };
+}

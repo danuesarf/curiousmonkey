@@ -34,7 +34,7 @@ export async function runInventory(ctx) {
     if (e.name === 'CredentialsProviderError' || /Could not load credentials/i.test(e.message)) {
       e.message = 'The worker has no AWS credentials to start from. Give the worker an instance, task or pod role, put keys in its .env, or store keys on this account (Edit account).';
     }
-    if (e.retryable === false || /AccessDenied|not authorized|ExternalId|InvalidClientTokenId|SignatureDoesNotMatch|ExpiredToken|no AWS credentials/i.test(`${e.name} ${e.message}`)) {
+    if (e.retryable === false || /AccessDenied|not authorized|ExternalId|InvalidClientTokenId|SignatureDoesNotMatch|no AWS credentials/i.test(`${e.name} ${e.message}`)) {
       await query(`UPDATE cloud_accounts SET status='error', status_detail=$2 WHERE id=$1`,
         [ctx.job.account_id, JSON.stringify({ message: String(e.message).slice(0, 400), at: new Date().toISOString() })]);
       e.retryable = false;
