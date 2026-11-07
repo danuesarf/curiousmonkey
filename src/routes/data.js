@@ -8,7 +8,10 @@ import { inScope, scopeSql } from '../auth/rbac.js';
 import { enqueueRun } from '../queue.js';
 import { scannerSnippets } from '../onboarding.js';
 import { sealCredentials } from '../aws/credentials.js';
-import { suggestMappings, decideMapping } from '../recommender/eventMap.js';
+import { suggestMappings, decideMapping, markUnresolved } from '../recommender/eventMap.js';
+import { listSessions, buildTrack } from '../sessions.js';
+import { historyFor } from '../history.js';
+import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
 export const data = Router();
@@ -178,7 +181,8 @@ data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
       (SELECT coalesce(json_agg(json_build_object('region', region, 'first', first_event_time, 'last', last_event_time, 'events', events_read, 'gap', gap_detected)), '[]')
          FROM scan_checkpoints WHERE account_id=a.id) AS checkpoints
     FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', p)} ORDER BY a.name`, p);
-  res.json({ items: r.rows.map(publicAccount) });
+  const hist = await historyFor(r.rows);
+  res.json({ items: r.rows.map((a) => ({ ...publicAccount(a), history: hist.get(a.id) })) });
 }));
 
 data.get('/accounts/:id/data-events', requirePerm('view'), wrap(async (req, res) => {
@@ -198,7 +202,11 @@ data.get('/accounts/:id/coverage', requirePerm('view'), wrap(async (req, res) =>
     query(`SELECT region, ${sum} FROM event_coverage WHERE account_id=$1 AND day >= current_date - $2::int GROUP BY region ORDER BY region`, [a.id, days]),
     query(`SELECT u.raw_action, u.event_source, u.event_name, u.count, u.first_seen, u.last_seen, u.identity_type, u.param_keys,
              (SELECT count(DISTINCT d.role_id)::int FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=u.account_id AND d.action=u.raw_action) AS roles,
-             CASE WHEN m.raw_action IS NULL THEN NULL ELSE json_build_object('action', m.action, 'status', m.status, 'source', m.source, 'confidence', m.confidence, 'note', m.note, 'decided_at', m.decided_at) END AS mapping
+             CASE WHEN m.raw_action IS NULL THEN NULL ELSE json_build_object('action', m.action, 'status', m.status, 'source', m.source, 'confidence', m.confidence, 'note', m.note, 'decided_at', m.decided_at, 'reopen_at', m.reopen_at,
+               'decided_by', (SELECT name FROM users WHERE id=m.decided_by)) END AS mapping,
+             CASE WHEN m.raw_action IS NULL THEN 'open' WHEN m.status='suggested' THEN 'suggested' WHEN m.status='accepted' THEN 'identified'
+                  WHEN m.reopen_at < now() AND u.last_seen > m.decided_at THEN 'reopened' ELSE 'unresolved' END AS state,
+             (SELECT array_agg(DISTINCT r.name) FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=u.account_id AND d.action=u.raw_action) AS role_names
            FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
            WHERE u.account_id=$1 ORDER BY (m.status='accepted') NULLS FIRST, u.count DESC LIMIT 500`, [a.id]),
   ]);
@@ -227,11 +235,33 @@ data.put('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
   res.json(row);
 }));
 
+data.post('/event-mappings/unresolved', requirePerm('decide'), wrap(async (req, res) => {
+  const b = z.object({ rawAction: z.string().max(200), note: z.string().max(400) }).parse(req.body);
+  const seen = (await query('SELECT event_source, event_name FROM unmapped_events WHERE raw_action=$1 LIMIT 1', [b.rawAction])).rows[0];
+  if (!seen) throw NotFound();
+  const row = await markUnresolved({ rawAction: b.rawAction, eventSource: seen.event_source, eventName: seen.event_name, note: b.note, userId: req.user.id });
+  await audit(req, 'mapping.unresolved', { type: 'event-mapping', id: b.rawAction });
+  res.json(row);
+}));
+
 data.delete('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
   const raw = z.string().max(200).parse(req.query.raw);
   await query('DELETE FROM event_action_map WHERE raw_action=$1', [raw]);
   await audit(req, 'mapping.clear', { type: 'event-mapping', id: raw });
   res.json({ ok: true });
+}));
+
+// ---------- sessions and tracks ----------
+data.get('/sessions', requirePerm('view'), wrap(async (req, res) => {
+  const q = z.object({ account: uuid.optional(), role: uuid.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+  if (q.account && !inScope(req.user, q.account)) throw NotFound();
+  if (q.role) await roleFor(req, q.role);
+  res.json({ items: await listSessions(req.user, { accountId: q.account, roleId: q.role, limit: q.limit }), retentionDays: config.scanner.sessionRetentionDays });
+}));
+data.get('/sessions/:id/track', requirePerm('view'), wrap(async (req, res) => {
+  const t = await buildTrack(req.user, uuid.parse(req.params.id));
+  if (!t) throw NotFound();
+  res.json(t);
 }));
 
 const startScan = (trigger) => wrap(async (req, res) => {
@@ -264,6 +294,7 @@ data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
   if (q.unconfirmed === '1') where.push('r.unconfirmed_count > 0');
   if (q.idle === '1') where.push(`EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='role-idle' AND f.status='open')`);
   if (q.openFlags === '1') where.push(`EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.status='open' AND NOT EXISTS (SELECT 1 FROM review_decisions d WHERE d.flag_id=f.id))`);
+  if (q.unidentified === '1') where.push(`EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open')`);
   if (q.minUnused) add('r.unused_count >= ?', Math.max(0, Number(q.minUnused) | 0));
   if (q.hasPolicyKind === 'inline') where.push('r.inline_count > 0'); if (q.hasPolicyKind === 'managed') where.push('r.attached_count > 0');
   const sorts = { risk: 'r.risk_score', name: 'r.name', unused: 'r.unused_count', granted: 'r.granted_count', activity: 'r.last_activity_at' };
@@ -274,11 +305,14 @@ data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
            r.unconfirmed_count, r.last_used_at, r.last_activity_at, r.inline_count, r.attached_count, a.name AS account_name, a.account_id AS aws_account_id, a.environment, r.account_id,
            (SELECT count(*)::int FROM flags f WHERE f.role_id=r.id AND f.status='open') AS open_flags,
            (SELECT count(*)::int FROM flags f JOIN review_decisions d ON d.flag_id=f.id WHERE f.role_id=r.id AND f.status='open') AS decided_flags,
+           EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open') AS has_unidentified,
            count(*) OVER()::int AS total
     FROM roles r JOIN cloud_accounts a ON a.id=r.account_id WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${limit} OFFSET ${offset}`, p);
   const fp = []; const fwhere = ['deleted_at IS NULL', scopeSql(req.user, 'account_id', fp)];
   const facets = await query(`SELECT risk, kind, reviewer_team, count(*)::int n FROM roles WHERE ${fwhere.join(' AND ')} GROUP BY ROLLUP(risk, kind, reviewer_team)`, fp);
-  res.json({ items: rows.rows.map(({ total, ...r }) => r), total: rows.rows[0]?.total ?? 0, facets: facets.rows });
+  const accts = [...new Set(rows.rows.map((x) => x.account_id))];
+  const hist = await historyFor(accts.length ? (await query('SELECT * FROM cloud_accounts WHERE id = ANY($1)', [accts])).rows : []);
+  res.json({ items: rows.rows.map(({ total, ...r }) => ({ ...r, history: { progress: hist.get(r.account_id)?.progress ?? 0, complete: !!hist.get(r.account_id)?.complete } })), total: rows.rows[0]?.total ?? 0, facets: facets.rows });
 }));
 
 data.get('/roles/:id', requirePerm('view'), wrap(async (req, res) => {
@@ -299,7 +333,8 @@ data.get('/roles/:id', requirePerm('view'), wrap(async (req, res) => {
     query('SELECT service_namespace AS service, last_authenticated FROM advisor_services WHERE role_id=$1', [role.id]),
   ]);
   const rec = await latestRecommendation(role.id);
-  res.json({ role, policies: pol.rows, principals: prin.rows, flags: flags.rows, passRoles: pass.rows, services: svc.rows, window: cp.rows[0], daily: daily.rows, advisor: adv.rows, recommendation: rec });
+  const history = (await historyFor((await query('SELECT * FROM cloud_accounts WHERE id=$1', [role.account_id])).rows)).get(role.account_id);
+  res.json({ role, history, policies: pol.rows, principals: prin.rows, flags: flags.rows, passRoles: pass.rows, services: svc.rows, window: cp.rows[0], daily: daily.rows, advisor: adv.rows, recommendation: rec });
 }));
 
 data.get('/roles/:id/actions', requirePerm('view'), wrap(async (req, res) => {
@@ -371,6 +406,92 @@ data.get('/recommendations/:id/export', requirePerm('export'), wrap(async (req, 
 }));
 
 // ---------- overview ----------
+// ---------- radar, signal, sector scan ----------
+const accountFilter = (req, p, col) => {
+  const acct = req.query.account ? uuid.parse(req.query.account) : null;
+  if (acct && !inScope(req.user, acct)) throw NotFound();
+  const parts = [scopeSql(req.user, col, p)];
+  if (acct) { p.push(acct); parts.push(`${col}=$${p.length}`); }
+  return parts.join(' AND ');
+};
+
+/** Every role as a contact: how much it holds, how much it used, who calls it, what could not be identified. */
+data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
+  const p = []; const where = accountFilter(req, p, 'r.account_id');
+  const roles = (await query(
+    `SELECT r.id, r.name, r.kind, r.risk, r.account_id, a.name AS account_name, a.account_id AS aws_account_id,
+            r.granted_count, r.used_count, r.unused_count, r.unconfirmed_count, r.last_used_at,
+            coalesce(d.calls,0)::int AS calls, coalesce(d.denied,0)::int AS denied
+       FROM roles r JOIN cloud_accounts a ON a.id=r.account_id
+       LEFT JOIN (SELECT role_id, sum(count) calls, sum(error_count) denied FROM activity_daily GROUP BY role_id) d ON d.role_id=r.id
+      WHERE r.deleted_at IS NULL AND ${where} ORDER BY r.risk_score DESC, r.name LIMIT 300`, p)).rows;
+  const ids = roles.map((r) => r.id);
+  const [acts, callers, accts, maps] = await Promise.all([
+    ids.length ? query('SELECT DISTINCT role_id, action FROM activity_daily WHERE role_id = ANY($1)', [ids]) : { rows: [] },
+    ids.length ? query(
+      `SELECT p.key, max(p.display) AS display, max(p.kind) AS kind, array_agg(DISTINCT p.role_id) AS roles, sum(p.sessions_count)::int AS sessions
+         FROM principals p WHERE p.role_id = ANY($1) AND p.kind <> 'session' GROUP BY p.key ORDER BY sum(p.sessions_count) DESC NULLS LAST LIMIT 24`, [ids]) : { rows: [] },
+    query('SELECT * FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(roles.map((r) => r.account_id))]]),
+    loadMappings(),
+  ]);
+  const hist = await historyFor(accts.rows);
+  const unk = new Map();
+  for (const a of acts.rows) { const t = translate(a.action, maps); if (t.unmapped) { if (!unk.has(a.role_id)) unk.set(a.role_id, []); unk.get(a.role_id).push(a.action); } }
+  res.json({
+    roles: roles.map((r) => ({ ...r, unidentified: unk.get(r.id) || [], provisional: !hist.get(r.account_id)?.complete, progress: hist.get(r.account_id)?.progress ?? 0 })),
+    callers: callers.rows,
+  });
+}));
+
+/** Calls per day over the stored history, with how far the read has got. */
+data.get('/signal', requirePerm('view'), wrap(async (req, res) => {
+  const p = []; const where = accountFilter(req, p, 'r.account_id');
+  const days = (await query(
+    `SELECT d.day, sum(d.count)::int AS calls, sum(d.error_count)::int AS denied FROM activity_daily d JOIN roles r ON r.id=d.role_id
+      WHERE ${where} GROUP BY d.day ORDER BY d.day`, p)).rows;
+  const ap = []; const accts = (await query(`SELECT * FROM cloud_accounts a WHERE ${accountFilter(req, ap, 'a.id')}`, ap)).rows;
+  const hist = [...(await historyFor(accts)).values()];
+  const lookback = Math.max(90, ...accts.map((a) => (a.event_source === 's3' ? a.lookback_days : Math.min(a.lookback_days, 90))));
+  res.json({ days, from: new Date(Date.now() - lookback * 864e5), to: new Date(), readUpTo: hist.filter((x) => !x.complete).map((x) => x.readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null,
+    complete: hist.every((x) => x.complete) });
+}));
+
+/** One role cut by access level (rings) and service (sectors). */
+data.get('/roles/:id/sector', requirePerm('view'), wrap(async (req, res) => {
+  const role = await roleFor(req, req.params.id);
+  const [lv, svc, used, denied] = await Promise.all([
+    query(`SELECT coalesce(access_level,'Unknown') AS level, count(*)::int total, count(*) FILTER (WHERE status='used')::int used,
+             count(*) FILTER (WHERE status='unconfirmed')::int unconfirmed FROM role_actions WHERE role_id=$1 GROUP BY 1`, [role.id]),
+    query(`SELECT split_part(action, ':', 1) AS service, coalesce(access_level,'Unknown') AS level, count(*)::int total,
+             count(*) FILTER (WHERE status='used')::int used, count(*) FILTER (WHERE status='unconfirmed')::int unconfirmed
+             FROM role_actions WHERE role_id=$1 GROUP BY 1, 2`, [role.id]),
+    query(`SELECT action, access_level AS level, event_count, last_seen FROM role_actions WHERE role_id=$1 AND status='used' ORDER BY event_count DESC LIMIT 50`, [role.id]),
+    query(`SELECT action, sum(error_count)::int n FROM activity_daily WHERE role_id=$1 GROUP BY action HAVING sum(error_count) > 0 ORDER BY 2 DESC LIMIT 20`, [role.id]),
+  ]);
+  const unconfirmed = (await query(`SELECT reason, split_part(action, ':', 1) AS service, count(*)::int n FROM role_actions WHERE role_id=$1 AND status='unconfirmed' GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 20`, [role.id])).rows;
+  const history = (await historyFor((await query('SELECT * FROM cloud_accounts WHERE id=$1', [role.account_id])).rows)).get(role.account_id);
+  res.json({ role: { id: role.id, name: role.name, account: role.account_name, kind: role.kind, risk: role.risk, granted: role.granted_count, used: role.used_count, unused: role.unused_count, unconfirmed: role.unconfirmed_count },
+    levels: lv.rows, services: svc.rows, used: used.rows, denied: denied.rows, unconfirmed, history });
+}));
+
+/** What the status bar shows on every screen: history read so far, time left, unidentified calls. */
+data.get('/status', requirePerm('view'), wrap(async (req, res) => {
+  const ap = [];
+  const accounts = (await query(`SELECT * FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', ap)}`, ap)).rows;
+  const hist = await historyFor(accounts);
+  const reading = accounts.filter((a) => !hist.get(a.id).complete);
+  const ids = accounts.map((a) => a.id);
+  const [eta, unk] = await Promise.all([
+    ids.length ? query(`SELECT max((j.progress->>'etaSeconds')::int) AS eta FROM scan_jobs j JOIN scan_runs r ON r.id=j.run_id WHERE j.status='running' AND j.kind='events' AND r.account_id = ANY($1)`, [ids]) : { rows: [{}] },
+    ids.length ? query(`SELECT count(DISTINCT u.raw_action)::int n FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
+      WHERE u.account_id = ANY($1) AND (m.status IS NULL OR m.status='suggested' OR (m.status='unresolved' AND m.reopen_at IS NOT NULL AND m.reopen_at < now() AND u.last_seen > m.decided_at))`, [ids]) : { rows: [{ n: 0 }] },
+  ]);
+  const progress = reading.length ? Math.floor(reading.reduce((s, a) => s + hist.get(a.id).progress, 0) / reading.length) : 100;
+  const upTo = reading.map((a) => hist.get(a.id).readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null;
+  res.json({ progress, complete: !reading.length, reading: reading.map((a) => ({ id: a.id, name: a.name, progress: hist.get(a.id).progress })), readUpTo: upTo,
+    etaSeconds: eta.rows[0]?.eta ?? null, unidentified: unk.rows[0]?.n ?? 0, accounts: accounts.length });
+}));
+
 data.get('/overview', requirePerm('view'), wrap(async (req, res) => {
   const p = []; const sc = scopeSql(req.user, 'r.account_id', p);
   const [tot, byKind, queue, accounts] = await Promise.all([

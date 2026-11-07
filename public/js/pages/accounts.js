@@ -247,9 +247,10 @@ const snippetQuery = (m) => new URLSearchParams(Object.entries({ mode: m.authMod
 // ---------- list ----------
 export async function accountsPage(ctx) {
   const { items } = await get('/accounts');
+  ctx.setCrumbs('Accounts');
   const can = (p) => session.user.permissions.includes(p);
   return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('h1', null, 'Cloud accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS'), h('h1', null, 'Cloud accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
       can('accounts') && h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account')),
     items.length ? items.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'));
 }
@@ -269,11 +270,13 @@ function accountCard(a, ctx, can) {
     h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${a.environment}`)),
       h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
         can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
-        h('a', { class: 'btn sm', href: `#/accounts/${a.id}/coverage` }, 'Event coverage'),
+        h('a', { class: 'btn sm', href: `#/?account=${a.id}` }, 'Radar'),
+        h('a', { class: 'btn sm', href: `#/accounts/${a.id}/unidentified` }, 'Unidentified calls'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),
     a.status === 'error' && h('div', { class: 'card-b' }, h('div', { class: 'alert bad' }, a.status_detail?.message || 'The account could not be reached.')),
     h('div', { class: 'card-b stack' },
+      a.history && historyBars(a.history),
       h('dl', { class: 'kv' },
         h('dt', null, 'Reads from'), h('dd', null, SOURCE_LABEL[a.event_source], a.event_source === 's3' && h('span', { class: 'mono small' }, ` s3://${a.s3_bucket}${a.s3_prefix ? `/${a.s3_prefix}` : ''}`), h('span', { class: 'muted' }, ` · ${a.lookback_days} days`)),
         h('dt', null, 'Access'), h('dd', null, MODE_LABEL[a.auth_mode], a.auth_mode === 'assume_role' && h('span', { class: 'mono small' }, ` ${a.role_arn}`),
@@ -285,6 +288,19 @@ function accountCard(a, ctx, can) {
           h('tbody', null, a.checkpoints.map((c) => h('tr', null, h('td', { class: 'mono small' }, c.region), h('td', { class: 'small' }, fmtDate(c.first)), h('td', { class: 'small' }, fmtDate(c.last)), h('td', null, num(c.events)),
             h('td', null, c.gap ? h('span', { class: 'badge b-medium', title: 'The worker was down longer than the history lasts, so some days were never read.' }, 'gap') : 'none'))))))),
       det));
+}
+
+/** How far back each region has been read, and whether it has reached the present. */
+function historyBars(hist) {
+  if (!hist.regions?.length) return h('div', { class: 'provisional' }, h('b', null, 'HISTORY NOT READ YET'), h('span', null, 'Results appear as soon as the first slices are read.'));
+  return h('div', { class: 'stack' },
+    h('div', { class: 'row' }, h('span', { class: 'eyebrow grow' }, 'CLOUDTRAIL HISTORY READ'),
+      h('span', { class: `state ${hist.complete ? '' : 'prov'}` }, hist.complete ? 'Complete · results final' : `${hist.progress}% · results provisional`)),
+    hist.regions.map((r) => {
+      const bar = h('i', { class: r.complete ? 'done' : null }); bar.style.width = `${Math.max(1, r.progress)}%`;
+      return h('div', { class: 'history-row' }, h('span', { class: 'mono' }, r.region), h('span', { class: 'track', role: 'img', 'aria-label': `${r.region}: ${r.progress}% read` }, bar),
+        h('span', { class: 'tiny muted' }, r.complete ? 'complete' : r.first ? `${r.progress}% · back to ${new Date(r.first).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : 'not started'));
+    }));
 }
 
 // ---------- wizard: nothing is saved until the last step ----------
@@ -420,8 +436,8 @@ export async function editAccountPage(ctx, id) {
 }
 
 // ---------- event coverage ----------
-const pct = (n, d) => (d ? `${n / d < 0.001 && n > 0 ? '<0.1' : Math.round((n / d) * 1000) / 10}%` : '–');
-const COVERAGE_ROWS = [
+export const pct = (n, d) => (d ? `${n / d < 0.001 && n > 0 ? '<0.1' : Math.round((n / d) * 1000) / 10}%` : '–');
+export const COVERAGE_ROWS = [
   ['assume_events', 'Role sessions started', 'AssumeRole calls into a role in this account. They tell who used each role.'],
   ['role_calls', 'API calls made by a role', 'Counted as activity for that role.'],
   ['recovered_role', '…tied to the role by name', 'The event had no sessionIssuer, so the role was found from the session ARN.', true],
@@ -432,84 +448,3 @@ const COVERAGE_ROWS = [
   ['other_role', 'Made by a role this account does not have', 'A deleted role, or a role in another account.'],
 ];
 
-export async function coveragePage(ctx, id) {
-  const st = { days: 30 };
-  const root = h('div', { class: 'stack-lg' });
-  const canDecide = session.user.permissions.includes('decide');
-  let changed = false;
-
-  async function draw() {
-    const [a, c] = await Promise.all([get(`/accounts/${id}`), get(`/accounts/${id}/coverage?days=${st.days}`)]);
-    const t = c.totals;
-    const accounted = t.assume_events + t.role_calls + t.not_role + t.other_role;
-    const period = h('select', { 'aria-label': 'Period' }, [7, 30, 90, 365].map((d) => h('option', { value: d, selected: d === st.days }, `Last ${d} days`)));
-    period.addEventListener('change', () => { st.days = Number(period.value); draw(); });
-    const open = c.unmapped.filter((u) => u.mapping?.status !== 'accepted');
-
-    root.replaceChildren(
-      h('header', { class: 'head' }, h('div', null, h('div', { class: 'crumbs' }, h('a', { href: '#/accounts' }, 'Cloud accounts'), ` / ${a.name}`),
-        h('h1', null, 'Event coverage'), h('p', { class: 'muted' }, 'What the scanner did with every CloudTrail event it read, so nothing is dropped without a trace.')), period),
-      changed && h('div', { class: 'alert ok row' }, h('span', { class: 'grow' }, 'Mappings changed. They apply to history already stored at the next analysis.'),
-        h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${id}/scan`); toast('Re-analyzing'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Re-analyze now')),
-      !t.events ? h('div', { class: 'card empty' }, 'No events read in this period yet.') : h('div', { class: 'stack-lg' },
-        h('div', { class: 'tiles' },
-          tileC('Events read', num(t.events), accounted === t.events ? 'every one accounted for' : `${num(t.events - accounted)} unaccounted`),
-          tileC('Used as evidence', pct(t.assume_events + t.role_calls, t.events), `${num(t.assume_events + t.role_calls)} events by roles`),
-          tileC('Unmapped calls', num(t.unmapped), t.unmapped ? `${open.length} event name${open.length === 1 ? '' : 's'} to map` : 'none', t.unmapped > 0 && open.length > 0),
-          tileC('Calls without a resource', pct(t.no_resources, t.role_calls), 'these actions are not narrowed')),
-        h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Where every event went')),
-          h('div', { class: 'scroll' }, h('table', null,
-            h('thead', null, h('tr', null, h('th', null, 'Outcome'), ...c.regions.map((r) => h('th', { class: 'right mono' }, r.region)), h('th', { class: 'right' }, 'Total'), h('th', { class: 'right' }, 'Share'))),
-            h('tbody', null, COVERAGE_ROWS.map(([k, label, help, sub]) => h('tr', null,
-              h('td', null, h('div', { class: sub ? 'sub-row' : 'name' }, label), h('div', { class: 'tiny muted' }, help)),
-              ...c.regions.map((r) => h('td', { class: 'right' }, num(r[k]))), h('td', { class: 'right' }, h('b', null, num(t[k]))),
-              h('td', { class: 'right small muted' }, pct(t[k], sub ? t.role_calls : t.events)))),
-              h('tr', null, h('td', null, h('b', null, 'Events read')), ...c.regions.map((r) => h('td', { class: 'right' }, num(r.events))), h('td', { class: 'right' }, h('b', null, num(t.events))), h('td'))))))),
-      unmappedCard(c, open));
-  }
-
-  function unmappedCard(c, open) {
-    const suggest = h('button', { class: 'btn sm', disabled: !canDecide || !c.bedrockEnabled || !open.length, title: c.bedrockEnabled ? '' : 'Bedrock is off. Set BEDROCK_ENABLED=true on the server.' }, 'Suggest with Bedrock');
-    suggest.addEventListener('click', async () => {
-      suggest.disabled = true; suggest.textContent = 'Asking Bedrock…';
-      try { const r = await post(`/accounts/${id}/unmapped/suggest`, {}); toast(`${r.suggested.length} suggestion(s)${r.rejected.length ? `, ${r.rejected.length} rejected: not real IAM actions` : ''}. Review and accept them.`); draw(); }
-      catch (x) { toast(x.message, true); suggest.disabled = false; suggest.textContent = 'Suggest with Bedrock'; }
-    });
-    return h('section', { class: 'card' },
-      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Unmapped event names'),
-        h('p', { class: 'small muted' }, 'CloudTrail names an API call by eventSource and eventName, which usually match an IAM action and sometimes do not. Calls under an unmapped name are kept, and the rest of that service stays unconfirmed instead of unused. A mapping applies to every account and to history already stored.')),
-        canDecide && h('div', { class: 'row' }, suggest)),
-      !c.bedrockEnabled && c.unmapped.length > 0 && h('div', { class: 'card-b' }, h('p', { class: 'small muted' }, 'Bedrock is off, so suggestions are unavailable. You can still map each name by hand.')),
-      !c.unmapped.length ? h('div', { class: 'card-b' }, h('div', { class: 'alert ok' }, 'Every event name in this account matched an IAM action.'))
-        : h('div', { class: 'scroll' }, h('table', null,
-          h('thead', null, h('tr', null, ['Event', 'Calls', 'Roles', 'Last seen', 'IAM action', ''].map((x) => h('th', null, x)))),
-          h('tbody', null, c.unmapped.map((u) => unmappedRow(u))))));
-  }
-
-  function unmappedRow(u) {
-    const m = u.mapping;
-    const inp = h('input', { class: 'action-input', value: m?.action || '', placeholder: 'service:ActionName', 'aria-label': `IAM action for ${u.event_name}`, spellcheck: 'false', disabled: !canDecide });
-    const err = h('div', { class: 'err' });
-    const save = async (action) => {
-      err.textContent = '';
-      if (action !== null && !/^[a-z0-9-]+:[A-Za-z0-9]+$/.test(action)) { err.textContent = 'Use the form service:ActionName.'; return; }
-      try { await api('PUT', '/event-mappings', { rawAction: u.raw_action, action }); changed = true; draw(); } catch (x) { err.textContent = x.message; }
-    };
-    const status = !m ? h('span', { class: 'badge b-medium' }, 'unmapped')
-      : m.status === 'accepted' ? h('span', { class: 'badge b-green' }, m.action ? 'mapped' : 'no permission')
-        : h('span', { class: 'badge b-banana', title: m.note || '' }, `Bedrock suggests${m.confidence != null ? ` (${Math.round(m.confidence * 100)}%)` : ''}`);
-    return h('tr', null,
-      h('td', null, h('div', { class: 'mono small' }, u.event_name), h('div', { class: 'tiny muted' }, u.event_source),
-        u.param_keys?.length > 0 && h('div', { class: 'tiny muted', title: 'Request parameter names. Values are never stored.' }, `params: ${u.param_keys.slice(0, 6).join(', ')}`)),
-      h('td', null, num(u.count)), h('td', null, num(u.roles)), h('td', { class: 'small nowrap' }, ago(u.last_seen)),
-      h('td', null, h('div', { class: 'stack' }, h('div', { class: 'row' }, status), inp, m?.status === 'suggested' && m.note && h('div', { class: 'tiny muted' }, m.note), err)),
-      h('td', null, canDecide && h('div', { class: 'row' },
-        h('button', { class: 'btn sm primary', onClick: () => save(inp.value.trim()) }, m?.status === 'suggested' ? 'Accept' : 'Save'),
-        h('button', { class: 'btn sm', title: 'The call is checked by no IAM permission', onClick: () => save(null) }, 'No permission'),
-        m && h('button', { class: 'btn sm', onClick: async () => { await api('DELETE', `/event-mappings?raw=${encodeURIComponent(u.raw_action)}`); changed = true; draw(); } }, 'Clear'))));
-  }
-
-  await draw();
-  return root;
-}
-const tileC = (l, v, s, warn) => h('div', { class: `tile${warn ? ' warn' : ''}` }, h('span', { class: 'small muted' }, l), h('b', null, v), s && h('span', { class: 'tiny muted' }, s));

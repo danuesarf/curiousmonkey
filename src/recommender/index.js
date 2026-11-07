@@ -1,13 +1,14 @@
 import { config } from '../config.js';
 import { query, tx } from '../db.js';
 import { computeGrants } from '../analyzer/grants.js';
-import { rulesDraft } from './rules.js';
+import { rulesDraft, keepUnconfirmed } from './rules.js';
 import { aiDraft, bedrockLlm } from './ai.js';
 import { runChecks, hardFailures, awsValidate } from './checks.js';
 import { draftStatements } from './checks.js';
 import { expandAction, hasService } from '../analyzer/catalog.js';
 import { hasWildcard } from '../analyzer/wildcard.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
+import { accountComplete } from '../history.js';
 
 export class Refusal extends Error { constructor(msg, code = 400) { super(msg); this.status = code; } }
 
@@ -77,6 +78,14 @@ export async function recommend(roleId, { instruction = null, userId = null, llm
   const checks = runChecks({ draftPolicies: draft.policies, ...origin });
   checks.push(await awsValidate(config.validateWithAws ? validateFn : null, draft.policies));
   const diff = buildDiff(ctx, draft.policies);
+  // kept only because calls in their service went under an event name nobody has identified yet
+  const held = ctx.actions.filter((a) => a.status === 'unconfirmed' && a.reason === 'unmapped-event' && keepUnconfirmed(ctx, a.action, a.reason));
+  const heldServices = [...new Set(held.map((a) => a.action.split(':')[0]))].sort();
+  diff.heldBack = { count: held.length, services: heldServices };
+  checks.push(held.length
+    ? { id: 'held-back', label: `${heldServices.length} service${heldServices.length === 1 ? '' : 's'} held back: unidentified calls`, status: 'warn',
+        detail: `${held.length} ${heldServices.join(', ')} action(s) stay in the draft until the event names are identified on the account's Unidentified page.` }
+    : { id: 'held-back', label: 'Nothing held back by unidentified calls', status: 'pass', detail: null });
   const summary = [draft.summary, note].filter(Boolean).join(' ') || null;
 
   return tx(async (c) => {
@@ -106,6 +115,7 @@ export async function approve(recId, user) {
   if (rec.status !== 'draft') throw new Refusal(`This recommendation is ${rec.status}`, 409);
   if (rec.analysis_hash !== role.analysis_hash) throw new Refusal('The role changed after this draft was made. Regenerate it before approving.', 409);
   if (rec.checks.some((c) => c.status === 'fail')) throw new Refusal('This draft fails safety checks and cannot be approved. Regenerate or adjust it.', 409);
+  if (!(await accountComplete(role.account_id))) throw new Refusal('CloudTrail history for this account is still being read, so this draft is a preview. Approval opens when the read is complete.', 409);
   if (!user.team) throw new Refusal('Only members of Infrastructure Security or Information Security can approve', 403);
   const required = role.requires_both ? ['infrasec', 'infosec'] : [role.reviewer_team];
   if (!required.includes(user.team)) throw new Refusal(`This role is reviewed by ${required.join(' and ')}; you are on ${user.team}`, 403);

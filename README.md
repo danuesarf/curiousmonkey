@@ -25,7 +25,7 @@ Kubernetes: `kubectl apply -k deploy/k8s` (copy `secret.example.yaml` to a real 
 - A job holds a 90 s lease, renewed by heartbeat. If a worker dies, the reaper requeues the job and another worker continues from the saved checkpoint. Failures retry with backoff (30 s doubling to 30 min, 5 attempts). Permission errors fail at once and are not retried.
 - Event history is read in 6-hour slices. Each slice commits its aggregates and checkpoint together, so a restart never re-reads saved history or double counts. A daily scan reads only what is new.
 - CloudTrail Event History keeps 90 days. If the worker is down longer than that, the gap is shown on the account page.
-- Monitor everything under **Scan activity** (workers, queue, per-job progress, logs, retry, cancel). Prometheus metrics are on the worker at `:8081/metrics`.
+- Monitor everything under **Scans** (workers, queue, per-job progress, logs, retry, cancel). Prometheus metrics are on the worker at `:8081/metrics`.
 
 ## Connecting an account
 
@@ -43,15 +43,26 @@ The **Connect an AWS account** wizard has four steps. Nothing is saved until the
 
 Edit an account at any time. Switching source keeps the stored history. Widening the lookback backfills only the older days. The worker logs which AWS identity it runs as at startup, and the wizard shows it.
 
-## Event coverage
+## The radar
 
-Each account has an **Event coverage** page that accounts for every CloudTrail event read: role sessions, role calls, events outside scope (IAM users, root, services, roles the account doesn't have), and three cases that need care:
+The portal opens on a **radar** of every role in scope. Distance from the centre is the share of a role's permissions never called, height is call volume, and bearing groups roles by kind (custom, Identity Center, service-linked). Callers sit on the rim, linked to the roles they entered. Drag to orbit and tilt, scroll to zoom. The view is SVG drawn in 3D perspective, not WebGL.
+
+- **Sector scan** cuts one role into rings (access level) and sectors (service). Lit dots were called, amber dots are unconfirmed, dim dots were never called.
+- **Track** replays one role session call by call. Each session is a lane. When a session assumes another role (role chaining), the call is drawn as a jump into a new lane for the new session, linked by access key. Chains across connected accounts are linked too. Sessions in accounts you can't see are counted, not shown. Session replays are kept for `SESSION_RETENTION_DAYS` (default 30).
+
+### Results while history is still loading
+
+The radar and role pages show data as soon as the first slices are read. Until an account's history is fully read, its results are marked **provisional**: used counts are "at least", never-called counts are "at most". The status bar shows how much is read and the time left. A provisional analysis runs every `PROVISIONAL_EVERY_SECONDS` (default 300). **Approval is blocked until history is complete.**
+
+## Unidentified calls
+
+Each account has an **Unidentified calls** page. It accounts for every CloudTrail event read: role sessions, role calls, and events outside scope (IAM users, root, services, roles the account doesn't have). It also covers three cases that need care:
 
 - **Role found by name:** some events have no `sessionIssuer`, so the role is recovered from the session ARN.
-- **Unmapped event names:** CloudTrail event names don't always match IAM action names. Known mismatches are handled, including versioned names like `GetDistribution2020_05_31`.
-  - Calls under an unknown name are kept under the raw name, and the rest of that service is marked *unconfirmed (unmapped event)*, never *unused*.
-  - Map the name by hand, or with **Suggest with Bedrock** (`BEDROCK_ENABLED=true`). Bedrock only suggests: a reviewer accepts each mapping, and only real IAM actions are accepted.
-  - A mapping applies to every account and credits history already stored. No rescan is needed, only a re-analysis.
+- **Unidentified event names:** CloudTrail event names don't always match IAM action names. Known mismatches are handled, including versioned names like `GetDistribution2020_05_31`.
+  - Calls under an unknown name are kept under the raw name, and the rest of that service stays *unconfirmed*, never *unused*. The draft holds those permissions back and says so.
+  - Settle each name in one of four ways: type the action, **Ask Bedrock** (`BEDROCK_ENABLED=true`; a reviewer accepts each suggestion, and only real IAM actions are accepted), **No permission**, or **Can't resolve** with a note. A can't-resolve name reopens after 30 days if it is still being called.
+  - A decision applies to every account and credits history already stored. No rescan is needed, only a re-analysis. The same panel opens from a role (**Identify**).
 - **Calls that named no resource:** CloudTrail fills in `resources` for some events only. If any call of an action named no resource, the draft keeps that action's granted resources instead of narrowing to the ones seen, and the replay check enforces it.
 
 Only event names and request parameter *names* are kept, never parameter values.

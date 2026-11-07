@@ -1,4 +1,4 @@
-import { query, tx } from '../db.js';
+import { query, tx, pool } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
@@ -64,17 +64,36 @@ export async function persistAnalysis(roleId, r) {
   });
 }
 
-export async function runAnalyze(ctx) {
-  const roles = (await query('SELECT * FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [ctx.job.account_id])).rows;
+/** Analyze every role of an account from what is stored now. Used by the final stage and, provisionally, while reading. */
+export async function analyzeAccount(accountId, { alive = () => {}, progress = async () => {} } = {}) {
+  const roles = (await query('SELECT * FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [accountId])).rows;
   // The oldest event we hold is the edge of what "unused" can honestly mean.
-  const cp = (await query('SELECT min(first_event_time) AS t FROM scan_checkpoints WHERE account_id=$1', [ctx.job.account_id])).rows[0];
+  const cp = (await query('SELECT min(first_event_time) AS t FROM scan_checkpoints WHERE account_id=$1', [accountId])).rows[0];
   const windowStart = cp.t ? new Date(cp.t) : new Date(Date.now() - 90 * DAY);
   const maps = await loadMappings();
   let done = 0;
   for (const role of roles) {
-    ctx.alive();
+    alive();
     await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps));
-    await ctx.progress({ phase: 'analyze', done: ++done, total: roles.length });
+    await progress({ phase: 'analyze', done: ++done, total: roles.length });
   }
   return { roles: roles.length };
+}
+
+export async function runAnalyze(ctx) {
+  return analyzeAccount(ctx.job.account_id, { alive: ctx.alive, progress: ctx.progress });
+}
+
+/**
+ * While history is still being read, refresh results now and then so the portal shows what is known so far.
+ * One at a time per account (the regions of an account read in parallel); skipped if another is running.
+ */
+export async function provisionalAnalyze(accountId, log = () => {}) {
+  const c = await pool.connect();
+  try {
+    const got = (await c.query('SELECT pg_try_advisory_lock(727200, hashtext($1)) AS ok', [accountId])).rows[0].ok;
+    if (!got) return false;
+    try { await analyzeAccount(accountId); log('provisional results refreshed'); return true; }
+    finally { await c.query('SELECT pg_advisory_unlock(727200, hashtext($1))', [accountId]); }
+  } finally { c.release(); }
 }

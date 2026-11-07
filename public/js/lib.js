@@ -7,6 +7,7 @@ export function h(tag, props, ...kids) {
   for (const [k, v] of Object.entries(props || {})) {
     if (v == null || v === false) continue;
     if (k === 'class') el.className = v;
+    else if (k === 'style') el.style.cssText = v; // CSSOM, allowed under the strict CSP (a style attribute is not)
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === 'value') el.value = v;
     else if (k === 'checked' || k === 'disabled' || k === 'selected') el[k] = Boolean(v);
@@ -24,7 +25,12 @@ export function add(el, kids) {
 }
 export const svg = (tag, props, ...kids) => {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(props || {})) el.setAttribute(k, v);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue;
+    if (k === 'style') el.style.cssText = v;
+    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+    else el.setAttribute(k, v);
+  }
   return add(el, kids);
 };
 export const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };

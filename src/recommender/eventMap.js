@@ -52,8 +52,8 @@ export async function suggestMappings(items) {
       `INSERT INTO event_action_map(raw_action, event_source, event_name, action, status, source, confidence, note, suggested_at)
        VALUES ($1,$2,$3,$4,'suggested','bedrock',$5,$6,now())
        ON CONFLICT (raw_action) DO UPDATE SET action=EXCLUDED.action, confidence=EXCLUDED.confidence, note=EXCLUDED.note,
-         source='bedrock', suggested_at=now()
-       WHERE event_action_map.status='suggested'`,                 // never overwrite a reviewer's decision
+         source='bedrock', suggested_at=now(), status='suggested', reopen_at=NULL
+       WHERE event_action_map.status <> 'accepted'`,               // never overwrite an accepted mapping
       [item.raw_action, item.event_source, item.event_name, action, m.confidence, m.reason]);
     suggested.push({ rawAction: m.rawAction, action, confidence: m.confidence });
   }
@@ -72,4 +72,15 @@ export async function decideMapping({ rawAction, eventSource, eventName, action,
        decided_by=EXCLUDED.decided_by, decided_at=now()
      RETURNING *`, [rawAction, eventSource, eventName, info?.action ?? null, note, userId]);
   return r.rows[0];
+}
+
+/** Someone tried and gave up. The service stays unconfirmed; the name reopens if still called after `reopenDays`. */
+export async function markUnresolved({ rawAction, eventSource, eventName, note, userId, reopenDays = 30 }) {
+  if (!note || note.trim().length < 3) throw Object.assign(new Error('Say what you tried, for the next reviewer.'), { status: 400, field: 'note' });
+  return (await query(
+    `INSERT INTO event_action_map(raw_action, event_source, event_name, action, status, source, note, decided_by, decided_at, reopen_at)
+     VALUES ($1,$2,$3,NULL,'unresolved','manual',$4,$5,now(), now() + make_interval(days => $6))
+     ON CONFLICT (raw_action) DO UPDATE SET action=NULL, status='unresolved', source='manual', note=EXCLUDED.note,
+       decided_by=EXCLUDED.decided_by, decided_at=now(), reopen_at=EXCLUDED.reopen_at, confidence=NULL
+     RETURNING *`, [rawAction, eventSource, eventName, note.trim().slice(0, 400), userId, reopenDays])).rows[0];
 }

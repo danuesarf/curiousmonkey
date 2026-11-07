@@ -26,7 +26,7 @@ Rules you must follow:
 
 export function buildPrompt(ctx, instruction, failures) {
   const used = ctx.actions.filter((a) => a.status === 'used').map((a) => ({ action: a.action, grantedOn: [...(ctx.grants.get(a.action)?.resources || [])], seenOn: (ctx.observed.get(a.action) || []).slice(0, 5), allCallsNamedResource: !ctx.incomplete?.has(a.action), conditions: ctx.grants.get(a.action)?.conditions.map((c) => c.condition) || [] }));
-  const keep = ctx.actions.filter((a) => a.status === 'unconfirmed' && keepUnconfirmed(ctx, a.action))
+  const keep = ctx.actions.filter((a) => a.status === 'unconfirmed' && keepUnconfirmed(ctx, a.action, a.reason))
     .map((a) => ({ action: a.action, why: a.reason, grantedOn: [...(ctx.grants.get(a.action)?.resources || [])], conditions: ctx.grants.get(a.action)?.conditions.map((c) => c.condition) || [] }));
   const user = `Role: ${ctx.role.name} (${ctx.role.kind})
 <untrusted_data>

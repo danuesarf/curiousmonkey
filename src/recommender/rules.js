@@ -14,10 +14,12 @@ export const MANAGED_LIMIT = 6144;
  * Named explicitly in a policy: yes, the author meant it. Granted only because a wildcard happened to
  * include it: no, unless a reviewer decides to keep it. Removing is always the reviewer's call to overrule.
  */
-export function keepUnconfirmed(ctx, action) {
+export function keepUnconfirmed(ctx, action, reason = null) {
   const d = ctx.decisions.get(action);
   if (d?.decision === 'remove') return false;
   if (d?.decision === 'keep' || d?.decision === 'keep_scoped') return true;
+  // calls under an unidentified event name were made in this service: any of these could be the one needed
+  if (reason === 'unmapped-event') return true;
   return !ctx.grants.get(action)?.wildcardGrant;
 }
 
@@ -28,7 +30,7 @@ export function ruleRows(ctx) {
     if (!g) continue;
     const d = ctx.decisions.get(a.action);
     if (a.status === 'unused') continue;
-    if (a.status === 'unconfirmed' && !keepUnconfirmed(ctx, a.action)) continue;
+    if (a.status === 'unconfirmed' && !keepUnconfirmed(ctx, a.action, a.reason)) continue;
     const group = a.status === 'used' ? 'observed' : 'unverified';
     let resources = [...g.resources].filter((r) => !r.startsWith('NotResource:'));
     if (!resources.length) resources = ['*'];

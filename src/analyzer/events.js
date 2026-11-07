@@ -30,6 +30,8 @@ export function parseEvent(rec) {
       ...base, type: 'assume', eventName: rec.eventName, roleArn: rec.requestParameters?.roleArn || null,
       sessionName: rec.requestParameters?.roleSessionName || null,
       accessKeyId: rec.responseElements?.credentials?.accessKeyId || null,
+      callerKeyId: ui.accessKeyId || null, callerRoleArn: issuerRoleArn(rec), callerRoleName: issuerRoleArn(rec) ? null : issuerRoleName(rec),
+      callerSessionName: ui.type === 'AssumedRole' ? ui.arn?.split('/').pop() || null : null,
       caller: { type: ui.type, arn: ui.arn || ui.sessionContext?.sessionIssuer?.arn || null, principalId: ui.principalId,
         accountId: ui.accountId, invokedBy: ui.invokedBy || null, userName: ui.userName || null },
       mfa: rec.additionalEventData?.MFAAuthenticated === 'true' || ui.sessionContext?.attributes?.mfaAuthenticated === 'true',

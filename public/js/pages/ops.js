@@ -1,5 +1,6 @@
 import { h, get, post, num, ago, fmtDate, toast, modal, api, confirmDialog } from '../lib.js';
 import { session } from '../main.js';
+import { dial } from './sector.js';
 
 const ST = { succeeded: 'b-green', running: 'b-banana', queued: 'b-neutral', failed: 'b-high', dead: 'b-high', canceled: 'b-neutral', partial: 'b-medium' };
 const secs = (s) => (s >= 3600 ? `${Math.round(s / 3600)} h` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`);
@@ -13,7 +14,7 @@ export async function opsPage(ctx) {
     const alive = o.workers.filter((w) => w.alive);
     const detail = openRun ? await get(`/ops/runs/${openRun}`).catch(() => null) : null;
     root.replaceChildren(...[
-      h('header', { class: 'head' }, h('div', null, h('h1', null, 'Scan activity'), h('p', { class: 'muted' }, 'Scans run in a separate worker. If one stops, it resumes from its last saved checkpoint. Refreshes every 5 seconds.'))),
+      h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'SCANS'), h('h1', null, 'Scan activity'), h('p', { class: 'muted' }, 'Scans run in a separate worker. If one stops, it resumes from its last saved checkpoint. Refreshes every 5 seconds.'))),
       !alive.length && h('div', { class: 'alert bad' }, 'No worker has checked in recently. Queued scans will wait until one starts.'),
       o.oldestWaitingSeconds > 600 && h('div', { class: 'alert warn' }, `The oldest waiting job has been queued for ${secs(o.oldestWaitingSeconds)}. Add worker replicas or check the worker logs.`),
       h('div', { class: 'tiles' }, ...['queued', 'running', 'succeeded', 'failed', 'dead'].map((k) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, `Jobs ${k}`), h('b', null, num(o.jobs[k] || 0)))),
@@ -50,7 +51,7 @@ function progress(j) {
     const parts = [`${p.source === 's3' ? 'S3 trail' : 'Event History'}: slice ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`];
     if (p.slice) parts.push(`${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`);
     if (j.status === 'running' && p.eventsPerSecond != null) parts.push(`${num(p.eventsPerSecond)}/s`);
-    return h('span', null, parts.join(' · '), j.status === 'running' && p.etaSeconds != null && p.done < p.total && h('b', { class: 'eta' }, ` · ${etaText(p.etaSeconds)} left`));
+    return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, dial(p.done / p.total, 20), h('span', null, parts.join(' · ')), j.status === 'running' && p.etaSeconds != null && p.done < p.total && h('b', { class: 'eta' }, ` · ${etaText(p.etaSeconds)} left`));
   }
   if (p.total && p.done != null) return `${p.phase || j.kind}: ${p.done}/${p.total}`;
   if (p.finished) return 'finished';

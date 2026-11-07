@@ -29,6 +29,8 @@ export const config = {
     sliceHours: Number(env.SCAN_SLICE_HOURS || 6),
     lookupDelayMs: Number(env.LOOKUP_DELAY_MS ?? 520), // LookupEvents allows 2 calls a second
     advisorConcurrency: Number(env.ADVISOR_CONCURRENCY || 3),
+    provisionalEveryMs: Number(env.PROVISIONAL_EVERY_SECONDS ?? 300) * 1000,   // refresh results while a long read runs
+    sessionRetentionDays: Math.max(1, Number(env.SESSION_RETENTION_DAYS || 30)),   // session replay; counts are kept regardless
   },
 
   schedule: {

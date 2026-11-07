@@ -3,6 +3,7 @@ import { query, tx } from '../db.js';
 import { parseEvent } from '../analyzer/events.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { loadContext } from './inventory.js';
+import { provisionalAnalyze } from './analyzeJob.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3600e3, MIN = 60e3, DAY = 24 * HOUR;
@@ -37,13 +38,17 @@ export async function runEvents(ctx) {
     if (start < horizon) { start = horizon; gap = true; }                           // the worker was down longer than the history lasts
     for (let t = start; t < end; t += step) slices.push([t, Math.min(t + step, end), 'forward']);
   }
-  if (!slices.length) return { skipped: 'up to date' };
+  if (!slices.length) {
+    await query('UPDATE scan_checkpoints SET caught_up_at=now() WHERE account_id=$1 AND region=$2', [account.id, region]);
+    return { skipped: 'up to date' };
+  }
 
   const roleRows = (await query(`SELECT arn, name, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
   const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.map((r) => [r.name, r])) };
   const listCache = new Map();
   const t0 = Date.now();
   let rate = null;                                             // seconds per slice, smoothed
+  let lastProvisional = Date.now();
   let total = 0;
   for (let i = 0; i < slices.length; i++) {
     ctx.alive();
@@ -73,7 +78,7 @@ export async function runEvents(ctx) {
       const cov = coverage(evs, roles);
       // assumptions first, so a session's calls can be attributed to who started it
       const usable = evs.filter((e) => e.type !== 'ignore').sort((x, y) => (x.type === y.type ? x.time - y.time : x.type === 'assume' ? -1 : 1));
-      await applyEvents(c, usable, roles);
+      await applyEvents(c, usable, roles, account.id);
       await saveCoverage(c, account.id, region, new Date(a), cov);
       await c.query(
         `INSERT INTO scan_checkpoints(account_id, region, source, first_event_time, last_event_time, events_read, gap_detected, last_run_at)
@@ -87,6 +92,11 @@ export async function runEvents(ctx) {
       return usable.length;
     });
     total += n;
+    // show what is known so far: refresh results every few minutes during a long first read
+    if (Date.now() - lastProvisional > s.provisionalEveryMs && i < slices.length - 1) {
+      lastProvisional = Date.now();
+      await provisionalAnalyze(account.id, (m) => ctx.log?.(m)).catch((e) => ctx.log?.(`provisional analysis skipped: ${e.message}`, null, 'warn'));
+    }
     const took = (Date.now() - sliceStart) / 1000;
     rate = rate == null ? took : rate * 0.8 + took * 0.2;      // recent slices count more; busy and quiet days differ
     const elapsed = (Date.now() - t0) / 1000;
@@ -94,8 +104,10 @@ export async function runEvents(ctx) {
       done: i + 1, total: slices.length, events: total, elapsedSeconds: Math.round(elapsed),
       etaSeconds: Math.round(rate * (slices.length - i - 1)), eventsPerSecond: elapsed > 0 ? Math.round(total / elapsed) : null });
   }
+  await query('UPDATE scan_checkpoints SET caught_up_at=now() WHERE account_id=$1 AND region=$2', [account.id, region]);   // reached the present
   await query(`DELETE FROM seen_events WHERE event_time < now() - interval '3 days'`);
   await query(`DELETE FROM role_sessions WHERE started_at < now() - interval '2 days'`);   // credentials last at most 12h
+  await query(`DELETE FROM track_sessions WHERE account_id=$1 AND COALESCE(last_call_at, started_at) < now() - make_interval(days => $2)`, [account.id, config.scanner.sessionRetentionDays]);
   return { slices: slices.length, events: total, gap };
 }
 
@@ -150,7 +162,7 @@ async function saveCoverage(c, accountId, region, day, { k, unmapped }) {
     [accountId, u.raw, u.source, u.name, u.n, u.first, u.last, u.identity, u.keys || []]);
 }
 
-async function applyEvents(c, evs, roles) {
+export async function applyEvents(c, evs, roles, accountId) {
   const principalIds = new Map();                     // key -> id (this slice)
   const ensurePrincipal = async (role, p, e, extra = {}) => {
     const k = `${role.id}|${p.key}`;
@@ -165,12 +177,73 @@ async function applyEvents(c, evs, roles) {
     return principalIds.get(k);
   };
 
+  // ---- sessions (kept for replay within the retention window) ----
+  const keepFrom = Date.now() - config.scanner.sessionRetentionDays * DAY;
+  const sessionIds = new Map();                       // access key -> session id
+  const sessionTally = new Map();                     // session id -> { n, denied, last }
+  const sessionFor = async (key, role, e, principalId) => {
+    if (!key) return null;
+    if (sessionIds.has(key)) return sessionIds.get(key);
+    let id = (await c.query('SELECT id FROM track_sessions WHERE access_key_id=$1', [key])).rows[0]?.id;
+    if (!id) id = (await c.query(
+      `INSERT INTO track_sessions(account_id, role_id, access_key_id, principal_id, via, session_name, source_ip, user_agent, start_known, started_at)
+       VALUES ($1,$2,$3,$4,'started before stored history',$5,$6,$7,false,$8)
+       ON CONFLICT (access_key_id) DO UPDATE SET started_at=LEAST(track_sessions.started_at, EXCLUDED.started_at) RETURNING id`,
+      [accountId, role.id, key, principalId, e.sessionName || null, e.ip, e.userAgent, e.time])).rows[0].id;
+    sessionIds.set(key, id);
+    return id;
+  };
+  const recordCall = async (sessionId, e, action, extra = {}) => {
+    if (!sessionId) return;
+    const r = await c.query(
+      `INSERT INTO track_calls(session_id, event_id, at, action, event_source, event_name, resources, denied, error_code, child_key_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
+      [sessionId, e.id, e.time, action, e.eventSource || 'sts.amazonaws.com', e.eventName, extra.resources || e.resources || [], e.denied, e.errorCode, extra.childKey || null]);
+    if (!r.rowCount) return;
+    const t = sessionTally.get(sessionId) || { n: 0, denied: 0, last: e.time };
+    t.n++; if (e.denied) t.denied++; if (e.time > t.last) t.last = e.time; sessionTally.set(sessionId, t);
+  };
+
   const daily = new Map(), resources = new Map(), passed = new Map();
+
+  /** An API call made with a role's credentials: counts as activity, and joins the session it belongs to. */
+  const handleCall = async (role, e, { action = e.action, resources: res = e.resources, childKey = null } = {}) => {
+    let principalId = null;
+    if (e.accessKeyId) principalId = (await c.query('SELECT principal_id FROM role_sessions WHERE access_key_id=$1', [e.accessKeyId])).rows[0]?.principal_id ?? null;
+    if (!principalId) principalId = await ensurePrincipal(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, { via: 'unknown (started before the window)' });
+    else await c.query('UPDATE principals SET last_seen=GREATEST(last_seen,$2), first_seen=LEAST(first_seen,$2) WHERE id=$1', [principalId, e.time]);
+    if (e.time.getTime() >= keepFrom && e.accessKeyId) await recordCall(await sessionFor(e.accessKeyId, role, e, principalId), e, action, { resources: res, childKey });
+    if (!action) return;                               // no IAM permission involved (console sign-in)
+    const day = e.time.toISOString().slice(0, 10);
+    const dk = `${role.id}|${principalId}|${action}|${day}`;
+    const d = daily.get(dk) || { role: role.id, principal: principalId, action, day, ok: 0, err: 0, nores: 0 };
+    e.denied ? d.err++ : d.ok++; daily.set(dk, d);
+    if (!e.denied && !res.length) d.nores++;
+    if (e.denied) return;                              // denied calls prove nothing was used
+    for (const r of res) {
+      const rk = `${role.id}|${action}|${r}`;
+      const x = resources.get(rk) || { role: role.id, action, resource: r, last: e.time, n: 0 };
+      x.n++; if (e.time > x.last) x.last = e.time; resources.set(rk, x);
+    }
+    for (const arn of e.passedRoles || []) {
+      const svc = e.eventSource.replace(/\.amazonaws\.com$/, '');
+      const pk = `${role.id}|${arn}|${svc}`;
+      const x = passed.get(pk) || { role: role.id, arn, svc, last: e.time, n: 0 };
+      x.n++; if (e.time > x.last) x.last = e.time; passed.set(pk, x);
+    }
+  };
+
   for (const e of evs) {
-    const role = roleOf(e, roles);
-    if (!role) continue;
     if (e.type === 'assume') {
-      if (e.denied) continue;                          // a refused AssumeRole is not a use
+      // 1. role chaining: a role session in this account made the AssumeRole. That is a call of its own.
+      const callerRole = e.callerRoleArn ? roles.byArn.get(e.callerRoleArn) : e.callerRoleName ? roles.byName.get(e.callerRoleName) : null;
+      if (callerRole) {
+        await handleCall(callerRole, { ...e, accessKeyId: e.callerKeyId, sessionName: e.callerSessionName, eventSource: 'sts.amazonaws.com', passedRoles: [] },
+          { action: `sts:${e.eventName}`, resources: e.roleArn ? [e.roleArn] : [], childKey: e.denied ? null : e.accessKeyId });
+      }
+      // 2. the role being entered
+      const role = roles.byArn.get(e.roleArn);
+      if (!role || e.denied) continue;                 // a refused AssumeRole is not a use
       const p = principalFrom(e);
       const viaAction = `sts:${e.eventName}`;
       const trust = matchTrust(role.trust_policy, e.caller, viaAction);
@@ -185,32 +258,27 @@ async function applyEvents(c, evs, roles) {
       if (e.accessKeyId) await c.query(
         `INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at) VALUES ($1,$2,$3,$4) ON CONFLICT (access_key_id) DO NOTHING`,
         [e.accessKeyId, role.id, id, e.time]);
+      if (e.accessKeyId && e.time.getTime() >= keepFrom) {
+        const sid = (await c.query(
+          `INSERT INTO track_sessions(account_id, role_id, access_key_id, principal_id, parent_key_id, via, caller_type, caller_arn, session_name, source_ip, user_agent, mfa, source_identity, trust, start_known, started_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,$15)
+           ON CONFLICT (access_key_id) DO UPDATE SET principal_id=EXCLUDED.principal_id, parent_key_id=EXCLUDED.parent_key_id, via=EXCLUDED.via,
+             caller_type=EXCLUDED.caller_type, caller_arn=EXCLUDED.caller_arn, session_name=EXCLUDED.session_name, source_ip=EXCLUDED.source_ip,
+             user_agent=EXCLUDED.user_agent, mfa=EXCLUDED.mfa, source_identity=EXCLUDED.source_identity, trust=EXCLUDED.trust, start_known=true,
+             started_at=LEAST(track_sessions.started_at, EXCLUDED.started_at)
+           RETURNING id`,
+          [accountId, role.id, e.accessKeyId, id, e.caller?.type === 'AssumedRole' ? e.callerKeyId : null, viaAction, e.caller?.type || null, e.caller?.arn || null,
+           e.sessionName, e.ip, e.userAgent, e.mfa ?? null, e.sourceIdentity || null, JSON.stringify(trust || null), e.time])).rows[0].id;
+        sessionIds.set(e.accessKeyId, sid);
+      }
       continue;
     }
-    // an API call made with the role's credentials
-    let principalId = null;
-    if (e.accessKeyId) principalId = (await c.query('SELECT principal_id FROM role_sessions WHERE access_key_id=$1', [e.accessKeyId])).rows[0]?.principal_id ?? null;
-    if (!principalId) principalId = await ensurePrincipal(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, { via: 'unknown (started before the window)' });
-    else await c.query('UPDATE principals SET last_seen=GREATEST(last_seen,$2), first_seen=LEAST(first_seen,$2) WHERE id=$1', [principalId, e.time]);
-    if (!e.action) continue;                           // no IAM permission involved (console sign-in)
-    const day = e.time.toISOString().slice(0, 10);
-    const dk = `${role.id}|${principalId}|${e.action}|${day}`;
-    const d = daily.get(dk) || { role: role.id, principal: principalId, action: e.action, day, ok: 0, err: 0, nores: 0 };
-    e.denied ? d.err++ : d.ok++; daily.set(dk, d);
-    if (!e.denied && !e.resources.length) d.nores++;
-    if (e.denied) continue;                            // denied calls prove nothing was used
-    for (const r of e.resources) {
-      const rk = `${role.id}|${e.action}|${r}`;
-      const x = resources.get(rk) || { role: role.id, action: e.action, resource: r, last: e.time, n: 0 };
-      x.n++; if (e.time > x.last) x.last = e.time; resources.set(rk, x);
-    }
-    for (const arn of e.passedRoles) {
-      const svc = e.eventSource.replace(/\.amazonaws\.com$/, '');
-      const pk = `${role.id}|${arn}|${svc}`;
-      const x = passed.get(pk) || { role: role.id, arn, svc, last: e.time, n: 0 };
-      x.n++; if (e.time > x.last) x.last = e.time; passed.set(pk, x);
-    }
+    const role = roleOf(e, roles);
+    if (!role) continue;
+    await handleCall(role, e);
   }
+  for (const [id, t] of sessionTally) await c.query(
+    'UPDATE track_sessions SET calls=calls+$2, denied=denied+$3, last_call_at=GREATEST(COALESCE(last_call_at, $4), $4) WHERE id=$1', [id, t.n, t.denied, t.last]);
   for (const d of daily.values()) await c.query(
     `INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count, no_resource_count) VALUES ($1,$2,$3,$4,$5,$6,$7)
      ON CONFLICT (role_id, principal_id, action, day) DO UPDATE SET count=activity_daily.count+EXCLUDED.count, error_count=activity_daily.error_count+EXCLUDED.error_count,

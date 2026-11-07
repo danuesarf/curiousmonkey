@@ -25,10 +25,13 @@ export function demoGateway(account) {
         if (!pr.hours.includes(new Date(hourStart).getUTCHours())) continue;
         if (pr.days && !pr.days.includes(day)) continue;
         const dayKey = Math.floor(hourStart / DAY);
-        const ak = 'ASIA' + crypto.createHash('sha1').update(`${role.name}${pr.key}${dayKey}${new Date(hourStart).getUTCHours()}`).digest('hex').slice(0, 16).toUpperCase();
-        const t0 = hourStart + 5000;
+        const keyFor = (roleName, prKey) => 'ASIA' + crypto.createHash('sha1').update(`${acct}${roleName}${prKey}${dayKey}${new Date(hourStart).getUTCHours()}`).digest('hex').slice(0, 16).toUpperCase();
+        const ak = keyFor(role.name, pr.key);
+        const t0 = hourStart + 5000 + (pr.viaRole ? (pr.viaPr?.startsWith('role:') ? 40000 : 20000) : 0); // a chained session starts after its caller's
         const caller = pr.federated ? { type: pr.type, principalId: 'AROA:' + pr.key, accountId: acct }
           : pr.invokedBy ? { type: 'AWSService', invokedBy: pr.invokedBy }
+          : pr.viaRole ? { type: 'AssumedRole', arn: pr.arn, accountId: acct, accessKeyId: keyFor(pr.viaRole, pr.viaPr), // role chaining: the caller's own session key
+            sessionContext: { sessionIssuer: { type: 'Role', arn: `arn:aws:iam::${acct}:role/${pr.viaRole}`, userName: pr.viaRole } } }
           : { type: pr.type, arn: pr.arn, accountId: pr.accountId || acct, userName: pr.arn?.split('/').pop() };
         const assumeName = pr.federated ? (pr.type === 'WebIdentityUser' ? 'AssumeRoleWithWebIdentity' : 'AssumeRoleWithSAML') : 'AssumeRole';
         out.push({

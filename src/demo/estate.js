@@ -44,7 +44,7 @@ export function buildEstate(acct) {
     { name: 'data-etl', path: '/', kind: 'custom',
       trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: arn('airflow-worker') } }]),
       inline: [{ name: 'etl', document: P([A(['s3:*', 'glue:*', 'athena:*'])]) }], attached: [],
-      principals: [{ key: 'role:airflow-worker', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/airflow-worker/airflow`, hours: [1, 2, 3], sessions: 'dag' }],
+      principals: [{ key: 'role:airflow-worker', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/airflow-worker/airflow`, hours: [1, 2, 3], sessions: 'dag', viaRole: 'airflow-worker', viaPr: 'svc:ecs-tasks' }],
       usage: [{ p: 'role:airflow-worker', src: 'glue.amazonaws.com', name: 'GetJobRuns', perHour: 4 },
               { p: 'role:airflow-worker', src: 'athena.amazonaws.com', name: 'StartQueryExecution', perHour: 2 }],
       advisor: { s3: 1, glue: 0, athena: 0 } },
@@ -81,6 +81,22 @@ export function buildEstate(acct) {
       principals: [{ key: 'role:grafana', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/grafana/g`, hours: [0, 6, 12, 18], sessions: 'day' }],
       usage: [{ p: 'role:grafana', src: 'monitoring.amazonaws.com', name: 'GetMetricData', perHour: 5 }, { p: 'role:grafana', src: 'logs.amazonaws.com', name: 'DescribeLogGroups', perHour: 1 }],
       advisor: { cloudwatch: 0, logs: 0 } },
+    // role chaining: airflow-worker (an ECS task) assumes data-etl, which assumes lake-reader
+    { name: 'airflow-worker', path: '/', kind: 'custom',
+      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: 'ecs-tasks.amazonaws.com' } }]),
+      inline: [{ name: 'worker', document: P([A('sts:AssumeRole', arn('data-etl')), A(['logs:CreateLogStream', 'logs:PutLogEvents']), A(['ecs:RunTask', 'ecs:StopTask'])]) }], attached: [],
+      principals: [{ key: 'svc:ecs-tasks', type: 'Service', invokedBy: 'ecs-tasks.amazonaws.com', hours: [1, 2, 3], sessions: 'worker' }],
+      usage: [{ p: 'svc:ecs-tasks', src: 'logs.amazonaws.com', name: 'CreateLogStream', perHour: 1 }],
+      advisor: { logs: 0, ecs: 400, sts: 0 } },
+    { name: 'lake-reader', path: '/', kind: 'custom',
+      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: arn('data-etl') }, Condition: { StringEquals: { 'aws:PrincipalTag/team': 'data' } } }]),
+      inline: [{ name: 'lake', document: P([A(['s3:GetObject', 's3:ListBucket', 's3:DeleteObject', 's3:GetIntelligentTieringConfiguration'], ['arn:aws:s3:::kbi-lake', 'arn:aws:s3:::kbi-lake/*'])]) }], attached: [],
+      principals: [{ key: 'role:data-etl', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/data-etl/dag`, hours: [2], sessions: 'lake', viaRole: 'data-etl', viaPr: 'role:airflow-worker' }],
+      // S3 logs ListBucketIntelligentTieringConfigurations, but the permission is s3:GetIntelligentTieringConfiguration:
+      // an event name that does not match an IAM action and has to be identified
+      usage: [{ p: 'role:data-etl', src: 's3.amazonaws.com', name: 'ListObjects', perHour: 2, res: 'arn:aws:s3:::kbi-lake' },
+              { p: 'role:data-etl', src: 's3.amazonaws.com', name: 'ListBucketIntelligentTieringConfigurations', perHour: 1, res: 'arn:aws:s3:::kbi-lake' }],
+      advisor: { s3: 0 } },
   ];
   return roles.map((r) => ({ ...r, arn: arn(r.name, r.path) }));
 }

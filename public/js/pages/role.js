@@ -1,5 +1,6 @@
 import { h, svg, get, post, api, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, toast, copy, modal, KIND, TEAM, field } from '../lib.js';
 import { session, go } from '../main.js';
+import { identifyControls, eventFacts, STATE } from './unidentified.js';
 
 const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
 const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
@@ -14,23 +15,34 @@ export async function rolePage(ctx, id) {
   const show = (t) => {
     tab = t;
     tabs.replaceChildren(...TABS.map(([k, l]) => h('button', { role: 'tab', 'aria-selected': k === tab, onClick: () => show(k) }, l)));
-    panel.replaceChildren({ who: () => whoTab(d), findings: () => findingsTab(d, ctx), perms: () => permsTab(d), policies: () => policiesTab(d) }[t]());
+    panel.replaceChildren({ who: () => whoTab(d), findings: () => findingsTab(d, ctx, openIdentify), perms: () => permsTab(d), policies: () => policiesTab(d) }[t]());
   };
-  show('who');
+  const openIdentify = (raw) => identifyPanel(r, raw, ctx);
+  show(ctx.params.get('tab') === 'findings' ? 'findings' : 'who');
+  ctx.setCrumbs(h('a', { href: '#/roles' }, 'Roles'), r.account_name, r.name);
+  if (ctx.params.has('identify')) setTimeout(() => openIdentify(ctx.params.get('identify') || null));
+  const hist = d.history || { complete: true };
+  const unmappedFlag = d.flags.find((f) => f.category === 'unmapped-event');
 
   const canRec = session.user.permissions.includes('recommend') && r.kind !== 'service-linked';
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' },
-      h('div', null, h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'IAM roles'), ' / ', r.account_name),
+      h('div', null, h('div', { class: 'eyebrow' }, `ROLE · ${r.account_name}`),
         h('h1', null, r.name), h('div', { class: 'row' }, riskBadge(r.risk), h('span', { class: 'badge b-neutral' }, KIND[r.kind]), teamBadge(r.reviewer_team, r.requires_both),
           h('span', { class: 'small muted mono' }, r.arn))),
       h('div', { class: 'actions' },
+        h('a', { class: 'btn', href: `#/roles/${r.id}/scan` }, 'Sector scan'), h('a', { class: 'btn', href: `#/track?role=${r.id}` }, 'Track a session'),
         r.kind === 'service-linked' ? h('span', { class: 'alert warn small' }, 'Service-linked: managed by AWS. Report only.')
           : canRec && h('a', { class: 'btn primary', href: `#/roles/${r.id}/recommendation` }, 'Recommend least-privilege policy'))),
+    !hist.complete && h('div', { class: 'provisional' }, h('b', null, `PROVISIONAL · ${hist.progress}% OF HISTORY READ`),
+      h('span', null, `Used counts are “at least” and never-called counts “at most” until the rest of CloudTrail history is read${hist.readUpTo ? ` (read back to ${fmtDay(hist.backTo || hist.readUpTo)})` : ''}. Approval waits for it.`)),
+    unmappedFlag && h('div', { class: 'unk-box' }, h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'),
+      h('span', { class: 'grow small' }, 'Some calls by this role use event names that are not identified yet. Those services stay unconfirmed — nothing in them will be removed until each name is settled.'),
+      h('button', { class: 'btn sm amber', onClick: () => openIdentify(null) }, 'Identify'))),
     r.kind === 'identity-center' && h('div', { class: 'alert warn' }, `This role comes from the Identity Center permission set "${r.permission_set}". Changes belong in the permission set, not on the role.`),
     h('section', { class: 'tiles' },
       tile('Granted', num(r.granted_count), `${r.inline_count} inline, ${r.attached_count} attached`),
-      tile('Used', num(r.used_count), 'seen in event history'), tile('Unused', num(r.unused_count), 'no evidence of use'), tile('Cannot be verified', num(r.unconfirmed_count), 'event history cannot prove'),
+      tile('Used', `${hist.complete ? '' : '≥ '}${num(r.used_count)}`, 'seen in event history'), tile('Unused', `${hist.complete ? '' : '≤ '}${num(r.unused_count)}`, 'no evidence of use'), tile('Cannot be verified', num(r.unconfirmed_count), 'event history cannot prove'),
       tile('Last activity', r.last_activity_at ? ago(r.last_activity_at) : 'none', `IAM last used: ${r.last_used_at ? ago(r.last_used_at) : 'never'}`)),
     h('div', { class: 'card' }, h('div', { class: 'card-b stack' }, h('h3', null, 'Why this risk level'),
       r.risk_reasons.length ? h('ul', { class: 'plain' }, r.risk_reasons.map((x) => h('li', null, x))) : h('p', { class: 'muted' }, 'Nothing stands out.'),
@@ -82,7 +94,7 @@ function principalCard(p) {
       p.top_actions?.length > 0 && [h('dt', null, 'Top actions'), h('dd', null, h('div', { class: 'acts' }, p.top_actions.map((a) => h('code', null, `${a.action} ×${a.count}`))))]));
 }
 
-function findingsTab(d, ctx) {
+function findingsTab(d, ctx, openIdentify) {
   if (!d.flags.length) return h('div', { class: 'empty card' }, 'No open findings.');
   const canDecide = session.user.permissions.includes('decide');
   return h('div', { class: 'stack', id: 'flags' }, d.flags.map((f) => {
@@ -101,6 +113,7 @@ function findingsTab(d, ctx) {
       f.actions.length > 0 && h('div', { class: 'acts' }, f.actions.slice(0, 40).map((a) => h('code', null, a)), f.actions.length > 40 && h('span', { class: 'small muted' }, `+${f.actions.length - 40} more`)),
       f.resources.length > 0 && h('p', { class: 'small mono muted' }, `Granted on: ${f.resources.slice(0, 4).join(', ')}${f.resources.length > 4 ? '…' : ''}`),
       f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
+      f.category === 'unmapped-event' && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => openIdentify(null) }, 'Identify these event names')),
       canDecide && h('div', { class: 'stack' }, isAct && res, note,
         h('div', { class: 'row' }, opts.map(([v, l]) => h('button', { class: `btn sm${f.decision === v ? ' primary' : ''}`, onClick: () => choose(v) }, l)),
           f.decision && h('button', { class: 'btn sm', onClick: async () => { await api('DELETE', `/flags/${f.id}/decision`); ctx.reload(); } }, 'Clear decision'))));
@@ -139,4 +152,32 @@ function policiesTab(d) {
       h('button', { class: 'btn sm', onClick: () => copy(JSON.stringify(p.document, null, 2)) }, 'Copy'))), h('div', { class: 'card-b' }, h('pre', null, JSON.stringify(p.document, null, 2))))),
     h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Trust policy'), h('span', { class: 'small muted' }, 'Who is allowed to assume this role')),
       h('div', { class: 'card-b' }, h('pre', null, JSON.stringify(d.role.trust_policy, null, 2)))));
+}
+
+/** Side panel: settle the unidentified event names this role called, without leaving the role. */
+async function identifyPanel(r, raw, ctx) {
+  document.querySelector('.side-panel-bg')?.remove();
+  const body = h('div', { class: 'stack-lg' }, h('span', { class: 'spin' }));
+  const close = () => { bg.remove(); document.removeEventListener('keydown', esc); };
+  const esc = (e) => { if (e.key === 'Escape') close(); };
+  let changed = false;
+  const panel = h('aside', { class: 'side-panel', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Identify event names' },
+    h('div', { class: 'row' }, h('div', { class: 'grow' }, h('div', { class: 'eyebrow', style: 'color:#f0b45a' }, 'IDENTIFY'), h('h2', null, 'Unidentified calls')),
+      h('button', { class: 'btn sm', onClick: () => { close(); if (changed) ctx.reload(); } }, 'Close')),
+    h('p', { class: 'small muted' }, `Event names called by ${r.name} that did not match an IAM action. A decision applies to every account and to history already stored, at the next analysis.`),
+    body);
+  const bg = h('div', { class: 'side-panel-bg', onClick: (e) => { if (e.target === bg) { close(); if (changed) ctx.reload(); } } }, panel);
+  document.body.append(bg); document.addEventListener('keydown', esc); ctx.onLeave(close);
+  async function draw() {
+    const c = await get(`/accounts/${r.account_id}/coverage?days=365`);
+    let items = c.unmapped.filter((u) => (u.role_names || []).includes(r.name));
+    if (raw) items = items.sort((a, b) => (b.raw_action === raw) - (a.raw_action === raw));
+    body.replaceChildren(!items.length ? h('div', { class: 'alert ok' }, 'Nothing left to identify for this role.')
+      : items.map((u) => h('section', { class: 'stack', style: 'border-top:1px solid var(--line);padding-top:14px' },
+        h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'), h('b', { class: 'mono small grow', style: 'overflow-wrap:anywhere' }, u.raw_action), h('span', { class: `state ${STATE[u.state]?.[1] || ''}` }, STATE[u.state]?.[0] || u.state)),
+        eventFacts(u), identifyControls(u, { accountId: r.account_id, bedrock: c.bedrockEnabled, onChange: () => { changed = true; draw(); ctx.refreshStatus(); } }))),
+      h('a', { class: 'small', href: `#/accounts/${r.account_id}/unidentified` }, 'All unidentified calls in this account'));
+  }
+  await draw();
+  panel.querySelector('button')?.focus();
 }

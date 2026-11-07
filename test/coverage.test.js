@@ -105,3 +105,22 @@ test('resources are not narrowed when some calls named no resource, and a draft 
     originalPolicies: ctx.policies, actions: ctx.actions.filter((a) => a.action === 'ssm:GetParameter'), observed: ctx.observed, incomplete: ctx.incomplete });
   assert.match(res.find((c) => c.id === 'replay').detail, /some calls named no resource/);
 });
+
+test("can't resolve keeps the service unconfirmed and needs a note; the draft holds those actions back", async () => {
+  const r = await role('legacy-admin');
+  const p = (await db.query('SELECT id FROM principals WHERE role_id=$1 LIMIT 1', [r.id])).rows[0].id;
+  const raw = 'quicksight:DescribeDashboardSnapshotJobResult2';
+  await db.query(`INSERT INTO activity_daily(role_id, principal_id, action, day, count) VALUES ($1,$2,$3,current_date,7)`, [r.id, p, raw]);
+  await db.query(`INSERT INTO unmapped_events(account_id, raw_action, event_source, event_name, count, first_seen, last_seen) VALUES ($1,$2,'quicksight.amazonaws.com','DescribeDashboardSnapshotJobResult2',7,now(),now())`, [A, raw]);
+  await assert.rejects(em.markUnresolved({ rawAction: raw, eventSource: 'quicksight.amazonaws.com', eventName: 'x', note: '', userId: null }), /what you tried/);
+  const m = await em.markUnresolved({ rawAction: raw, eventSource: 'quicksight.amazonaws.com', eventName: 'DescribeDashboardSnapshotJobResult2', note: 'No documented action', userId: null });
+  assert.equal(m.status, 'unresolved'); assert.ok(new Date(m.reopen_at) > new Date(Date.now() + 29 * 864e5));
+  await reanalyze(r);
+  assert.deepEqual(await actionRow(r.id, 'quicksight:DescribeDashboard'), { status: 'unconfirmed', reason: 'unmapped-event' });
+  // legacy-admin's grant is a wildcard, yet these stay in the draft, reported as held back
+  const draft = await rec.recommend(r.id, { llm: null });
+  const acts = draft.statements.flatMap((s) => [].concat(s.Action));
+  assert.ok(acts.includes('quicksight:DescribeDashboard'));
+  assert.ok(draft.diff.heldBack.count > 10 && draft.diff.heldBack.services.includes('quicksight'));
+  assert.equal(draft.checks.find((c) => c.id === 'held-back').status, 'warn');
+});

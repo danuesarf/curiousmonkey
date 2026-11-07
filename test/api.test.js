@@ -144,14 +144,14 @@ test('verify queues a scan; the worker connects the account and fills the portal
   await drain();
   const list = (await owner.get('/api/accounts')).json.items;
   assert.equal(list.find((x) => x.id === accA).status, 'connected');
-  assert.equal(list.find((x) => x.id === accA).roles, 8);
+  assert.equal(list.find((x) => x.id === accA).roles, 10);
   assert.equal(list.find((x) => x.id === accA).data_event_sources, 2);
   assert.ok(list.find((x) => x.id === accA).checkpoints.length >= 1);
 });
 
 test('role list: filters, sorting, paging and facets', async () => {
   const all = (await owner.get('/api/roles?limit=100')).json;
-  assert.equal(all.total, 16);
+  assert.equal(all.total, 20);
   assert.equal(all.items[0].risk, 'High');                                              // sorted by risk first
   const sso = (await owner.get('/api/roles?kinds=identity-center')).json;
   assert.equal(sso.total, 2); assert.ok(sso.items.every((r) => r.kind === 'identity-center'));
@@ -182,14 +182,14 @@ test('RBAC: an auditor can read but not change anything; a scoped account owner 
     return c;
   };
   const auditor = await mk('aud@kbi.id', 'auditor');
-  assert.equal((await auditor.get('/api/roles')).json.total, 16);
+  assert.equal((await auditor.get('/api/roles')).json.total, 20);
   assert.equal((await auditor.post('/api/accounts', { name: 'x', accountId: '999999999999' })).status, 403);
   assert.equal((await auditor.post(`/api/accounts/${accA}/scan`)).status, 403);
   assert.equal((await auditor.get('/api/audit')).status, 200);
   assert.equal((await auditor.get('/api/members')).status, 403);
   const scoped = await mk('squad@kbi.id', 'account_owner', { scope_accounts: [accB] });
   const mine = (await scoped.get('/api/roles?limit=100')).json;
-  assert.equal(mine.total, 8); assert.ok(mine.items.every((r) => r.account_id === accB));
+  assert.equal(mine.total, 10); assert.ok(mine.items.every((r) => r.account_id === accB));
   const other = (await owner.get(`/api/roles?accounts=${accA}&q=payments`)).json.items[0].id;
   assert.equal((await scoped.get(`/api/roles/${other}`)).status, 404);                 // not 403: existence is not revealed
   assert.equal((await scoped.get('/api/accounts')).json.items.length, 1);

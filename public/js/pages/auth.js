@@ -1,12 +1,29 @@
-import { h, post, get, field, toast, setCsrf, copy } from '../lib.js';
-import { monkey, logo } from '../art.js';
-import { session, go } from '../main.js';
+import { h, svg, post, get, field, toast, setCsrf, copy } from '../lib.js';
+import { session, go, mark } from '../main.js';
+const logo = () => mark(28);
 
-const artPanel = () => h('aside', { class: 'auth-art' },
-  h('div', { class: 'row' }, h('span', { class: 'tag bad' }, 'AdministratorAccess'), h('span', { class: 'tag good' }, 'ec2:DescribeInstances')),
-  h('h2', null, 'The monkey only needs the banana. Don\'t give it the bazooka.'),
-  monkey(),
-  h('p', { class: 'small', style: null }, 'Curious Monkey reads CloudTrail to see what each IAM role really does, then drafts the smallest policy that still works.'));
+const artPanel = () => h('aside', { class: 'auth-art' }, radarArt(),
+  h('h2', null, 'Every role on one radar. ', h('span', null, 'Keep the banana, drop the bazooka.')));
+
+/** Decorative: a sweep passing over a used permission (banana) and a never-called admin grant (red). */
+function radarArt() {
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const ring = (r, dash) => svg('circle', { cx: 300, cy: 300, r, fill: 'none', stroke: '#1f4a35', 'stroke-dasharray': dash ? '3 6' : null });
+  return svg('svg', { viewBox: '0 0 600 600', 'aria-hidden': 'true' },
+    svg('defs', null, svg('radialGradient', { id: 'aw', cx: 0, cy: 0, r: 260, gradientUnits: 'userSpaceOnUse' }, svg('stop', { offset: 0, 'stop-color': '#f6e016', 'stop-opacity': 0.28 }), svg('stop', { offset: 1, 'stop-color': '#f6e016', 'stop-opacity': 0.02 }))),
+    svg('circle', { cx: 300, cy: 300, r: 270, fill: '#051209', stroke: '#1f4a35' }), ring(200, true), ring(130, true), ring(60, true),
+    svg('path', { d: 'M30 300 H570 M300 30 V570', stroke: '#16392a' }),
+    [[180, 210, 2], [400, 180, 1.6], [420, 380, 1.6], [230, 420, 1.6], [350, 470, 1.4], [140, 330, 1.4], [470, 280, 1.4], [260, 140, 1.4]].map(([x, y, r]) => svg('circle', { cx: x, cy: y, r, fill: '#5f8c73' })),
+    svg('g', { transform: 'translate(300 300)' }, svg('g', null,
+      svg('path', { d: 'M0 0 L260 0 A260 260 0 0 0 225 -130 Z', fill: 'url(#aw)' }), svg('path', { d: 'M0 0 L260 0', stroke: '#f6e016', 'stroke-width': 2.5 }),
+      !still && svg('animateTransform', { attributeName: 'transform', type: 'rotate', from: '0', to: '360', dur: '6s', repeatCount: 'indefinite' }))),
+    svg('circle', { cx: 360, cy: 250, r: 7, fill: '#f6e016' }), svg('circle', { cx: 360, cy: 250, r: 16, fill: 'none', stroke: '#f6e016', class: 'blink' }),
+    svg('text', { x: 382, y: 248, fill: '#f6e016', 'font-family': 'Geist Mono, monospace', 'font-size': 14 }, 'ec2:DescribeInstances'),
+    svg('text', { x: 382, y: 266, fill: '#a9bfb2', 'font-size': 12 }, 'called 2,140 times'),
+    svg('path', { d: 'M196 470 l12 12 M208 470 l-12 12', stroke: '#ff6b5e', 'stroke-width': 2.5 }),
+    svg('text', { x: 218, y: 482, fill: '#ff6b5e', 'font-family': 'Geist Mono, monospace', 'font-size': 14 }, 'AdministratorAccess'),
+    svg('text', { x: 218, y: 500, fill: '#a9bfb2', 'font-size': 12 }, 'never called · 90 days'));
+}
 
 async function afterAuth(res) { session.user = res.user; setCsrf(res.csrf); go('#/'); }
 

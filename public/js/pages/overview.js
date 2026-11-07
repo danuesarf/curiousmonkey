@@ -1,11 +1,12 @@
 import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM } from '../lib.js';
 import { session, go } from '../main.js';
 
-const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
+const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, unidentified: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
 const saved = { ...DEFAULT };   // survives navigating to a role and back
 
 export async function overview(ctx) {
   const f = saved;
+  ctx.setCrumbs('Roles');
   const [ov, accts] = await Promise.all([get('/overview'), get('/accounts')]);
   const accounts = accts.items;
   const list = h('div'), tiles = h('div', { class: 'tiles' });
@@ -15,7 +16,7 @@ export async function overview(ctx) {
     const p = new URLSearchParams();
     if (f.q) p.set('q', f.q);
     for (const k of ['accounts', 'kinds', 'risks', 'teams']) if (f[k].size) p.set(k, [...f[k]].join(','));
-    if (f.unconfirmed) p.set('unconfirmed', '1'); if (f.idle) p.set('idle', '1'); if (f.openFlags) p.set('openFlags', '1');
+    if (f.unconfirmed) p.set('unconfirmed', '1'); if (f.idle) p.set('idle', '1'); if (f.openFlags) p.set('openFlags', '1'); if (f.unidentified) p.set('unidentified', '1');
     if (f.policy) p.set('hasPolicyKind', f.policy);
     p.set('sort', f.sort); p.set('dir', f.dir); p.set('page', f.page); p.set('limit', '25');
     return p.toString();
@@ -39,15 +40,16 @@ export async function overview(ctx) {
     h('button', { class: 'chip', type: 'button', onClick: () => { f.dir = f.sort === key && f.dir === 'desc' ? 'asc' : 'desc'; f.sort = key; load(); } }, label, f.sort === key ? (f.dir === 'asc' ? ' ↑' : ' ↓') : ''));
 
   const table = (r) => h('div', { class: 'scroll' }, h('table', null,
-    h('thead', null, h('tr', null, sortTh('name', 'Role'), sortTh('risk', 'Risk'), h('th', null, 'Used / unused / unconfirmed'), sortTh('unused', 'Unused'), h('th', null, 'Reviewer'), sortTh('activity', 'Last activity'), h('th', null, 'Findings'))),
+    h('thead', null, h('tr', null, sortTh('name', 'Role'), sortTh('risk', 'Risk'), h('th', null, 'Used / unused / unconfirmed'), sortTh('unused', 'Unused'), h('th', null, 'Reviewer'), sortTh('activity', 'Last activity'), h('th', null, 'Findings'), h('th', null, 'State'))),
     h('tbody', null, r.items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/roles/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/roles/${x.id}`); } },
-      h('td', null, h('div', { class: 'name' }, x.name), h('div', { class: 'tiny muted' }, `${x.account_name} · ${x.aws_account_id} · `, KIND[x.kind], x.permission_set ? ` (${x.permission_set})` : '')),
+      h('td', null, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'name' }, x.name), x.has_unidentified && h('a', { class: 'unk-tag', href: `#/roles/${x.id}?identify=`, title: 'Has calls under unidentified event names', onClick: (e) => e.stopPropagation() }, 'UNK')), h('div', { class: 'tiny muted' }, `${x.account_name} · ${x.aws_account_id} · `, KIND[x.kind], x.permission_set ? ` (${x.permission_set})` : '')),
       h('td', null, riskBadge(x.risk)),
       h('td', { style: null }, usageBar(x.used_count, x.unused_count, x.unconfirmed_count), h('div', { class: 'tiny muted' }, `${num(x.used_count)} / ${num(x.unused_count)} / ${num(x.unconfirmed_count)} of ${num(x.granted_count)}`)),
       h('td', { class: 'nowrap' }, num(x.unused_count)),
       h('td', null, teamBadge(x.reviewer_team, x.requires_both)),
       h('td', { class: 'nowrap small' }, x.last_activity_at ? ago(x.last_activity_at) : 'none seen'),
-      h('td', { class: 'small' }, x.open_flags ? `${x.decided_flags} of ${x.open_flags} decided` : 'none'))))));
+      h('td', { class: 'small' }, x.open_flags ? `${x.decided_flags} of ${x.open_flags} decided` : 'none'),
+      h('td', null, x.history?.complete ? h('span', { class: 'state' }, 'Final') : h('span', { class: 'state prov', title: 'History is still being read' }, `Provisional ${x.history?.progress ?? 0}%`)))))));
 
   const t = ov.totals;
   const tile = (label, value, sub) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
@@ -88,8 +90,8 @@ export async function overview(ctx) {
 
   const body = h('div', { class: 'stack-lg' },
     h('header', { class: 'head' },
-      h('div', null, h('h1', null, f.accounts.size ? `IAM roles in ${f.accounts.size} account${f.accounts.size > 1 ? 's' : ''}` : 'IAM roles across all accounts'),
-        h('p', { class: 'muted' }, 'Window: 90 days, the CloudTrail event history maximum. History is stored, so it grows past that over time.')),
+      h('div', null, h('div', { class: 'eyebrow' }, 'ROLES'), h('h1', null, f.accounts.size ? `IAM roles in ${f.accounts.size} account${f.accounts.size > 1 ? 's' : ''}` : 'IAM roles across all accounts'),
+        h('p', { class: 'muted' }, 'Results stay provisional until each account’s CloudTrail history is fully read. History is stored, so it grows past the first read over time.')),
       h('div', { class: 'actions' }, session.user.permissions.includes('accounts') && h('a', { class: 'btn', href: '#/accounts/new' }, 'Connect account'), session.user.permissions.includes('scan') && scanBtn)),
     tiles, scopeCard,
     h('section', { class: 'card' },
@@ -97,7 +99,7 @@ export async function overview(ctx) {
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Role kind' }, ...Object.entries(KIND).map(([k, l]) => chip(f.kinds, k, l))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Risk' }, ...['High', 'Medium', 'Low'].map((r) => chip(f.risks, r, r))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Reviewer' }, ...Object.entries(TEAM).map(([k, l]) => chip(f.teams, k, l))),
-        h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Findings' }, flag('unconfirmed', 'Has unverifiable'), flag('idle', 'Idle role'), flag('openFlags', 'Needs a decision')),
+        h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Findings' }, flag('unconfirmed', 'Has unverifiable'), flag('idle', 'Idle role'), flag('openFlags', 'Needs a decision'), flag('unidentified', 'Has unidentified calls')),
         sel('policy', [['', 'Any policy type'], ['inline', 'Has inline policy'], ['managed', 'Has attached policy']], 'Policy type'), count),
       list));
   load();

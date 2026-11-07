@@ -42,7 +42,7 @@ test('a full scan inventories roles of every kind and records who used them', as
   await drain();
   assert.equal((await q.runDetail(run)).run.status, 'succeeded');
   const roles = (await db.query(`SELECT name, kind FROM roles WHERE account_id=$1 ORDER BY name`, [A])).rows;
-  assert.equal(roles.length, 8);
+  assert.equal(roles.length, 10);
   assert.equal(roles.find((r) => r.name === 'AWSServiceRoleForECS').kind, 'service-linked');
   assert.equal(roles.find((r) => r.name.startsWith('AWSReservedSSO_')).kind, 'identity-center');
   const t = await totals(A);
@@ -148,4 +148,29 @@ test('a scan interrupted by throttling resumes from its checkpoint and ends with
   await q.enqueueRun(C); await drain();
   const ref = await totals(C);
   assert.ok(Math.abs(resumed.calls - ref.calls) <= ref.calls * 0.002, `resumed ${resumed.calls} vs clean ${ref.calls}`);
+});
+
+test('a role chain in the trail links sessions: airflow-worker → data-etl → lake-reader', async () => {
+  const rows = (await db.query(
+    `SELECT r.name, s.access_key_id, s.parent_key_id FROM track_sessions s JOIN roles r ON r.id=s.role_id
+      WHERE s.account_id=$1 AND r.name IN ('airflow-worker','data-etl','lake-reader')`, [A])).rows;
+  const byKey = new Map(rows.map((x) => [x.access_key_id, x]));
+  const lake = rows.find((x) => x.name === 'lake-reader');
+  assert.ok(lake, 'lake-reader sessions recorded');
+  const etl = byKey.get(lake.parent_key_id);
+  assert.equal(etl?.name, 'data-etl');
+  assert.equal(byKey.get(etl.parent_key_id)?.name, 'airflow-worker');
+  const used = (await db.query(`SELECT status FROM role_actions ra JOIN roles r ON r.id=ra.role_id WHERE r.account_id=$1 AND r.name='airflow-worker' AND ra.action='sts:AssumeRole'`, [A])).rows[0];
+  assert.equal(used?.status, 'used');                                // assuming the next role counts as use of the first
+});
+
+test('a track opened on the middle session still shows the jump it made onward', async () => {
+  const { buildTrack } = await import('../src/sessions.js');
+  const mid = (await db.query(
+    `SELECT s.id FROM track_sessions s JOIN roles r ON r.id=s.role_id
+      WHERE s.account_id=$1 AND r.name='data-etl' AND EXISTS (SELECT 1 FROM track_sessions c WHERE c.parent_key_id=s.access_key_id) LIMIT 1`, [A])).rows[0];
+  const t = await buildTrack({ scope_accounts: null }, mid.id);
+  assert.deepEqual(t.sessions.map((s) => s.role), ['airflow-worker', 'data-etl', 'lake-reader']);
+  assert.ok(t.calls.some((c) => c.lane === 1 && c.jumpTo === 2));
+  assert.ok(!t.calls.some((c) => c.jumpOutOfView));
 });
