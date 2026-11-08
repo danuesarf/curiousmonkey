@@ -1,8 +1,8 @@
-import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, ApiError } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError } from '../lib.js';
 import { session, go } from '../main.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
-const STATUS = { connected: 'b-green', pending: 'b-medium', error: 'b-high' };
+const STATUS = { connected: 'b-green', pending: 'b-medium', error: 'b-high', planned: 'b-neutral' };
 const SOURCE_LABEL = { 'event-history': 'Event History', s3: 'S3 trail' };
 const MODE_LABEL = { assume_role: 'Assumes a role', access_key: 'IAM user key' };
 const RE = {
@@ -257,10 +257,73 @@ export async function accountsPage(ctx) {
   const { items } = await get('/accounts');
   ctx.setCrumbs('Accounts');
   const can = (p) => session.user.permissions.includes(p);
+  const live = items.filter((a) => a.status !== 'planned'), planned = items.filter((a) => a.status === 'planned');
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS'), h('h1', null, 'Cloud accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
-      can('accounts') && h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account')),
-    items.length ? items.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'));
+      can('accounts') && h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => planDialog(ctx) }, 'Add planned account'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account'))),
+    live.length ? live.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'),
+    planned.length > 0 && plannedCard(planned, ctx, can));
+}
+
+function plannedCard(planned, ctx, can) {
+  const remove = (a) => async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'The placeholder is deleted. Nothing changes in AWS.', confirmLabel: 'Remove', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } };
+  const actions = (a) => can('accounts') && h('div', { class: 'row' }, h('a', { class: 'btn sm primary', href: `#/accounts/new?from=${a.id}` }, 'Onboard'),
+    h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'), h('button', { class: 'btn sm danger', onClick: remove(a) }, 'Remove'));
+  const row = (a) => h('tr', null, h('td', null, h('b', null, a.name)), h('td', { class: 'mono small' }, a.account_id), h('td', null, a.environment), h('td', { class: 'small' }, a.ou || '—'),
+    h('td', { class: 'small muted' }, a.note || '—'), h('td', { class: 'small muted nowrap' }, ago(a.created_at)), h('td', { class: 'nowrap' }, actions(a)));
+  const head = h('tr', null, ...['Name', 'AWS account', 'Environment', 'OU or group', 'Note', 'Added', ''].map((t) => h('th', null, t)));
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, `Planned · ${planned.length}`),
+      h('p', { class: 'small muted' }, 'Placeholders for accounts not onboarded yet. They show on Space as dashed rings and are never scanned. Onboarding sets up access and runs the first scan.'))),
+    h('div', { class: 'scroll' }, h('table', null, h('thead', null, head), h('tbody', null, planned.map(row)))));
+}
+
+/** Add planned accounts: one with a form, or many pasted one per line. */
+function planDialog(ctx) {
+  const m = { name: '', accountId: '', environment: 'production', ou: '', note: '' };
+  const st = { many: false, text: '' };
+  const body = h('div', { class: 'stack form' });
+  const err = h('div', { class: 'err', role: 'alert' });
+  const env = () => { const e = h('select', { 'data-f': 'environment' }, ['production', 'staging', 'development', 'sandbox'].map((x) => h('option', { value: x, selected: x === m.environment }, x))); e.addEventListener('change', () => { m.environment = e.value; }); return e; };
+  const draw = () => {
+    const tabs = h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'How many' },
+      h('button', { type: 'button', class: 'chip', 'aria-pressed': String(!st.many), onClick: () => { st.many = false; draw(); } }, 'One account'),
+      h('button', { type: 'button', class: 'chip', 'aria-pressed': String(st.many), onClick: () => { st.many = true; draw(); } }, 'Paste many'));
+    if (st.many) {
+      const ta = h('textarea', { 'data-f': 'text', rows: 9, class: 'mono', placeholder: '123456789012, payments-prod, production, Workloads/Prod\n210987654321, payments-stg, staging' }, st.text);
+      ta.addEventListener('input', () => { st.text = ta.value; });
+      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, staging, development or sandbox), OU. Only the ID is required. Accounts already in Curious Monkey are skipped.'));
+    } else {
+      body.replaceChildren(tabs,
+        field('AWS account ID', input(m, 'accountId', { 'data-f': 'accountId', inputmode: 'numeric', maxlength: '12', placeholder: '123456789012' }), 'Twelve digits, no dashes.'),
+        field('Name', input(m, 'name', { 'data-f': 'name', placeholder: 'e.g. payments-prod', maxlength: '80' })),
+        field('Environment', env()),
+        field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', placeholder: 'e.g. Workloads/Prod', maxlength: '120' })),
+        field('Note (optional)', input(m, 'note', { 'data-f': 'note', placeholder: 'Owner, ticket, when it should be onboarded', maxlength: '500' })));
+    }
+    body.append(err);
+  };
+  draw();
+  const save = h('button', { class: 'btn primary' }, 'Add');
+  save.addEventListener('click', async () => {
+    clearErrs(body); err.textContent = '';
+    if (!st.many) {
+      if (!RE.account.test(m.accountId)) return fail(body, 'accountId', 'AWS account IDs are 12 digits, no dashes.');
+      if (!m.name) return fail(body, 'name', 'Give the account a name.');
+    }
+    save.disabled = true;
+    try {
+      if (st.many) { const r = await post('/accounts/planned/bulk', { text: st.text }); toast(`${r.added} planned account${r.added === 1 ? '' : 's'} added${r.skipped.length ? `, ${r.skipped.length} already here` : ''}.`); }
+      else { await post('/accounts/planned', m); toast(`${m.name} added as planned.`); }
+      bg.remove(); ctx.reload();
+    } catch (x) {
+      save.disabled = false;
+      if (x instanceof ApiError && x.field && x.field !== 'text') fail(body, x.field, x.message); else err.textContent = x.message;
+    }
+  });
+  const bg = modal('Add planned account', h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'A placeholder for an account you will onboard later. It needs no access and is never scanned; it shows on Space so the estate is complete.'), body),
+    h('div', { class: 'actions' }, save, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel')));
+  bg.querySelector('input, textarea')?.focus();
 }
 
 function accountCard(a, ctx, can) {
@@ -316,10 +379,13 @@ function historyBars(hist) {
 const STEPS = ['Account', 'CloudTrail source', 'Access', 'Deploy and connect'];
 const STEP_OF = { name: 1, accountId: 1, environment: 1, regions: 1, eventSource: 2, lookbackDays: 2, 's3.bucket': 2, s3: 2, roleName: 3, trustPrincipal: 3, baseIdentity: 3, authMode: 3 };
 
-export async function newAccountPage() {
+export async function newAccountPage(ctx) {
   const [{ items }, identity] = await Promise.all([get('/accounts'), get('/onboarding/identity').catch(() => null), loadLimits()]);
-  const taken = new Set(items.map((a) => a.account_id));
+  // onboarding a planned account: its details are filled in and its ID is fixed
+  const from = items.find((a) => a.id === ctx?.params?.get('from') && a.status === 'planned') || null;
+  const taken = new Set(items.filter((a) => a !== from).map((a) => a.account_id));
   const m = blankModel();
+  if (from) Object.assign(m, { name: from.name, accountId: from.account_id, environment: from.environment, ou: from.ou || '' });
   m.lookbackDays = Math.min(LIMITS.defaultLookbackDays, LIMITS.eventHistoryMaxDays);
   const st = { step: 1, snip: null, pendingError: null };
   const body = h('div', { class: 'stack-lg' });
@@ -340,7 +406,7 @@ export async function newAccountPage() {
     let card;
     const rerender = () => render();
     if (st.step === 1) {
-      card = h('section', { class: 'card' }, h('div', { class: 'card-b stack form' }, detailsSection(m)));
+      card = h('section', { class: 'card' }, h('div', { class: 'card-b stack form' }, from && h('div', { class: 'alert' }, `Onboarding the planned account ${from.name}. Check the details, then set up how it is read.`), detailsSection(m, { lockId: !!from })));
       card.append(h('div', { class: 'card-f' }, nav(card, { back: false, next: () => { if (checkDetails(card, m, taken)) { st.step = 2; render(); } } })));
     } else if (st.step === 2) {
       card = h('section', { class: 'card' }, h('div', { class: 'card-b stack form' }, sourceSection(m, rerender)));
@@ -368,7 +434,7 @@ export async function newAccountPage() {
       if (m.authMode === 'access_key' && !checkKeys(card, m, { required: true })) return;
       connect.disabled = true; connect.textContent = 'Connecting…';
       try {
-        const acct = await post('/accounts', payload(m, { create: true }));
+        const acct = from ? await api('PATCH', `/accounts/${from.id}`, { ...payload(m, { create: false }), onboard: true }) : await post('/accounts', payload(m, { create: true }));
         await post(`/accounts/${acct.id}/verify`);
         toast(`${acct.name} added. The first step checks access; if it fails, the reason shows here and on the account.`);
         go('#/scans');
@@ -398,12 +464,13 @@ export async function newAccountPage() {
   }
 
   render();
-  return h('div', { class: 'stack-lg' }, h('header', { class: 'head' }, h('div', null, h('div', { class: 'crumbs' }, h('a', { href: '#/accounts' }, 'Cloud accounts'), ' / New'), h('h1', null, 'Connect an AWS account'))), body);
+  return h('div', { class: 'stack-lg' }, h('header', { class: 'head' }, h('div', null, h('div', { class: 'crumbs' }, h('a', { href: '#/accounts' }, 'Cloud accounts'), from ? ` / ${from.name} / Onboard` : ' / New'), h('h1', null, from ? `Onboard ${from.name}` : 'Connect an AWS account'))), body);
 }
 
 // ---------- edit ----------
 export async function editAccountPage(ctx, id) {
   const [a, identity] = await Promise.all([get(`/accounts/${id}`), get('/onboarding/identity').catch(() => null), loadLimits()]);
+  if (a.status === 'planned') return editPlanned(a);
   const m = modelFrom(a);
   const root = h('div', { class: 'stack-lg' });
   const sections = h('div', { class: 'stack-lg' });
@@ -458,3 +525,27 @@ export const COVERAGE_ROWS = [
   ['other_role', 'Made by a role this account does not have', 'A deleted role, or a role in another account.'],
 ];
 
+
+/** A planned account has only details to edit; access is set when it is onboarded. */
+function editPlanned(a) {
+  const m = { name: a.name, environment: a.environment, ou: a.ou || '', note: a.note || '' };
+  const box = h('div', { class: 'card-b stack form' });
+  const env = h('select', { 'data-f': 'environment' }, ['production', 'staging', 'development', 'sandbox'].map((x) => h('option', { value: x, selected: x === m.environment }, x)));
+  env.addEventListener('change', () => { m.environment = env.value; });
+  box.append(field('Name', input(m, 'name', { 'data-f': 'name', maxlength: '80' })), field('AWS account ID', h('input', { value: a.account_id, disabled: true })), field('Environment', env),
+    field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', maxlength: '120' })), field('Note (optional)', input(m, 'note', { 'data-f': 'note', maxlength: '500', placeholder: 'Owner, ticket, when it should be onboarded' })));
+  const err = h('div', { class: 'err', role: 'alert' });
+  const save = h('button', { type: 'button', class: 'btn primary' }, 'Save');
+  save.addEventListener('click', async () => {
+    clearErrs(box); err.textContent = '';
+    if (!m.name) return fail(box, 'name', 'Give the account a name.');
+    save.disabled = true;
+    try { await api('PATCH', `/accounts/${a.id}`, { name: m.name, environment: m.environment, ou: m.ou || null, note: m.note || null }); toast('Saved'); go('#/accounts'); }
+    catch (x) { save.disabled = false; if (x instanceof ApiError && x.field) fail(box, x.field, x.message); else err.textContent = x.message; }
+  });
+  return h('div', { class: 'stack-lg' },
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'crumbs' }, h('a', { href: '#/accounts' }, 'Cloud accounts'), ` / ${a.name}`), h('h1', null, `Edit ${a.name}`), h('p', { class: 'muted' }, 'Planned, not onboarded. Nothing is read from it yet.')),
+      h('a', { class: 'btn primary', href: `#/accounts/new?from=${a.id}` }, 'Onboard')),
+    h('section', { class: 'card' }, box),
+    h('div', { class: 'wizard-nav sticky' }, h('a', { class: 'btn', href: '#/accounts' }, 'Cancel'), h('span', { class: 'grow' }), err, save));
+}

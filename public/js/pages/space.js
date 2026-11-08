@@ -78,9 +78,9 @@ function estateModel(d) {
     const cols = Math.max(1, Math.round(Math.sqrt((list.length * w) / 760))), rows = Math.ceil(list.length / cols), cw = w / cols, ch = 760 / rows;
     list.forEach((a, i) => {
       const cx = x0 + cw * (i % cols + 0.5), cy = 380 - ch * (Math.floor(i / cols) + 0.5);
-      const R = Math.max(14, Math.min(18 + Math.sqrt(a.roles) * 5.5, 0.4 * Math.min(cw, ch)));
+      const R = a.planned ? Math.max(14, Math.min(34, 0.4 * Math.min(cw, ch))) : Math.max(14, Math.min(18 + Math.sqrt(a.roles) * 5.5, 0.4 * Math.min(cw, ch)));
       const coldDots = Math.min(a.cold, 16);
-      groups.push({ ...a, env, x: cx, y: cy, R, coldShare: a.roles ? a.cold / a.roles : 0, label: a.name,
+      groups.push({ ...a, env, x: cx, y: cy, R, coldShare: a.roles ? a.cold / a.roles : 0, label: a.planned ? `${a.name} · planned` : a.name,
         prof: a.hourly.map((b) => b.calls), stars: cloud(cx, cy, R, a.stars, coldDots, hash(a.id)) });
     });
     x1 = x0;
@@ -92,7 +92,8 @@ function estateModel(d) {
   });
   const links = [];
   for (const c of d.chains) if (by.has(c.from) && by.has(c.to)) links.push({ from: c.from, to: c.to, kind: c.isNew ? 'new' : 'chain', vol: Math.min(3, 1 + lg(c.sessions)), at: c.hours, sessions: c.sessions, denied: c.denied });
-  for (const s of sources) for (const t of s.targets) if (by.has(t.accountId)) links.push({ from: s.id, to: t.accountId, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null });
+  for (const s of sources) for (const t of s.targets) if (by.has(t.accountId)) links.push({ from: s.id, to: t.accountId, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges || [], roles: t.roles.length });
+  links.forEach((l, i) => { l.id = `link:${i}`; });
   const name = (id) => by.get(id)?.name || 'an account';
   const events = [
     ...d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: `${name(e.accountId)}${e.roleName ? ` · ${e.roleName}` : ''}`, target: e.accountId })),
@@ -129,8 +130,9 @@ function accountModel(d) {
     for (const [s, v] of per) links.push({ from: g.id, to: `svc:${s}`, kind: 'use', vol: lg(v) / 5 });
   }
   for (const r of roles) for (const s of r.services) if (tower.has(s.name)) links.push({ from: r.id, to: `svc:${s.name}`, kind: s.denied > 0 && s.denied >= s.calls * 0.05 ? 'denied' : 'use1', owner: r.id, vol: 1, denied: s.denied });
-  for (const s of sources) for (const t of s.targets) for (const id of t.roles) if (byRole.has(id)) links.push({ from: s.id, to: id, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1 });
+  for (const s of sources) for (const t of s.targets) for (const id of t.roles) if (byRole.has(id)) links.push({ from: s.id, to: id, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, edges: (t.edges || []).filter((e) => e.roleId === id) });
   for (const n of fars) for (const l of n.links) if (byRole.has(l.roleId)) links.push(l.dir === 'in' ? { from: `far:${n.id}`, to: l.roleId, kind: 'in', vol: 2 } : { from: l.roleId, to: `far:${n.id}`, kind: 'out', vol: 2 });
+  links.forEach((l, i) => { l.id = `link:${i}`; });
   const events = d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
   return { view: 'account', account: d.account, zones: [], groups, roles, byRole, towers, rim, sources, fars, links, events, hidden: d.outside.hidden,
     coldCount: d.coldCount, roleCount: d.roleCount, hourStart: new Date(d.hourStart).getTime(),
@@ -141,10 +143,11 @@ export async function spacePage(ctx) {
   const view = ctx.params.get('view') === 'account' ? 'account' : 'estate';
   const est = await get('/space');
   if (!est.accounts.length) return h('div', { class: 'stack' }, h('h1', null, 'Space'), h('p', { class: 'muted' }, 'No accounts yet. Connect one to see it here.'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an account'));
-  const accountId = ctx.params.get('account') || [...est.accounts].sort((a, b) => b.calls7 - a.calls7)[0].id;
+  const live = est.accounts.filter((a) => !a.planned);
+  const accountId = ctx.params.get('account') || [...(live.length ? live : est.accounts)].sort((a, b) => b.calls7 - a.calls7)[0].id;
   const M = view === 'estate' ? estateModel(est) : accountModel(await get(`/space/account/${accountId}`));
   ctx.setCrumbs(h('a', { href: '#/space' }, 'Space'), ...(view === 'account' ? [M.account.name] : []));
-  const st = { sel: M.defaultSel, hour: M.events.find((e) => e.target === M.defaultSel)?.hour ?? 23, playing: false, az: -14, el: 33, zone: '', timer: null, fit: null, dragging: false };
+  const st = { sel: M.defaultSel, hour: M.events.find((e) => e.target === M.defaultSel)?.hour ?? 23, playing: false, az: -14, el: 33, zoom: 1.15, zone: '', timer: null, fit: null, dragging: false };
   const left = h('aside', { class: 'left' }), right = h('aside', { class: 'right' });
   const stage = svg('svg', { class: 'space-svg', viewBox: `0 0 ${W} ${H}`, role: 'img' });
   const box = h('div', { class: 'space-box' }, stage);
@@ -166,20 +169,30 @@ export async function spacePage(ctx) {
     const az = Math.round(drag.az - dx * 0.35), el = Math.max(18, Math.min(70, Math.round(drag.el + dy * 0.2)));
     if (az !== st.az || el !== st.el) { st.az = az; st.el = el; if (!drag.raf) drag.raf = requestAnimationFrame(() => { drag && (drag.raf = 0); render(); }); }
   });
-  const endDrag = () => { if (drag?.moved) { st.dragging = false; st.fit = null; render(); setTimeout(() => { drag = null; }, 0); } else drag = null; };
+  const endDrag = () => { if (drag?.moved) { st.dragging = false; render(); setTimeout(() => { drag = null; }, 0); } else drag = null; };
+  // zoom only when asked: the wheel, or the + and − buttons
+  stage.addEventListener('wheel', (ev) => { ev.preventDefault(); set({ zoom: Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015))) }); }, { passive: false });
   stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
   stage.addEventListener('click', (ev) => { if (drag?.moved) { ev.stopPropagation(); return; } if (ev.target === stage) set({ sel: null }); });
 
   function camera(fitPts) {
     const D = 2600, el = (st.el * Math.PI) / 180, ce = Math.cos(el), se = Math.sin(el), az = (st.az * Math.PI) / 180, ca = Math.cos(az), sa = Math.sin(az);
-    const p = (x, y, z) => { const X = x * ca - y * sa, Y = x * sa + y * ca, vy = Y + D * ce, vz = z - D * se, dep = vy * ce - vz * se; return [X / dep, (vy * se + vz * ce) / dep, dep]; };
-    if (!st.fit || (!st.dragging && st.fit.key !== `${st.az}|${st.el}`)) {
-      let x0 = 1e9, x1 = -1e9, u0 = 1e9, u1 = -1e9;
-      for (const [x, y, z] of fitPts) { const [X, U] = p(x, y, z); x0 = Math.min(x0, X); x1 = Math.max(x1, X); u0 = Math.min(u0, U); u1 = Math.max(u1, U); }
-      const F = Math.min((W - 60) / (x1 - x0), (H - 150) / (u1 - u0));
-      st.fit = { key: `${st.az}|${st.el}`, D, F, CX: W / 2 - (F * (x0 + x1)) / 2, CY: 96 + F * u1 + (H - 150 - F * (u1 - u0)) / 2 };
+    const view = (az, elr) => { const c = Math.cos(az), s2 = Math.sin(az), ce2 = Math.cos(elr), se2 = Math.sin(elr);
+      return (x, y, z) => { const X = x * c - y * s2, Y = x * s2 + y * c, vy = Y + D * ce2, vz = z - D * se2, dep = vy * ce2 - vz * se2; return [X / dep, (vy * se2 + vz * ce2) / dep, dep]; }; };
+    const p = view(az, el);
+    if (!st.fit) {
+      // framed once, over every angle the camera can take, so rotating and tilting never change the scale.
+      // The frame is centred on the plane, not on what happens to be in view.
+      let ext = 0, top = 0, bottom = 0;
+      for (let a = 0; a < 360; a += 15) for (let e = 18; e <= 70; e += 13) {
+        const q = view((a * Math.PI) / 180, (e * Math.PI) / 180), [ox, ou] = q(0, 0, 0);
+        for (const [x, y, z] of fitPts) { const [X, U] = q(x, y, z); ext = Math.max(ext, Math.abs(X - ox)); top = Math.max(top, U - ou); bottom = Math.max(bottom, ou - U); }
+      }
+      const F = Math.min((W - 40) / (2 * ext), (H - 130) / (top + bottom));
+      st.fit = { D, F, top, bottom };
     }
-    const { F, CX, CY } = st.fit;
+    const F = st.fit.F * st.zoom, [ox, ou] = p(0, 0, 0);
+    const CX = W / 2 - F * ox, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou;
     return (x, y, z = 0) => { const [X, U, dep] = p(x, y, z); return [CX + F * X, CY - F * U, dep, F / dep]; };
   }
   const hourLabel = (b) => new Date(M.hourStart + b * 36e5).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
@@ -196,11 +209,11 @@ export async function spacePage(ctx) {
     const fitPts = [[-560, -380, 0], [560, -380, 0], [560, 380, 0], [-560, 380, 0], [0, -440, 0], ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0]]), ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
     if (M.view === 'estate') fitPts.push([-760, 0, 0], [760, 0, 0]);
     for (const l of M.links) { const a = ent.get(l.from), b = ent.get(l.to); if (a && b) fitPts.push(apex3(a.p3, b.p3, l.from < l.to ? 1 : -1, liftOf(l, a.p3, b.p3))); }
-    const P = camera(fitPts), ref = st.fit.F / st.fit.D, sinEl = Math.sin((st.el * Math.PI) / 180);
+    const P = camera(fitPts), ref = (st.fit.F * st.zoom) / st.fit.D, sinEl = Math.sin((st.el * Math.PI) / 180);
     const path = (pts) => `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')}`;
     const ring3 = (cx, cy, r, a0, a1, n = 44) => path(Array.from({ length: n + 1 }, (_, i) => { const a = a0 + ((a1 - a0) * i) / n; return P(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 0); }));
     const pick = (id) => (ev) => { ev.stopPropagation(); set({ sel: sel === id ? null : id }); };
-    const out = { floor: [], halo: [], rings: [], towers: [], stems: [], stars: [], arcs: [], parts: [], sparks: [], sats: [], marks: [], hits: [], labels: [] };
+    const out = { floor: [], halo: [], rings: [], towers: [], stems: [], stars: [], arcs: [], paths: [], parts: [], sparks: [], sats: [], marks: [], hits: [], labels: [] };
     const tops = new Map(), blocks = [[0, 0, 400, 76], [W - 330, 0, W, 58]];
     const fits = (r) => r[0] >= 4 && r[2] <= W - 4 && r[1] >= 4 && r[3] <= H - 4 && !blocks.some((o) => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
 
@@ -226,12 +239,14 @@ export async function spacePage(ctx) {
     const cands = [];
     for (const g of M.groups) {
       const E = ENV[g.env], dim = dimOf(g.env), c = P(g.x, g.y, 0), rx = g.R * 1.8 * c[3];
-      out.halo.push(svg('ellipse', { cx: f(c[0]), cy: f(c[1]), rx: f(rx), ry: f(rx * sinEl), fill: `url(#sp-h-${g.env})`, opacity: o2((0.08 + 0.64 * Math.sqrt(g.prof[hour] / maxHour)) * dim) }));
       const a0 = -Math.PI / 2, act = (1 - g.coldShare) * Math.PI * 2;
-      out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0, a0 + act), fill: 'none', stroke: E.base, 'stroke-width': 1.5, opacity: o2(0.95 * dim) }));
-      if (g.coldShare > 0.001) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0 + act, a0 + Math.PI * 2), fill: 'none', stroke: COLD, 'stroke-width': 1.2, 'stroke-dasharray': '2 3', opacity: o2(0.9 * dim) }));
+      if (g.planned) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, 0, Math.PI * 2, 48), fill: E.base, 'fill-opacity': 0.05, stroke: E.hot, 'stroke-width': 1.3, 'stroke-dasharray': '3 5', opacity: o2(0.85 * dim) }));
+      else out.halo.push(svg('ellipse', { cx: f(c[0]), cy: f(c[1]), rx: f(rx), ry: f(rx * sinEl), fill: `url(#sp-h-${g.env})`, opacity: o2((0.08 + 0.64 * Math.sqrt(g.prof[hour] / maxHour)) * dim) }));
+      if (!g.planned) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0, a0 + act), fill: 'none', stroke: E.base, 'stroke-width': 1.5, opacity: o2(0.95 * dim) }));
+      if (!g.planned && g.coldShare > 0.001) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0 + act, a0 + Math.PI * 2), fill: 'none', stroke: COLD, 'stroke-width': 1.2, 'stroke-dasharray': '2 3', opacity: o2(0.9 * dim) }));
       const k0 = M.view === 'account' ? 1.55 : 1;
       let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, topZ = 0;
+      if (g.planned) { const q = P(g.x, g.y, 0); bx0 = bx1 = q[0]; by0 = by1 = q[1]; }
       g.stars.forEach((s, i) => {
         const p = P(s.x, s.y, s.z), lv = lg(s.calls7) / maxLog, k = Math.max(0.72, p[3] / ref) * k0;
         out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f((s.cold ? 1 : 0.8 + 0.42 * lg(s.calls7)) * k), fill: s.cold ? COLD : lv > 0.8 ? E.hot : lv > 0.45 ? E.base : E.dim, opacity: o2((s.cold ? 0.7 : 0.95) * dim), filter: !s.cold && i < 3 && dim === 1 ? 'url(#sp-glow)' : null })]);
@@ -242,10 +257,10 @@ export async function spacePage(ctx) {
       tops.set(g.id, t);
       const target = M.view === 'estate' ? g.id : g.roles[0]?.id;
       const hc = P(g.x, g.y, 30);
-      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, M.view === 'estate' ? `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days` : `${g.label} · ${g.roles.length} roles`),
+      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
         svg('circle', { cx: f(hc[0]), cy: f(hc[1]), r: f(Math.max(16, g.R * c[3] * 1.15)), fill: '#000', opacity: 0 })));
       const isSel = M.view === 'estate' ? sel === g.id : selRole?.cluster === g;
-      cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : E.base, pick: pick(target), below: fp[2][1] - t[1] + 14 });
+      cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0) + (g.planned ? -200 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : g.planned ? '#8d9a93' : E.base, pick: pick(target), below: fp[2][1] - t[1] + 14 });
       if (M.view === 'estate' && sel === g.id) {
         const x0 = Math.min(bx0, ...fp.map((q) => q[0])) - 6, y0 = Math.min(by0, t[1]) - 6, x1 = Math.max(bx1, ...fp.map((q) => q[0])) + 6, y1 = Math.max(by1, ...fp.map((q) => q[1])) + 6, q = 9;
         out.marks.push(svg('path', { d: ring3(g.x, g.y, g.R * 1.16, 0, Math.PI * 2, 56), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
@@ -291,7 +306,7 @@ export async function spacePage(ctx) {
     const rnd = rng(7);
     for (const l of M.links) {
       const a = ent.get(l.from), b = ent.get(l.to); if (!a || !b) continue;
-      const t = l.from === sel || l.to === sel || (selRole && l.owner === selRole.id);
+      const t = l.from === sel || l.to === sel || sel === l.id || (selRole && l.owner === selRole.id);
       const past = l.at ? l.at.some((x) => x <= hour) : true, now = l.at ? l.at.includes(hour) : false;
       let show = true, color = OUT, w = 1, o = 0.22, dash = null, cls = null, cut = 1, flow = 0, flag = null;
       if (l.kind === 'chain') { color = ENV[a.env]?.base || OUT; w = 0.6 + 0.4 * l.vol; o = t || now ? 0.95 : 0.4; flow = t || now ? Math.round(l.vol) : 0; if (l.denied && (t || now)) flag = { text: `⚠ ${l.denied} DENIED`, bg: RED }; }
@@ -307,7 +322,13 @@ export async function spacePage(ctx) {
       if (focus && focus !== 'outer' && a.env !== focus && b.env !== focus) o *= 0.25;
       if (focus === 'outer' && a.env !== 'outer' && b.env !== 'outer') o *= 0.25;
       const g3 = arc3(a.p3, b.p3, l.from < l.to ? 1 : -1, P, liftOf(l, a.p3, b.p3));
-      out.arcs.push(svg('path', { d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: color, 'stroke-width': f(w), opacity: o2(o), 'stroke-dasharray': dash, class: cls, 'stroke-linecap': 'round' }));
+      out.arcs.push(svg('path', { d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: color, 'stroke-width': f(sel === l.id ? w + 1.2 : w), opacity: o2(o), 'stroke-dasharray': dash, class: cls, 'stroke-linecap': 'round' }));
+      // every path but the per-cluster service bundles can be clicked: a wide invisible stroke along it
+      const ext = /^ext/.test(l.kind), mid = g3.pts[ext ? 6 : 12];
+      tops.set(l.id, mid);
+      if (l.kind !== 'use' && o > 0.15) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
+        svg('title', null, linkTitle(l))));
+      if (sel === l.id) out.marks.push(svg('circle', { cx: f(mid[0]), cy: f(mid[1]), r: 6, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
       if (cut < 1 && t) { const q = g3.pts[Math.round(cut * 24)]; out.sparks.push(svg('g', null, svg('circle', { cx: f(q[0]), cy: f(q[1]), r: 5, fill: 'none', stroke: RED, 'stroke-width': 1.4, class: 'sp-pulse' }))); }
       if (motion) for (let i = 0; i < flow; i++) {
         const dur = 3.4, begin = `${f(-(i * dur) / flow - rnd() * 0.8)}s`, c = l.kind === 'denied' ? RED : color;
@@ -315,7 +336,7 @@ export async function spacePage(ctx) {
           svg('animateMotion', { path: g3.d, dur: `${dur}s`, begin, repeatCount: 'indefinite', keyPoints: cut < 1 ? `0;${cut}` : '0;1', keyTimes: '0;1', calcMode: 'linear' }),
           svg('animate', { attributeName: 'opacity', values: '0;0.95;0.95;0', keyTimes: '0;0.1;0.8;1', dur: `${dur}s`, begin, repeatCount: 'indefinite' })));
       }
-      if (flag && (now || t)) { const q = g3.pts[cut < 1 ? 10 : 12]; flagC.push({ x: q[0], y: q[1], text: flag.text, bg: flag.bg, pr: now ? 1 : 0 }); }
+      if (flag && (now || t)) { const q = g3.pts[cut < 1 ? 10 : ext ? 6 : 12]; flagC.push({ x: q[0], y: q[1], text: flag.text, bg: flag.bg, pr: (sel === l.id ? 2 : 0) + (now ? 1 : 0), pick: pick(l.id) }); }
     }
 
     // the card beside the selection goes where it hides the least
@@ -337,7 +358,7 @@ export async function spacePage(ctx) {
       }).sort((p, q) => p.score - q.score)[0];
       blocks.push([best.x0 - 6, best.y0 - 6, best.x0 + cw + 6, best.y0 + ch + 6]);
       out.marks.push(svg('line', { x1: f(ax), y1: f(ay), x2: f(Math.max(best.x0, Math.min(best.x0 + cw, ax))), y2: f(Math.max(best.y0, Math.min(best.y0 + ch, ay))), stroke: '#fff', 'stroke-width': 1, opacity: 0.75 }), svg('circle', { cx: f(ax), cy: f(ay), r: 3, fill: '#fff' }));
-      card = cardEl(b, `left:${f(best.x0 / 10)}%;top:${f(best.y0 / 9)}%;width:${cw / 10}%`);
+      card = cardEl(b, `left:${f(best.x0 / 10)}%;top:${f(best.y0 / 9)}%;width:${cw / 10}%;max-height:${f((H - best.y0 - 8) / 9)}%`);
     }
 
     // labels: outside identities, event tags, then the selection and busy things. What would overlap keeps its tooltip
@@ -366,7 +387,7 @@ export async function spacePage(ctx) {
         const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - 9, cx + bw / 2, cy + 9];
         if (!fits(r)) continue;
         blocks.push(r);
-        out.labels.push(svg('g', { 'pointer-events': 'none' }, svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.bg, 'stroke-width': 0.9, opacity: 0.8 }),
+        out.labels.push(svg('g', { class: 'sp-hit', onClick: c.pick }, svg('title', null, 'What is this about?'), svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.bg, 'stroke-width': 0.9, opacity: 0.8 }),
           svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: 18, rx: 2, fill: c.bg }), svg('text', { x: f(cx), y: f(cy + 3.5), 'text-anchor': 'middle', fill: '#05110b', class: 'sp-flag' }, c.text)));
         break;
       }
@@ -393,18 +414,73 @@ export async function spacePage(ctx) {
         svg('linearGradient', { id: 'sp-floor', x1: 0, y1: 0, x2: 0, y2: 1 }, svg('stop', { offset: 0, 'stop-color': '#031009' }), svg('stop', { offset: 1, 'stop-color': '#072a1b' })),
         ...Object.entries(ENV).map(([k, e]) => svg('radialGradient', { id: `sp-h-${k}` }, svg('stop', { offset: 0, 'stop-color': e.base, 'stop-opacity': 0.8 }), svg('stop', { offset: 0.5, 'stop-color': e.base, 'stop-opacity': 0.24 }), svg('stop', { offset: 1, 'stop-color': e.base, 'stop-opacity': 0 })))),
       svg('g', { 'pointer-events': 'none' }, ...out.floor), svg('g', { 'pointer-events': 'none' }, ...out.halo), ...out.rings, svg('g', { 'pointer-events': 'none' }, ...out.towers, ...out.stems, ...out.stars.map(([, el]) => el)),
-      svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels);
+      svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.paths, ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels);
     box.querySelector('.sp-card')?.remove();
     if (card) box.append(card);
     renderSide(); renderBar();
   }
 
   // ---------- the card ----------
+  function nameOf(id) {
+    if (M.view === 'estate' && M.by.has(id)) return M.by.get(id).name;
+    const s = M.sources.find((x) => x.id === id); if (s) return s.label;
+    if (M.view === 'account') {
+      if (M.byRole.has(id)) return M.byRole.get(id).name;
+      const t = M.towers.find((x) => x.id === id); if (t) return t.name;
+      const n = M.fars.find((x) => `far:${x.id}` === id); if (n) return n.name;
+      const g = M.groups.find((x) => x.id === id); if (g) return g.label;
+    }
+    return 'somewhere';
+  }
+  function linkTitle(l) {
+    const a = nameOf(l.from), b = nameOf(l.to);
+    if (/^ext/.test(l.kind)) return `${a} can enter ${b}${l.kind === 'extHigh' ? ' · risky trust' : l.kind === 'extWarn' ? ' · loose trust' : ''} · click for the trust statement`;
+    if (l.kind === 'chain' || l.kind === 'new') return `${a} chained into ${b} · ${l.sessions} sessions today${l.kind === 'new' ? ' · first time' : ''}`;
+    if (l.kind === 'denied') return `${a} → ${b} · ${l.denied} calls refused in 7 days`;
+    return `${a} → ${b}`;
+  }
+  const clip = (t, n = 170) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  function linkDetail(l) {
+    const row = (k, v, tone) => ({ k, v: String(v), tone });
+    const a = nameOf(l.from), b = nameOf(l.to);
+    if (/^ext/.test(l.kind)) {
+      const s = M.sources.find((x) => x.id === l.from), edges = l.edges || [];
+      const acct = M.view === 'estate' ? M.by.get(l.to) : M.account;
+      // the worst statement in full, the rest by name
+      const e = edges[0], rows = [];
+      if (e) {
+        rows.push(row('Role it can enter', e.role));
+        rows.push(row('Why it is flagged', e.findings.length ? clip(e.findings.map((x) => `${x.title}${x.detail ? `: ${x.detail}` : ''}`).join(' · '), 220) : 'nothing flagged', e.findings.some((x) => x.severity === 'high') ? 'bad' : null));
+        rows.push(row('Trusts', clip(e.principal, 120)));
+        rows.push(row('Only when', e.conditions.length ? clip(e.conditions.join(' and '), 160) : 'no conditions', e.conditions.length ? null : 'bad'));
+        rows.push(row('Used', e.sessions ? `${num(e.sessions)} sessions, last ${ago(e.lastSeen)}` : 'never seen used'));
+      }
+      if (edges.length > 1) rows.push(row(`${edges.length - 1} more role${edges.length === 2 ? '' : 's'}`, clip(edges.slice(1).map((x) => x.role).join(', '), 120)));
+      const q = `account:${acct.awsAccountId} ${s.group === 'external-account' ? `from:${s.key.replace(/^acct:/, '')}` : s.group === 'public' ? 'source:public' : `provider:"${s.label}"`}`;
+      return { eyebrow: `TRUST · ${s.group.toUpperCase()}`, title: `${a} → ${b}`, sub: `can enter ${edges.length || l.roles || 1} role${(edges.length || l.roles || 1) === 1 ? '' : 's'} in ${acct.name}`, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
+        tags: l.kind === 'extHigh' ? [{ t: '⚠ RISKY TRUST', c: RED }] : l.kind === 'extWarn' ? [{ t: 'LOOSE TRUST', c: WARN }] : [],
+        rows: rows.length ? rows : [row('Trust', s.findings.join('; ') || 'nothing flagged')],
+        actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/roles/${edges[0].roleId}`]] : [])] };
+    }
+    if (l.kind === 'chain' || l.kind === 'new') return { eyebrow: l.kind === 'new' ? 'ROLE CHAINING · NEW TODAY' : 'ROLE CHAINING', title: `${a} → ${b}`, sub: `${l.sessions} sessions in the last 24 h`, swatch: l.kind === 'new' ? '#fff' : ENV[M.by.get(l.from).env].base, round: true,
+      tags: [...(l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : []), ...(l.denied ? [{ t: `⚠ ${l.denied} DENIED`, c: RED }] : [])],
+      rows: [row('When', l.at.map((x) => hourLabel(x)).join(', ') + ' WIB'), row('What it means', `A session in ${a} assumed a role in ${b}.${l.kind === 'new' ? ' This pair had not been seen in the 30 days before today.' : ''}`)],
+      actions: [[`Open ${b}`, `#/space?view=account&account=${l.to}`, true], [`Open ${a}`, `#/space?view=account&account=${l.from}`]] };
+    if (l.kind === 'denied') return { eyebrow: 'REFUSED CALLS', title: `${a} → ${b}`, sub: '7 days', swatch: RED, round: true, tags: [{ t: `⚠ ${num(l.denied)} DENIED`, c: RED }],
+      rows: [row('What it means', `${num(l.denied)} calls from ${a} to ${b} were refused by IAM. A missing permission, or something trying what it should not.`, 'bad')], actions: [['Open role', `#/roles/${l.from}`, true]] };
+    if (l.kind === 'in' || l.kind === 'out') return { eyebrow: 'ROLE CHAINING · 7 DAYS', title: `${a} → ${b}`, sub: 'between this account and a neighbour', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
+    if (l.kind === 'use1') return { eyebrow: 'CALLS · 7 DAYS', title: `${a} → ${b}`, sub: '', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
+    return null;
+  }
   function detail(id) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
     const tag = (t, c) => ({ t, c });
+    if (id?.startsWith('link:')) { const l = M.links.find((x) => x.id === id); return l ? linkDetail(l) : null; }
     if (M.view === 'estate') {
       const g = M.by.get(id);
+      if (g?.planned) return { eyebrow: `PLANNED · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base, tags: [tag('NOT ONBOARDED', '#d5dceb')],
+        rows: [...(g.note ? [row('Note', g.note)] : []), row('Status', 'A placeholder: nothing is read from this account until it is onboarded.')],
+        actions: [['Onboard', `#/accounts/new?from=${g.id}`, true], ['Accounts', '#/accounts']] };
       if (g) {
         const look = M.events.find((e) => e.target === g.id);
         const ins = M.links.filter((l) => l.to === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => `${M.by.get(l.from).name}${l.kind === 'new' ? ' (new)' : ''}`);
@@ -477,18 +553,19 @@ export async function spacePage(ctx) {
     if (M.view === 'estate') {
       const zones = M.zones.map((z) => {
         const gs = M.groups.filter((g) => g.env === z.id), roles = gs.reduce((s, g) => s + g.roles, 0), cold = gs.reduce((s, g) => s + g.cold, 0);
-        return card(focus === z.id, `background:${ENV[z.id].base}`, ENV[z.id].name, kfmt(gs.reduce((s, g) => s + g.calls7, 0)), `${gs.length} accounts · ${roles ? Math.round((100 * cold) / roles) : 0}% cold`, () => set({ zone: focus === z.id ? '' : z.id }));
+        const planned = gs.filter((g) => g.planned).length;
+        return card(focus === z.id, `background:${ENV[z.id].base}`, ENV[z.id].name, kfmt(gs.reduce((s, g) => s + g.calls7, 0)), `${gs.length - planned} accounts · ${roles ? Math.round((100 * cold) / roles) : 0}% cold${planned ? ` · ${planned} planned` : ''}`, () => set({ zone: focus === z.id ? '' : z.id }));
       });
       const highs = M.sources.filter((s) => s.risk === 'high').length, loose = M.sources.filter((s) => s.risk === 'medium').length;
       zones.push(card(focus === 'outer', 'background:#d5dceb;transform:rotate(45deg);width:10px;height:10px;margin:0 1px', 'Outside your org', String(M.sources.length + M.hidden), `${highs} risky · ${loose} loose trust`, () => set({ zone: focus === 'outer' ? '' : 'outer' })));
       const list = M.groups.filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.calls7 - a.calls7);
       left.replaceChildren(tabs, h('h2', { class: 'eyebrow' }, 'Zones · click to focus'), h('div', { class: 'sp-cards' }, ...zones),
         h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Accounts · 7-day calls'), h('span', { class: 'mono faint' }, String(list.length))),
-        h('div', { class: 'sp-list' }, ...list.map((g) => row(st.sel === g.id, `background:${ENV[g.env].base}`, g.name, g.awsAccountId, kfmt(g.calls7), () => set({ sel: st.sel === g.id ? null : g.id })))));
+        h('div', { class: 'sp-list' }, ...list.map((g) => row(st.sel === g.id, g.planned ? `border:1.5px dashed ${ENV[g.env].hot}` : `background:${ENV[g.env].base}`, g.name, g.planned ? `${g.awsAccountId} · planned` : g.awsAccountId, g.planned ? '—' : kfmt(g.calls7), () => set({ sel: st.sel === g.id ? null : g.id })))));
     } else {
       const cur = selRole?.cluster || M.groups[0];
       const accounts = h('select', { class: 'sp-select', 'aria-label': 'Account', onChange: (ev) => go(`#/space?view=account&account=${ev.target.value}`) },
-        ...est.accounts.map((a) => h('option', { value: a.id, selected: a.id === accountId }, a.name)));
+        ...est.accounts.filter((a) => !a.planned).map((a) => h('option', { value: a.id, selected: a.id === accountId }, a.name)));
       left.replaceChildren(tabs, accounts, h('h2', { class: 'eyebrow' }, 'Roles by the service they call most'),
         h('div', { class: 'sp-cards' }, ...M.groups.map((g) => card(cur === g, `border:2px solid ${ENV[g.env].base};border-radius:50%`, g.label, kfmt(g.calls7), `${g.roles.length + g.more} roles`, () => g.roles[0] && set({ sel: g.roles[0].id })))),
         h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, `${cur ? cur.label : 'Roles'} · roles`), h('span', { class: 'mono faint' }, String(cur ? cur.roles.length : 0))),
@@ -504,6 +581,7 @@ export async function spacePage(ctx) {
       ...M.zones.map((z) => [sw(`width:12px;height:12px;margin:0 9px;background:${ENV[z.id].base}`), ENV[z.id].name]),
       [sw('width:8px;height:8px;margin:0 11px;border-radius:50%;background:#ffd27f'), 'One dot per busy role. Higher and brighter = more calls in 7 days'],
       [sw(`width:30px;border-top:2px dashed ${COLD}`), 'Grey on the floor: cold, never called. The dashed grey part of a ring is the cold share'],
+      ...(M.groups.some((g) => g.planned) ? [[sw('width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px dashed #d5dceb'), 'Dashed empty ring: planned, not onboarded yet']] : []),
       [sw(`width:30px;height:10px;border-radius:50%;background:radial-gradient(${ENV.production.base},transparent 70%)`), 'Glow under a ring: calls in the hour you picked'],
       [sw('width:10px;height:10px;margin:0 10px;background:#d5dceb;transform:rotate(45deg)'), 'White shapes off the plane are outside your org. Close and low = risky trust, far and high = pinned'],
       [sw('width:30px;border-top:2px dashed #fff'), 'White dashed path: role chaining first seen today'],
@@ -540,9 +618,9 @@ export async function spacePage(ctx) {
     if (focused) input.focus();
     hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} WIB`),
       h('div', null, M.view === 'estate' ? `${M.groups.length} ACCOUNTS · ${num(M.groups.reduce((s, g) => s + g.roles, 0))} ROLES · ${M.sources.length + M.hidden} OUTSIDE` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
-      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO ORBIT' : 'TOWER = CALLS INTO A SERVICE · DRAG TO ORBIT'));
+      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO ORBIT · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO ORBIT · SCROLL TO ZOOM'));
     cam.replaceChildren(h('span', { class: 'eyebrow' }, 'Camera'), ...[['◀', 'Rotate left', () => set({ az: st.az - 20 })], ['▶', 'Rotate right', () => set({ az: st.az + 20 })],
-      ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })], ['Reset', 'Reset the camera', () => set({ az: -14, el: 33 })]]
+      ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })], ['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })], ['Reset', 'Reset the camera', () => set({ az: -14, el: 33, zoom: 1.15 })]]
       .map(([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon)));
   }
 

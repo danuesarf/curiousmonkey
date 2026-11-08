@@ -35,15 +35,20 @@ async function outsiders(user, accountIds, roleIds = null) {
     const s = by.get(key);
     if ((SEV[e.worst] ?? 4) < (SEV[s.worst] ?? 4)) s.worst = e.worst;
     for (const f of e.findings) if (f.severity !== 'info') s.findings.add(f.title);
-    const t = s.targets.get(e.accountId) || { roles: new Set(), sessions: 0 };
+    const t = s.targets.get(e.accountId) || { roles: new Set(), sessions: 0, edges: [] };
     t.roles.add(e.roleId); s.targets.set(e.accountId, t);
+    // what the trust statement says, so a click on the path can explain the warning
+    if (t.edges.length < 12) t.edges.push({ roleId: e.roleId, role: e.role, principal: e.principal, actions: e.actions, conditions: e.conditions, worst: e.worst, sid: e.sid || null,
+      findings: e.findings.filter((x) => x.severity !== 'info').map((x) => ({ title: x.title, severity: x.severity, detail: x.detail || null })),
+      sessions: e.seen.reduce((n, x) => n + num(x.sessions), 0), lastSeen: e.seen.map((x) => x.lastSeen).filter(Boolean).sort().pop() || null });
     for (const seen of e.seen) { t.sessions += num(seen.sessions); s.sessions += num(seen.sessions); if (seen.lastSeen && (!s.lastSeen || new Date(seen.lastSeen) > new Date(s.lastSeen))) s.lastSeen = seen.lastSeen; }
   }
   const all = [...by.values()].sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4) || b.targets.size - a.targets.size || b.sessions - a.sessions);
   return {
     hidden: Math.max(0, all.length - MAX_SOURCES),
     items: all.slice(0, MAX_SOURCES).map((s) => ({ key: s.key, group: s.group, label: s.label, sub: s.sub, worst: s.worst, findings: [...s.findings].slice(0, 3), sessions: s.sessions, lastSeen: s.lastSeen,
-      targets: [...s.targets].map(([accountId, t]) => ({ accountId, roles: [...t.roles], sessions: t.sessions })) })),
+      targets: [...s.targets].map(([accountId, t]) => ({ accountId, roles: [...t.roles], sessions: t.sessions,
+        edges: t.edges.sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4)) })) })),
   };
 }
 
@@ -58,7 +63,7 @@ async function events(where, p, start) {
 
 export async function spaceEstate(user) {
   const p = [];
-  const accts = (await query(`SELECT a.id, a.name, a.account_id, a.environment, a.ou FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', p)} ORDER BY a.environment, a.ou NULLS LAST, a.name`, p)).rows;
+  const accts = (await query(`SELECT a.id, a.name, a.account_id, a.environment, a.ou, a.status, a.note FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', p)} ORDER BY a.environment, a.ou NULLS LAST, a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
   const start = await hourStart();
   if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, events: [], hourStart: new Date(start).toISOString() };
@@ -95,6 +100,7 @@ export async function spaceEstate(user) {
       const cold = x.roles.length - active.length;
       return {
         id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null,
+        planned: a.status === 'planned', note: a.status === 'planned' ? a.note : null,
         roles: x.roles.length, active: active.length, cold, high: x.roles.filter((r) => r.risk === 'High').length,
         calls7: x.roles.reduce((s, r) => s + num(r.calls7), 0), calls24h: x.roles.reduce((s, r) => s + num(r.calls24h), 0),
         // the busiest roles are drawn one by one; the rest of the active ones are counted

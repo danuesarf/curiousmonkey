@@ -336,3 +336,25 @@ test('advice flags a heap too small for the container and a stalled read', async
   assert.ok(out.some((a) => /max-old-space-size=3072/.test(a.fix || '')));
   assert.ok(out.some((a) => a.area === 'reading' && /no progress/.test(a.title)));
 });
+
+test('planned accounts: placeholders with no access, never scanned, onboarded later', async () => {
+  const p = await owner.post('/api/accounts/planned', { name: 'management', accountId: '473951143579', environment: 'production', ou: 'Root', note: 'after the CAB' });
+  assert.equal(p.status, 201); assert.equal(p.json.status, 'planned'); assert.equal(p.json.role_arn, null);
+  // never scanned, and the normal connect form points at onboarding instead of duplicating it
+  assert.equal((await owner.post(`/api/accounts/${p.json.id}/scan`)).json.error, 'planned');
+  assert.equal((await owner.post('/api/accounts', { name: 'm', accountId: '473951143579' })).json.error, 'planned');
+  // a planned account never holds the history bar back
+  const st = await owner.get('/api/status');
+  assert.ok(!st.json.reading.some((r) => r.id === p.json.id));
+  // many at once: bad lines are reported, existing IDs are skipped
+  assert.match((await owner.post('/api/accounts/planned/bulk', { text: '12345, x' })).json.message, /Line 1/);
+  const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n601553210983, network-hub, production, Infra\n473951143579, management\n889900112233' });
+  assert.equal(bulk.json.added, 2); assert.deepEqual(bulk.json.skipped, ['473951143579']);
+  // editing a planned account changes details only
+  const e = await owner.patch(`/api/accounts/${p.json.id}`, { name: 'org-management', authMode: 'access_key' });
+  assert.equal(e.json.name, 'org-management'); assert.equal(e.json.status, 'planned'); assert.equal(e.json.auth_mode, 'assume_role');
+  // onboarding sets up access and makes it scannable
+  const o = await owner.patch(`/api/accounts/${p.json.id}`, { onboard: true, eventSource: 'event-history', authMode: 'assume_role', roleName: 'CuriousMonkeyScanner', regions: ['us-east-1'] });
+  assert.equal(o.json.status, 'pending'); assert.equal(o.json.role_arn, 'arn:aws:iam::473951143579:role/CuriousMonkeyScanner'); assert.ok(o.json.onboarded_at);
+  assert.equal((await owner.post(`/api/accounts/${p.json.id}/scan`)).status, 202);
+});

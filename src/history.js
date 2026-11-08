@@ -43,10 +43,13 @@ export function historyState(account, checkpoints, now = Date.now()) {
 }
 
 /** History state for these accounts (rows of cloud_accounts), keyed by id. */
+const PLANNED = Object.freeze({ planned: true, complete: true, progress: 100, regions: [], readUpTo: null });
+
 export async function historyFor(accounts) {
   if (!accounts.length) return new Map();
   const cps = (await query('SELECT * FROM scan_checkpoints WHERE account_id = ANY($1)', [accounts.map((a) => a.id)])).rows;
-  return new Map(accounts.map((a) => [a.id, historyState(a, cps.filter((c) => c.account_id === a.id))]));
+  // a planned account has nothing to read yet, so it never holds progress back
+  return new Map(accounts.map((a) => [a.id, a.status === 'planned' ? PLANNED : historyState(a, cps.filter((c) => c.account_id === a.id))]));
 }
 
 export async function accountComplete(accountId) {

@@ -71,6 +71,10 @@ test('identities outside the org come from trust policies, the worst first', asy
   const groups = s.outside.items.map((x) => x.group).sort();
   assert.deepEqual(groups, ['external-account', 'oidc']);
   assert.ok(s.outside.items.every((x) => x.worst === 'high' && x.findings.length && x.targets[0].accountId === A));
+  const gh = s.outside.items.find((x) => x.group === 'oidc').targets[0].edges[0];
+  assert.equal(gh.role, 'deploy');
+  assert.ok(gh.conditions.some((c) => c.includes('repo:krom-id/*')));
+  assert.ok(gh.findings.some((f) => /wildcard/.test(f.title)));
   assert.equal(s.events.length, 1); assert.equal(s.events[0].hour, 22);
 });
 

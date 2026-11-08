@@ -41,8 +41,9 @@ export async function enqueueRun(accountId, { trigger = 'schedule', requestedBy 
     const busy = await c.query(
       `SELECT id FROM scan_runs WHERE account_id=$1 AND status IN ('queued','running') LIMIT 1`, [accountId]);
     if (busy.rowCount) return null;
-    const acc = (await c.query('SELECT regions, event_source FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
+    const acc = (await c.query('SELECT regions, event_source, status FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
     if (!acc) throw new Error('account not found');
+    if (acc.status === 'planned') return null;          // nothing to scan until it is onboarded
     const run = (await c.query(
       `INSERT INTO scan_runs(account_id, trigger, requested_by, status) VALUES ($1,$2,$3,'queued') RETURNING id`,
       [accountId, trigger, requestedBy])).rows[0];

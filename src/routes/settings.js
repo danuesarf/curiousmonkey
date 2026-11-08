@@ -22,7 +22,7 @@ settings.get('/settings/limits', requirePerm('view'), (req, res) => res.json({
 
 settings.get('/settings', requirePerm('settings'), wrap(async (req, res) => {
   const [accts, cps, recs, maps] = await Promise.all([
-    query(`SELECT id, name, account_id, environment, event_source, lookback_days, regions FROM cloud_accounts ORDER BY name`),
+    query(`SELECT id, name, account_id, environment, event_source, lookback_days, regions, status FROM cloud_accounts WHERE status <> 'planned' ORDER BY name`),
     query(`SELECT account_id, region, first_event_time, last_event_time, events_read, caught_up_at, gap_detected FROM scan_checkpoints`),
     query(`SELECT source, model, count(*)::int AS n, max(created_at) AS last FROM recommendations WHERE created_at > now() - interval '30 days' GROUP BY source, model ORDER BY n DESC`),
     query(`SELECT count(*)::int AS n, max(suggested_at) AS last FROM event_action_map WHERE source='bedrock' AND suggested_at > now() - interval '30 days'`),

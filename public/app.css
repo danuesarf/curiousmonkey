@@ -422,7 +422,8 @@ tr.row-bad td{background:rgba(255,122,122,.05)}
 .sp-swatch{width:10px;height:10px;flex:none}
 .sp-card-sub{font-family:var(--mono);font-size:11px;color:var(--muted);overflow-wrap:anywhere}
 .sp-x{background:none;border:0;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;min-width:28px;min-height:28px}
-.sp-card dl{margin:0;display:flex;flex-direction:column;gap:7px;font-size:12.5px}
+.sp-card dl{margin:0;display:flex;flex-direction:column;gap:7px;font-size:12.5px;overflow:auto;min-height:0;flex:0 1 auto}
+.sp-card-head,.sp-card-actions{flex:none}
 .sp-card dt{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--faint)}
 .sp-card dd{margin:0;line-height:1.35;overflow-wrap:anywhere}.sp-card dd.sp-bad{color:#ffb0a6}.sp-card dd.sp-ok{color:#9fe0bf}
 .sp-card-actions{display:flex;flex-wrap:wrap;gap:6px;border-top:1px solid #173528;padding-top:9px}

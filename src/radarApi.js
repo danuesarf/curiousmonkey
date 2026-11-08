@@ -25,7 +25,7 @@ export async function estate(user) {
             coalesce(sum(r.unused_count),0)::bigint AS unused, count(r.id) FILTER (WHERE r.risk='High')::int AS high,
             count(r.id) FILTER (WHERE EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open'))::int AS unidentified
        FROM cloud_accounts a LEFT JOIN roles r ON r.account_id=a.id AND r.deleted_at IS NULL
-      WHERE ${scopeSql(user, 'a.id', p)} GROUP BY a.id ORDER BY a.name`, p)).rows;
+      WHERE ${scopeSql(user, 'a.id', p)} AND a.status <> 'planned' GROUP BY a.id ORDER BY a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
   const [act, d7, d30, pings, hist] = await Promise.all([
     ids.length ? query(`SELECT r.account_id, sum(d.count)::bigint AS n FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE d.day >= current_date - 1 AND r.account_id = ANY($1) GROUP BY 1`, [ids]) : { rows: [] },

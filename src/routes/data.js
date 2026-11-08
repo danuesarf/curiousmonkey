@@ -71,7 +71,7 @@ const AccountIn = z.object({
   roleName: AccountFields.roleName.default(config.scanner.roleName), trustPrincipal: AccountFields.trustPrincipal.default(null),
   credentials: AccountFields.credentials.default(null),
 });
-const AccountPatch = z.object({ ...Object.fromEntries(Object.entries(AccountFields).map(([k, v]) => [k, v.optional()])), rebuildHistory: z.boolean().optional() });
+const AccountPatch = z.object({ ...Object.fromEntries(Object.entries(AccountFields).map(([k, v]) => [k, v.optional()])), rebuildHistory: z.boolean().optional(), onboard: z.boolean().optional(), note: z.string().trim().max(500).nullable().optional() });
 
 const say = (res, message, field) => res.status(400).json({ error: 'invalid', message, field });
 /** Rules that span several fields. Returns an error message or null. */
@@ -132,13 +132,50 @@ data.post('/accounts', requirePerm('accounts'), wrap(async (req, res) => {
   if (b.lookbackDays == null) b.lookbackDays = Math.min(config.scanner.defaultLookbackDays, b.eventSource === 's3' ? config.scanner.maxLookbackDays : 90);
   const bad = checkAccount(b, false);
   if (bad) return say(res, ...bad);
-  const dup = await query('SELECT 1 FROM cloud_accounts WHERE account_id=$1', [b.accountId]);
-  if (dup.rowCount) return res.status(409).json({ error: 'exists', message: 'That AWS account is already connected.', field: 'accountId' });
+  const dup = (await query('SELECT id, status FROM cloud_accounts WHERE account_id=$1', [b.accountId])).rows[0];
+  if (dup?.status === 'planned') return res.status(409).json({ error: 'planned', message: 'That account is already planned. Onboard it from the Accounts page instead.', field: 'accountId', id: dup.id });
+  if (dup) return res.status(409).json({ error: 'exists', message: 'That AWS account is already connected.', field: 'accountId' });
   const cols = { account_id: b.accountId, ...accountColumns(b, b.accountId), created_by: req.user.id };
   const keys = Object.keys(cols);
   const row = (await query(`INSERT INTO cloud_accounts(${keys.join(',')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(',')}) RETURNING *`, Object.values(cols))).rows[0];
   await audit(req, 'account.create', { type: 'account', id: row.id }, { accountId: b.accountId, authMode: b.authMode, eventSource: b.eventSource });
   res.status(201).json(publicAccount(row));
+}));
+
+// A planned account: a placeholder for an account that will be onboarded later. No access settings, never scanned.
+const PlannedIn = z.object({
+  name: AccountFields.name, accountId: z.string().trim().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
+  environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null),
+  note: z.string().trim().max(500).nullable().or(z.literal('')).default(null),
+});
+async function insertPlanned(req, b) {
+  const row = (await query(
+    `INSERT INTO cloud_accounts(account_id, name, environment, ou, note, status, regions, created_by) VALUES ($1,$2,$3,$4,$5,'planned',$6,$7)
+     ON CONFLICT (account_id) DO NOTHING RETURNING *`,
+    [b.accountId, b.name, b.environment, b.ou || null, b.note || null, config.scanner.defaultRegions, req.user.id])).rows[0];
+  if (row) await audit(req, 'account.plan', { type: 'account', id: row.id }, { accountId: b.accountId });
+  return row;
+}
+data.post('/accounts/planned', requirePerm('accounts'), wrap(async (req, res) => {
+  const b = PlannedIn.parse(req.body);
+  const row = await insertPlanned(req, b);
+  if (!row) return res.status(409).json({ error: 'exists', message: 'That AWS account is already in Curious Monkey.', field: 'accountId' });
+  res.status(201).json(publicAccount(row));
+}));
+// Many at once, one per line: "123456789012, name, environment, OU". Lines already present are skipped, not errors.
+data.post('/accounts/planned/bulk', requirePerm('accounts'), wrap(async (req, res) => {
+  const lines = z.object({ text: z.string().max(100000) }).parse(req.body).text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  if (lines.length > 500) return say(res, 'Up to 500 lines at a time.', 'text');
+  const parsed = lines.map((l, i) => {
+    const [accountId = '', name = '', environment = 'production', ou = ''] = l.split(/\s*[,;\t]\s*/);
+    const r = PlannedIn.safeParse({ accountId, name: name || accountId, environment: (environment || 'production').toLowerCase(), ou: ou || null });
+    return r.success ? { ok: r.data } : { line: i + 1, text: l, message: r.error.issues[0].message };
+  });
+  const bad = parsed.filter((x) => !x.ok);
+  if (bad.length) return res.status(400).json({ error: 'invalid', message: `Line ${bad[0].line}: ${bad[0].message}`, field: 'text', lines: bad.slice(0, 20) });
+  const added = [], skipped = [];
+  for (const { ok } of parsed) (await insertPlanned(req, ok) ? added : skipped).push(ok.accountId);
+  res.status(201).json({ added: added.length, skipped });
 }));
 
 data.get('/accounts/:id', requirePerm('view'), wrap(async (req, res) => {
@@ -147,6 +184,16 @@ data.get('/accounts/:id', requirePerm('view'), wrap(async (req, res) => {
 
 data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
   const a = await accountFor(req, req.params.id);
+  if (a.status === 'planned' && !req.body?.onboard) {
+    const q = PlannedIn.partial().omit({ accountId: true }).parse(req.body);
+    const cols = Object.fromEntries(Object.entries({ name: q.name, environment: q.environment, ou: q.ou === '' ? null : q.ou, note: q.note === '' ? null : q.note }).filter(([, v]) => v !== undefined));
+    if (!Object.keys(cols).length) return res.json(publicAccount(a));
+    const keys = Object.keys(cols);
+    const row = (await query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')}, updated_at=now() WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
+    await audit(req, 'account.update', { type: 'account', id: a.id }, { changed: keys, planned: true });
+    return res.json(publicAccount(row));
+  }
+  const onboarding = a.status === 'planned';
   const p = AccountPatch.parse(req.body);
   const cur = {
     name: a.name, environment: a.environment, ou: a.ou, regions: a.regions, eventSource: a.event_source, lookbackDays: a.lookback_days,
@@ -160,7 +207,11 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
   const cols = accountColumns(next, a.account_id, a);
   const accessChanged = ['auth_mode', 'base_identity', 'role_arn', 'credentials_enc', 'event_source', 's3_bucket', 's3_prefix', 's3_org_id', 's3_region']
     .some((k) => (cols[k] ?? null) !== (a[k] ?? null));
-  if (accessChanged) { cols.status = 'pending'; cols.status_detail = null; }
+  if (accessChanged || onboarding) { cols.status = 'pending'; cols.status_detail = null; }
+  if (onboarding) {
+    if (p.lookbackDays === undefined) cols.lookback_days = Math.min(config.scanner.defaultLookbackDays, next.eventSource === 's3' ? config.scanner.maxLookbackDays : 90);
+    cols.onboarded_at = new Date();
+  }
   cols.updated_at = new Date();
   const keys = Object.keys(cols);
   const row = await tx(async (c) => {
@@ -177,7 +228,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
     }
     return (await c.query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
   });
-  await audit(req, 'account.update', { type: 'account', id: a.id }, { changed: Object.keys(p).filter((k) => k !== 'credentials'), credentialsReplaced: !!p.credentials, rebuildHistory: !!p.rebuildHistory });
+  await audit(req, onboarding ? 'account.onboard' : 'account.update', { type: 'account', id: a.id }, { changed: Object.keys(p).filter((k) => k !== 'credentials'), credentialsReplaced: !!p.credentials, rebuildHistory: !!p.rebuildHistory });
   res.json({ ...publicAccount(row), accessChanged });
 }));
 
@@ -276,6 +327,7 @@ data.get('/sessions/:id/track', requirePerm('view'), wrap(async (req, res) => {
 
 const startScan = (trigger) => wrap(async (req, res) => {
   const a = await accountFor(req, req.params.id);
+  if (a.status === 'planned') return res.status(409).json({ error: 'planned', message: 'This account is planned, not onboarded. Onboard it first: that sets up access and runs the first scan.' });
   const run = await enqueueRun(a.id, { trigger, requestedBy: req.user.id });
   if (!run) return res.status(409).json({ error: 'scan_in_progress', message: 'A scan is already running for this account.' });
   await audit(req, `account.${trigger}`, { type: 'account', id: a.id });
