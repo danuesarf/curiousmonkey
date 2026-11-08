@@ -148,7 +148,7 @@ function readingCard(rows, settings) {
     if (!p.total) return j.status === 'queued' ? (new Date(j.run_after) > new Date() ? `retry ${ago(j.run_after).replace(' ago', '')}` : 'waiting for a slot') : '—';
     const bar = h('div', { class: 'wgauge thin' }); const i = h('i'); i.style.width = `${(p.done / p.total) * 100}%`; bar.append(i);
     return h('div', null, h('div', { class: 'row nowrap' }, bar, h('span', { class: 'tiny' }, `${num(p.done)}/${num(p.total)}`)),
-      h('div', { class: 'tiny muted' }, [`${num(p.events)} events`, p.slice && `${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`, j.status === 'running' && p.eventsPerSecond != null && `${num(p.eventsPerSecond)}/s`].filter(Boolean).join(' · ')));
+      h('div', { class: 'tiny muted' }, [`${num(p.events)} events`, p.files != null && `${num(p.files)} files`, p.slice && `${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`, j.status === 'running' && p.eventsPerSecond != null && `${num(p.eventsPerSecond)}/s`].filter(Boolean).join(' · ')));
   };
   const note = (j) => {
     if (j.stalled) return h('span', { class: 'err' }, `no slice finished for ${dur(j.sinceProgressS ?? 900)}`);
@@ -157,14 +157,14 @@ function readingCard(rows, settings) {
     return '';
   };
   return h('section', { class: 'card' },
-    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Reading now'), h('p', { class: 'muted small' }, `CloudTrail reads that are running, waiting, or gave up in the last 24 hours. Default slice ${settings.sliceHours} h.`))),
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Reading now'), h('p', { class: 'muted small' }, `CloudTrail reads that are running, waiting, or gave up in the last 24 hours. S3 trails are read file by file across all their regions; Event History in ${settings.sliceHours} h slices per region.`))),
     ev.length ? h('div', { class: 'scroll' }, h('table', { class: 'small' },
       h('thead', null, h('tr', null, ['Account', 'Region', 'Source', 'Status', 'Progress', 'Slice', 'Attempt', 'Last progress', 'Note'].map((x) => h('th', null, x)))),
       h('tbody', null, ev.map((j) => h('tr', { class: j.stalled || ['dead', 'failed'].includes(j.status) ? 'row-bad' : '' },
         h('td', null, h('div', { class: 'name' }, j.account_name), h('div', { class: 'tiny muted mono' }, j.aws_account_id)),
-        h('td', { class: 'mono' }, j.region), h('td', null, j.event_source === 's3' ? 'S3 trail' : 'Event History'),
+        h('td', { class: 'mono' }, j.region === '*' ? `all${j.progress?.regions ? ` (${j.progress.regions})` : ''}` : j.region), h('td', null, j.event_source === 's3' ? 'S3 trail' : 'Event History'),
         h('td', null, status(j)), h('td', null, prog(j)),
-        h('td', null, `${Number(j.progress?.sliceHours || j.options?.sliceHours || settings.sliceHours)} h`),
+        h('td', null, j.event_source === 's3' ? 'by file' : `${Number(j.progress?.sliceHours || j.options?.sliceHours || settings.sliceHours)} h`),
         h('td', null, `${j.attempts}/${j.max_attempts}`),
         h('td', null, j.sinceProgressS != null ? `${dur(j.sinceProgressS)} ago` : '—'),
         h('td', { class: 'small' }, note(j))))))) : h('div', { class: 'empty' }, 'Nothing is being read right now.'),

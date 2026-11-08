@@ -166,6 +166,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
     if (p.rebuildHistory) {
       // Start the stored history over. Analysis results are recomputed by the next scan.
       await c.query('DELETE FROM scan_checkpoints WHERE account_id=$1', [a.id]);
+      await c.query('DELETE FROM trail_cursors WHERE account_id=$1', [a.id]);
       await c.query('DELETE FROM seen_events WHERE account_id=$1', [a.id]);
       for (const t of ['activity_daily', 'activity_resources', 'passrole_observed', 'principals']) {
         await c.query(`DELETE FROM ${t} WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1)`, [a.id]);

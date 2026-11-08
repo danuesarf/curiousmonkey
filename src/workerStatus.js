@@ -108,6 +108,7 @@ export function advise({ workers, reading, fails, queue, accounts }) {
   if (deadMem.length) add('critical', 'reading', `${deadMem.length} region read${deadMem.length > 1 ? 's' : ''} gave up after the worker died`, deadMem.map((j) => `${j.account_name} ${j.region}`).join(', '), 'Use Resume on each region on the Scans page, with 1 h slices. It continues from where the read stopped.');
   const deadAccess = dead.filter((j) => /AccessDenied|not authorized|InvalidClientTokenId|ExpiredToken/i.test(j.last_error || ''));
   if (deadAccess.length) add('critical', 'reading', `${deadAccess.length} read${deadAccess.length > 1 ? 's' : ''} failed on permissions`, deadAccess.map((j) => `${j.account_name} ${j.region}: ${String(j.last_error).slice(0, 80)}`).join('; '), 'Fix the scanner role, bucket policy or KMS key policy for that account, then Retry.');
+  // (S3 trails need no slice advice: they are read file by file)
   const slowEh = reading.filter((j) => j.kind === 'events' && j.status === 'running' && j.event_source === 'event-history' && (j.progress?.etaSeconds || 0) > 3 * 3600);
   for (const j of slowEh) add('info', 'reading', `${j.account_name} ${j.region}: Event History needs ${dur(j.progress.etaSeconds)} more`, 'AWS allows 2 LookupEvents calls a second per region, so a busy account reads slowly.', 'Switch the account to its S3 trail: no request limit, and history beyond 90 days.');
   const gaps = accounts.filter((a) => a.gap_detected);

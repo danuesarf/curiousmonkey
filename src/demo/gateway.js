@@ -2,7 +2,9 @@
 // same time range twice returns the same events with the same IDs. That is what lets the checkpoint and
 // de-duplication logic be tested honestly.
 import crypto from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { buildEstate, MANAGED } from './estate.js';
+import { trailDayPrefix } from '../aws/trailKeys.js';
 
 const h32 = (s) => parseInt(crypto.createHash('sha1').update(s).digest('hex').slice(0, 8), 16);
 const uuid = (s) => { const x = crypto.createHash('sha1').update(s).digest('hex'); return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`; };
@@ -59,6 +61,34 @@ export function demoGateway(account) {
     return out;
   }
 
+  const FIVE = 5 * 60e3;
+  const dayCache = new Map();
+  const deliveredAt = (e) => {
+    const t = new Date(e.eventTime).getTime();
+    const late = h32(`late${e.eventID}`) % 200 === 0;
+    return t + (late ? (75 + (h32(e.eventID) % 45)) * 60e3 : (2 + (h32(e.eventID) % 7)) * 60e3);
+  };
+  // the files delivered on one UTC day in one region: Map key -> { key, time, records }
+  function trailDay(region, day) {
+    const d0 = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+    const ck = `${region}|${d0}`;
+    if (dayCache.has(ck)) return dayCache.get(ck);
+    const files = new Map();
+    const now = demoNow().getTime();
+    for (let h = d0 - 3 * HOUR; h < d0 + DAY; h += HOUR) {
+      for (const e of eventsForHour(h, region)) {
+        const ft = Math.ceil(deliveredAt(e) / FIVE) * FIVE;
+        if (ft < d0 || ft >= d0 + DAY || ft > now) continue;
+        const stamp = new Date(ft).toISOString().replace(/[-:]/g, '').slice(0, 13) + 'Z';
+        const key = `${trailDayPrefix(account, region, new Date(ft))}${acct}_CloudTrail_${region}_${stamp}_${(h32(region + ft) >>> 0).toString(36).padStart(7, '0').slice(0, 7).toUpperCase()}DEMO.json.gz`;
+        const f = files.get(key) || { key, time: ft, records: [] };
+        f.records.push(e); files.set(key, f);
+      }
+    }
+    if (d0 + DAY < now - 6 * HOUR) dayCache.set(ck, files);   // a finished day never changes
+    return files;
+  }
+
   return {
     mode: 'demo',
     async verify() { return { ok: true, accountId: acct, arn: account.role_arn }; },
@@ -98,12 +128,17 @@ export function demoGateway(account) {
       const next = from + 50;
       return { events: all.slice(from, next), nextToken: next < all.length ? String(next) : null };
     },
-    async trailEventsForSlice({ region, start, end, map = (r) => r }) {
-      const all = [];
-      for (let h = Math.floor(start.getTime() / HOUR) * HOUR; h < end.getTime(); h += HOUR) {
-        for (const e of eventsForHour(h, region)) { const t = new Date(e.eventTime).getTime(); if (t >= start.getTime() && t < end.getTime()) all.push(map(e)); }
-      }
-      return all;
+    // ---- S3 trail, simulated as files: each event is delivered a few minutes after it happens (1 in 200 over an
+    // hour late), files are cut every 5 minutes and only exist once delivered. Deterministic, like the events.
+    async listTrailRegions() { return [...account.regions]; },
+    async listTrailDay({ region, day }) {
+      return [...trailDay(region, day).values()].map((f) => ({ key: f.key, size: f.records.length * 900, time: f.time })).sort((x, y) => (x.key < y.key ? -1 : 1));
+    },
+    async getTrailFile(key) {
+      const m = key.match(/CloudTrail\/([a-z0-9-]+)\/(\d{4})\/(\d{2})\/(\d{2})\//);
+      const f = trailDay(m[1], new Date(Date.UTC(+m[2], +m[3] - 1, +m[4]))).get(key);
+      if (!f) throw Object.assign(new Error(`NoSuchKey: ${key}`), { name: 'NoSuchKey' });
+      return gzipSync(Buffer.from(JSON.stringify({ Records: f.records })));
     },
     async discoverDataEvents() {
       return [{ name: 'org-trail', bucket: 'kbi-org-cloudtrail', type: 'trail', resourceType: 'AWS::S3::Object', readWrite: 'All', arnPatterns: ['arn:aws:s3:::kbi-payments-docs/'] },

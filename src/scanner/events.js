@@ -150,7 +150,7 @@ export function coverage(evs, roles) {
   }
   return { k, unmapped };
 }
-async function saveCoverage(c, accountId, region, day, { k, unmapped }) {
+export async function saveCoverage(c, accountId, region, day, { k, unmapped }) {
   const cols = Object.keys(k);
   await c.query(
     `INSERT INTO event_coverage(account_id, region, day, ${cols.join(',')}) VALUES ($1,$2,$3,${cols.map((_, i) => `$${i + 4}`).join(',')})

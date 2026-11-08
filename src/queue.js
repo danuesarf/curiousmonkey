@@ -41,13 +41,14 @@ export async function enqueueRun(accountId, { trigger = 'schedule', requestedBy 
     const busy = await c.query(
       `SELECT id FROM scan_runs WHERE account_id=$1 AND status IN ('queued','running') LIMIT 1`, [accountId]);
     if (busy.rowCount) return null;
-    const acc = (await c.query('SELECT regions FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
+    const acc = (await c.query('SELECT regions, event_source FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
     if (!acc) throw new Error('account not found');
     const run = (await c.query(
       `INSERT INTO scan_runs(account_id, trigger, requested_by, status) VALUES ($1,$2,$3,'queued') RETURNING id`,
       [accountId, trigger, requestedBy])).rows[0];
     for (const s of STAGES) {
-      const regions = s.kind === 'events' ? acc.regions : [''];
+      // an S3 trail is read by one job for all its regions; Event History by one job per region
+      const regions = s.kind === 'events' ? (acc.event_source === 's3' ? ['*'] : acc.regions) : [''];
       for (const region of regions) {
         await c.query(
           `INSERT INTO scan_jobs(run_id, account_id, kind, region, stage) VALUES ($1,$2,$3,$4,$5)`,
@@ -263,7 +264,8 @@ export async function resumeRegion({ jobId, sliceHours = null }) {
               locked_by=NULL, locked_until=NULL, options = options - 'sliceHours' || $2::jsonb
         WHERE id=$1`, [job.id, JSON.stringify(sliceHours ? { sliceHours } : {})]);
     await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,$2)`,
-      [job.id, `resumed by an operator${cp ? ` from ${cp.last_event_time.toISOString()}` : ' from the start'}${sliceHours ? ` in ${sliceHours} h slices` : ''}`]);
+      [job.id, job.region === '*' ? 'resumed by an operator: continues from the last file read in each region'
+        : `resumed by an operator${cp ? ` from ${cp.last_event_time.toISOString()}` : ' from the start'}${sliceHours ? ` in ${sliceHours} h slices` : ''}`]);
     const later = await c.query(
       `UPDATE scan_jobs SET status='queued', attempts=0, run_after=now(), finished_at=NULL
         WHERE run_id=$1 AND stage > $2 AND status IN ('succeeded','failed','dead','canceled') RETURNING id`, [job.run_id, job.stage]);

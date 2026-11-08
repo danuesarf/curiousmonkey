@@ -35,7 +35,7 @@ export async function opsPage(ctx) {
       d.jobs.some((j) => ['failed', 'dead', 'canceled'].includes(j.status)) && h('button', { class: 'btn sm primary', onClick: async () => { const r = await post(`/ops/runs/${d.run.id}/retry`); toast(`Requeued ${r.requeued} job(s). They resume from saved checkpoints.`); redraw(); } }, 'Retry failed jobs'),
       ['queued', 'running'].includes(d.run.status) && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: 'Cancel this scan?', message: 'Jobs that already finished keep their results, and a later scan continues from the saved checkpoints.', confirmLabel: 'Cancel scan', danger: true })) { await post(`/ops/runs/${d.run.id}/cancel`); redraw(); } } }, 'Cancel'))),
     h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Step', 'Status', 'Attempts', 'Progress', 'Error', ''].map((x) => h('th', null, x)))),
-      h('tbody', null, d.jobs.map((j) => h('tr', null, h('td', null, h('span', { class: 'name' }, j.kind), j.region && h('span', { class: 'small muted mono nowrap' }, ` ${j.region}`)), h('td', null, h('span', { class: `badge ${ST[j.status]}` }, j.status)),
+      h('tbody', null, d.jobs.map((j) => h('tr', null, h('td', null, h('span', { class: 'name' }, j.kind), j.region && h('span', { class: 'small muted mono nowrap' }, ` ${regionLabel(j)}`)), h('td', null, h('span', { class: `badge ${ST[j.status]}` }, j.status)),
         h('td', null, `${j.attempts}/${j.max_attempts}`), h('td', { class: 'small' }, progress(j)),
         h('td', { class: 'small', style: null }, j.last_error ? h('span', { class: 'err' }, j.last_error.slice(0, 160), j.error_retryable === false ? ' (not retryable)' : '') : '', j.status === 'queued' && j.attempts > 0 && new Date(j.run_after) > new Date() && h('div', { class: 'muted' }, `retrying ${ago(j.run_after).replace('ago', '')}`)),
         h('td', null, h('div', { class: 'row' }, h('button', { class: 'btn sm', onClick: async () => { const l = await get(`/ops/jobs/${j.id}/log`); modal(`${j.kind} ${j.region || ''} log`, h('pre', null, l.items.map((x) => `${fmtDate(x.at)}  ${x.level.padEnd(5)} ${x.message}`).join('\n') || 'No log lines.')); } }, 'Log'),
@@ -57,22 +57,29 @@ function resumeDialog(run, j, redraw) {
     go.disabled = true;
     try {
       const r = await post(`/ops/jobs/${j.id}/resume`, { sliceHours: sel.value ? Number(sel.value) : null });
-      toast(`Resuming ${j.region}${r.from ? ` from ${String(r.from).slice(0, 10)}` : ''}. ${r.requeued > 1 ? 'Analysis runs again when it finishes.' : ''}`);
+      toast(`Resuming ${j.region === '*' ? 'the trail' : j.region}${r.from ? ` from ${String(r.from).slice(0, 10)}` : ''}. ${r.requeued > 1 ? 'Analysis runs again when it finishes.' : ''}`);
       bg.remove(); redraw();
     } catch (e) { toast(e.message, true); go.disabled = false; }
   } }, `Resume ${j.region}`);
-  bg = modal(`Resume ${run.account_name} · ${j.region}`, h('div', { class: 'stack' },
-    h('p', null, `Continues reading ${j.region} for this account from where it stopped, with a fresh set of attempts. Other regions and accounts are not touched.`),
+  const all = j.region === '*';
+  if (all) { sel.value = ''; go.textContent = 'Resume'; }
+  bg = modal(`Resume ${run.account_name} · ${all ? 'S3 trail' : j.region}`, h('div', { class: 'stack' },
+    h('p', null, all ? 'Continues reading this account’s trail from the last file read in each region, with a fresh set of attempts. Other accounts are not touched.'
+      : `Continues reading ${j.region} for this account from where it stopped, with a fresh set of attempts. Other regions and accounts are not touched.`),
     h('p', { class: 'small muted' }, 'History already read is kept and not read again, so nothing is counted twice. To start this account’s history over, use Accounts → Edit → Rebuild stored history, which clears the counts first.'),
-    h('div', { class: 'field' }, h('label', null, 'Slice size', sel),
+    !all && h('div', { class: 'field' }, h('label', null, 'Slice size', sel),
       h('span', { class: 'hint' }, 'Smaller slices hold fewer events in memory at once. Use 1 hour or less when the worker keeps getting lost on a busy region.'))),
     h('div', { class: 'actions' }, go, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel')));
 }
 
+const regionLabel = (j) => (j.region === '*' ? `all regions${j.progress?.regions ? ` (${j.progress.regions})` : ''}` : j.region);
+
 function progress(j) {
   const p = j.progress || {};
   if (p.phase === 'events' && p.total) {
-    const parts = [`${p.source === 's3' ? 'S3 trail' : 'Event History'}: slice ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`];
+    const parts = p.unit === 'day'
+      ? [`S3 trail${p.direction === 'backfill' ? ' (older history)' : ''}: day ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`, `${num(p.files)} files, ${num(p.mb)} MB`]
+      : [`${p.source === 's3' ? 'S3 trail' : 'Event History'}: slice ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`];
     if (p.slice) parts.push(`${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`);
     if (p.sliceHours && p.sliceHours !== 6) parts.push(`${p.sliceHours >= 1 ? `${p.sliceHours} h` : `${p.sliceHours * 60} min`} slices`);
     if (j.status === 'running' && p.eventsPerSecond != null) parts.push(`${num(p.eventsPerSecond)}/s`);

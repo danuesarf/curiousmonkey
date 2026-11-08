@@ -1,5 +1,10 @@
 // CloudTrail S3 layout: <prefix>/AWSLogs/[<org-id>/]<account>/CloudTrail/<region>/YYYY/MM/DD/<account>_CloudTrail_<region>_YYYYMMDDTHHmmZ_<id>.json.gz
 const pad = (n) => String(n).padStart(2, '0');
+export function trailRegionsPrefix(account) {
+  const base = account.s3_prefix ? `${account.s3_prefix.replace(/^\/+|\/+$/g, '')}/` : '';
+  const org = account.s3_org_id ? `${account.s3_org_id}/` : '';
+  return `${base}AWSLogs/${org}${account.account_id}/CloudTrail/`;
+}
 export function trailDayPrefix(account, region, day) {
   const base = account.s3_prefix ? `${account.s3_prefix.replace(/^\/+|\/+$/g, '')}/` : '';
   const org = account.s3_org_id ? `${account.s3_org_id}/` : '';

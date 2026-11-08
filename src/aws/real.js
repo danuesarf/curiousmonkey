@@ -5,10 +5,9 @@ import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, G
   ListAttachedRolePoliciesCommand, GetPolicyCommand, GetPolicyVersionCommand,
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
-import { streamRecords } from './trailStream.js';
 import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
-import { trailDayPrefix, fileTimeFromKey } from './trailKeys.js';
+import { trailDayPrefix, trailRegionsPrefix, fileTimeFromKey } from './trailKeys.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
   ListEventDataStoresCommand } from '@aws-sdk/client-cloudtrail';
 
@@ -32,7 +31,9 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
   }
   const iam = new IAMClient({ region: 'us-east-1', credentials });
   const trails = new Map();
-  let s3c = null;
+  let s3client = null;
+  // the bucket's region if set, else the account's first region; followRegionRedirects copes with a wrong guess
+  const s3c = () => s3client || (s3client = new S3Client({ region: account.s3_region || account.regions[0] || 'us-east-1', credentials, followRegionRedirects: true }));
   const ct = (region) => trails.get(region) || trails.set(region, new CloudTrailClient({ region, credentials })).get(region);
 
   return {
@@ -90,40 +91,37 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       const r = await ct(region).send(new LookupEventsCommand({ StartTime: start, EndTime: end, NextToken: token, MaxResults: 50 }));
       return { events: (r.Events || []).map((e) => JSON.parse(e.CloudTrailEvent)), nextToken: r.NextToken || null };
     },
-    /** All records of one time slice from the trail's S3 log files. No 2 TPS limit, and history can exceed 90 days. */
-    async trailEventsForSlice({ region, start, end, listCache = new Map(), map = (r) => r }) {
-      const s3 = s3c || (s3c = new S3Client({ region: account.s3_region || region, credentials }));
-      const from = start.getTime(), to = end.getTime() + 60 * 60e3;          // a record is published up to ~1 h after it happens
-      const keys = [];
-      for (let d = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()); d < to; d += 864e5) {
-        const prefix = trailDayPrefix(account, region, new Date(d));
-        if (!listCache.has(prefix)) {
-          const all = []; let ContinuationToken;
-          do {
-            bump('apiCalls');
-            const r = await s3.send(new ListObjectsV2Command({ Bucket: account.s3_bucket, Prefix: prefix, ContinuationToken }));
-            for (const o of r.Contents || []) all.push(o.Key);
-            ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
-          } while (ContinuationToken);
-          listCache.set(prefix, all);
-        }
-        for (const k of listCache.get(prefix)) { const t = fileTimeFromKey(k); if (t == null || (t >= from && t < to)) keys.push(k); }
-      }
-      const out = [];
-      let i = 0;
-      // Files are streamed record by record, 4 at a time: memory no longer grows with file size.
-      await Promise.all(Array.from({ length: Math.min(4, keys.length) }, async () => {
-        while (i < keys.length) {
-          const Key = keys[i++];
-          const { Body, ContentLength } = await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }));
-          bump('s3Files'); bump('s3Bytes', ContentLength || 0); bump('apiCalls');
-          await streamRecords(Body, (r) => {
-            const t = new Date(r.eventTime).getTime();
-            if (t >= from && t < end.getTime()) out.push(map(r));   // map keeps only what the scan needs, not the whole record
-          });
-        }
-      }));
+    /** Regions that have log files in the trail, from the folder names under <account>/CloudTrail/. */
+    async listTrailRegions() {
+      const base = trailRegionsPrefix(account);
+      const out = []; let ContinuationToken;
+      do {
+        bump('apiCalls');
+        const r = await s3c().send(new ListObjectsV2Command({ Bucket: account.s3_bucket, Prefix: base, Delimiter: '/', ContinuationToken }));
+        for (const p of r.CommonPrefixes || []) { const reg = p.Prefix.slice(base.length).replace(/\/$/, ''); if (/^[a-z]{2}(-gov)?-[a-z]+-\d$/.test(reg)) out.push(reg); }
+        ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+      } while (ContinuationToken);
       return out;
+    },
+    /** Log files delivered on one UTC day in one region: [{ key, size, time }], in key order (= delivery order). */
+    async listTrailDay({ region, day }) {
+      const prefix = trailDayPrefix(account, region, day);
+      const out = []; let ContinuationToken;
+      do {
+        bump('apiCalls');
+        const r = await s3c().send(new ListObjectsV2Command({ Bucket: account.s3_bucket, Prefix: prefix, ContinuationToken }));
+        for (const o of r.Contents || []) { if (!o.Key.endsWith('.json.gz')) continue; const t = fileTimeFromKey(o.Key); if (t != null) out.push({ key: o.Key, size: o.Size || 0, time: t }); }
+        ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+      } while (ContinuationToken);
+      return out.sort((x, y) => (x.key < y.key ? -1 : 1));
+    },
+    /** One log file, still gzipped. Decoding happens elsewhere (on a parser thread). */
+    async getTrailFile(key) {
+      bump('apiCalls');
+      const r = await s3c().send(new GetObjectCommand({ Bucket: account.s3_bucket, Key: key }));
+      const buf = Buffer.from(await r.Body.transformToByteArray());
+      bump('s3Files'); bump('s3Bytes', buf.length);
+      return buf;
     },
     async discoverDataEvents() {
       const found = [];

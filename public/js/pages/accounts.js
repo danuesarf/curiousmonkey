@@ -131,7 +131,7 @@ function detailsSection(m, { lockId = false } = {}) {
     field('Environment', env),
     field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', placeholder: 'e.g. Workloads/Prod', maxlength: '120' }), 'The radar can group accounts by this instead of by environment. Use your AWS Organizations OU path, or any grouping your team uses.'),
     h('fieldset', null, h('legend', null, 'Regions to read CloudTrail from'), regions,
-      h('span', { class: 'hint' }, 'CloudTrail keeps events per region. Keep us-east-1: IAM and sign-in events are recorded there. Add every region where this account runs workloads.')));
+      h('span', { class: 'hint' }, 'CloudTrail keeps events per region. Keep us-east-1: IAM and sign-in events are recorded there. Add every region where this account runs workloads. With an S3 trail, every region that has log files in the trail is read and added here, whatever is ticked.')));
 }
 
 function sourceSection(m, rerender, { editing = false, original = null } = {}) {
