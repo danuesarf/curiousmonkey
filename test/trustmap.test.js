@@ -95,3 +95,12 @@ test('the query language: keys, negation, quotes, free text', () => {
   assert.deepEqual(find('lambda'), ['service']);
   assert.deepEqual(find('account:payments-prod severity:high'), ['aws-root']);
 });
+
+test('an edge reports its worst finding, not none', async () => {
+  const { edgesOf } = await import('../src/trustmap.js');
+  const role = { id: 'r', name: 'x', arn: 'arn:aws:iam::111111111111:role/x', account_id: 'a', account_name: 'acct', aws_account_id: '111111111111',
+    trust_policy: { Statement: [{ Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::999999999999:root' }, Action: 'sts:AssumeRole' }] } };
+  const [e] = edgesOf(role, { connected: new Map(), seen: new Map(), complete: new Set() });
+  assert.ok(e.findings.length);
+  assert.equal(e.worst, 'high');
+});

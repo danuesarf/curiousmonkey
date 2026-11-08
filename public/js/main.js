@@ -8,6 +8,7 @@ import { membersPage } from './pages/members.js';
 import { auditPage } from './pages/audit.js';
 import { opsPage } from './pages/ops.js';
 import { radarPage } from './pages/radar.js';
+import { spacePage } from './pages/space.js';
 import { trustPage } from './pages/trust.js';
 import { sectorPage } from './pages/sector.js';
 import { trackPage } from './pages/track.js';
@@ -23,6 +24,7 @@ export const session = state;
 const routes = [
   [/^#?\/?$/, () => radarPage, 'radar', true],
   [/^#\/track$/, () => trackPage, 'radar', true],
+  [/^#\/space$/, () => spacePage, 'space', true],
   [/^#\/trust$/, () => trustPage, 'trust', false],
   [/^#\/roles$/, () => overview, 'roles'],
   [/^#\/roles\/([\w-]+)\/scan$/, (m) => (c) => sectorPage(c, m[1]), 'radar', true],
@@ -45,6 +47,7 @@ const can = (p) => state.user?.permissions.includes(p);
 const ICON = {
   radar: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M12 12L19 6',
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
+  space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
   roles: 'M4 6h16M4 12h16M4 18h10', scans: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
   members: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6s7 2 7 6M17 11a3 3 0 1 0 0-6M22 20c0-3-2-5-4-5', audit: 'M6 3h9l4 4v14H6zM9 12h7M9 16h7M9 8h3',
   workers: 'M5 5h14v6H5zM5 13h14v6H5zM8 8h.01M8 16h.01M12 8h4M12 16h4',
@@ -87,13 +90,13 @@ setInterval(() => refreshStatus(), 20000);
 function shell(active, content, full) {
   const item = (key, href, label, perm) => (!perm || can(perm)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label);
-  setCrumbs({ radar: 'Radar', trust: 'Trust map', roles: 'Roles', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration', workers: 'Workers' }[active] || '');
+  setCrumbs({ radar: 'Radar', space: 'Space', trust: 'Trust map', roles: 'Roles', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration', workers: 'Workers' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
-      item('radar', '#/', 'Radar', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('scans', '#/scans', 'Scans', 'ops'), item('workers', '#/workers', 'Workers', 'ops'),
+      item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('scans', '#/scans', 'Scans', 'ops'), item('workers', '#/workers', 'Workers', 'ops'),
       item('accounts', '#/accounts', 'Accounts', 'view'), item('members', '#/members', 'Members', 'members'), item('audit', '#/audit', 'Audit', 'audit'), item('settings', '#/settings', 'Config', 'settings'),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),

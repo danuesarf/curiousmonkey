@@ -14,6 +14,7 @@ import { historyFor } from '../history.js';
 import { effectiveLookback } from '../settings.js';
 import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
+import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
@@ -469,6 +470,10 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user))));
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const r = await accountRadar(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
+}));
+data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await spaceEstate(req.user))));
+data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
+  const r = await spaceAccount(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
 }));
 data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   const accountId = req.query.account ? uuid.parse(req.query.account) : null;

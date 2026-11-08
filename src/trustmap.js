@@ -7,7 +7,7 @@ import { query } from './db.js';
 import { scopeSql } from './auth/rbac.js';
 import { normalizeStatements, arr } from './analyzer/policy.js';
 
-const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3 };
+const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };   // 'none' must be ranked, or nothing ever beats it
 export const FINDINGS = {
   public: 'Anyone can assume it (principal "*")',
   'not-principal': 'Allow with NotPrincipal: everyone except a list',
