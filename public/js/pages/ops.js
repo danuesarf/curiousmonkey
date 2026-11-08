@@ -39,17 +39,42 @@ export async function opsPage(ctx) {
         h('td', null, `${j.attempts}/${j.max_attempts}`), h('td', { class: 'small' }, progress(j)),
         h('td', { class: 'small', style: null }, j.last_error ? h('span', { class: 'err' }, j.last_error.slice(0, 160), j.error_retryable === false ? ' (not retryable)' : '') : '', j.status === 'queued' && j.attempts > 0 && new Date(j.run_after) > new Date() && h('div', { class: 'muted' }, `retrying ${ago(j.run_after).replace('ago', '')}`)),
         h('td', null, h('div', { class: 'row' }, h('button', { class: 'btn sm', onClick: async () => { const l = await get(`/ops/jobs/${j.id}/log`); modal(`${j.kind} ${j.region || ''} log`, h('pre', null, l.items.map((x) => `${fmtDate(x.at)}  ${x.level.padEnd(5)} ${x.message}`).join('\n') || 'No log lines.')); } }, 'Log'),
-          canScan && ['failed', 'dead', 'canceled'].includes(j.status) && h('button', { class: 'btn sm', onClick: async () => { await post(`/ops/jobs/${j.id}/retry`); redraw(); } }, 'Retry')))))))));
+          canScan && ['failed', 'dead', 'canceled'].includes(j.status) && h('button', { class: 'btn sm', onClick: async () => { await post(`/ops/jobs/${j.id}/retry`); redraw(); } }, 'Retry'),
+          canScan && j.kind === 'events' && !['running', 'queued'].includes(j.status) && h('button', { class: 'btn sm', onClick: () => rebuildDialog(d.run, j, redraw) }, 'Rebuild')))))))));
   draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, e.message)));
   const t = setInterval(() => draw().catch(() => {}), 5000);
   ctx.onLeave(() => clearInterval(t));
   return root;
 }
+// Read one region of one account again from the start, optionally in smaller slices.
+function rebuildDialog(run, j, redraw) {
+  const cur = Number(j.options?.sliceHours) || null;
+  const sel = h('select', null, [['', 'Default (6 h)'], ['2', '2 hours'], ['1', '1 hour'], ['0.5', '30 minutes'], ['0.25', '15 minutes']]
+    .map(([v, t]) => h('option', { value: v }, t)));
+  sel.value = cur ? String(cur) : '1';                // 1 h is the useful default when a region needs rebuilding
+  let bg;
+  const go = h('button', { class: 'btn primary', onClick: async () => {
+    go.disabled = true;
+    try {
+      const r = await post(`/ops/jobs/${j.id}/rebuild`, { sliceHours: sel.value ? Number(sel.value) : null });
+      toast(`Rebuilding ${j.region}. ${r.requeued > 1 ? 'Analysis runs again when it finishes.' : ''}`);
+      bg.remove(); redraw();
+    } catch (e) { toast(e.message, true); go.disabled = false; }
+  } }, `Rebuild ${j.region}`);
+  bg = modal(`Rebuild ${run.account_name} · ${j.region}`, h('div', { class: 'stack' },
+    h('p', null, `Reads ${j.region} again from the start of the lookback, for this account only. Other regions and accounts are not touched.`),
+    h('p', { class: 'small muted' }, 'Events already recorded are recognised and skipped, so nothing is counted twice. The region shows as incomplete until the read finishes, and analysis runs again afterwards.'),
+    h('div', { class: 'field' }, h('label', null, 'Slice size', sel),
+      h('span', { class: 'hint' }, 'Smaller slices hold fewer events in memory at once. Use 1 hour or less when the worker keeps getting lost on a busy region.'))),
+    h('div', { class: 'actions' }, go, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel')));
+}
+
 function progress(j) {
   const p = j.progress || {};
   if (p.phase === 'events' && p.total) {
     const parts = [`${p.source === 's3' ? 'S3 trail' : 'Event History'}: slice ${num(p.done)} of ${num(p.total)}`, `${num(p.events)} events`];
     if (p.slice) parts.push(`${p.direction === 'backfill' ? 'back to' : 'up to'} ${p.slice.slice(0, 10)}`);
+    if (p.sliceHours && p.sliceHours !== 6) parts.push(`${p.sliceHours >= 1 ? `${p.sliceHours} h` : `${p.sliceHours * 60} min`} slices`);
     if (j.status === 'running' && p.eventsPerSecond != null) parts.push(`${num(p.eventsPerSecond)}/s`);
     return h('span', { class: 'row', style: 'gap:8px;flex-wrap:nowrap' }, dial(p.done / p.total, 20), h('span', null, parts.join(' · ')), j.status === 'running' && p.etaSeconds != null && p.done < p.total && h('b', { class: 'eta' }, ` · ${etaText(p.etaSeconds)} left`));
   }

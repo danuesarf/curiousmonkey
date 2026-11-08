@@ -211,6 +211,36 @@ export async function retryJobs({ runId, jobId }) {
   });
 }
 
+export const SLICE_CHOICES = [6, 2, 1, 0.5, 0.25];
+
+/**
+ * Read one account's region again from the start of its lookback. The region's checkpoint is dropped, so the
+ * events job walks every slice again, optionally in smaller slices. Events already applied stay recorded in
+ * seen_events and are skipped, so usage is never counted twice. The run's later jobs (analyze) are requeued too.
+ */
+export async function rebuildRegion({ jobId, sliceHours = null }) {
+  return tx(async (c) => {
+    const job = (await c.query(`SELECT * FROM scan_jobs WHERE id=$1 FOR UPDATE`, [jobId])).rows[0];
+    if (!job) return { error: 'not-found' };
+    if (job.kind !== 'events') return { error: 'not-events' };
+    if (job.status === 'running') return { error: 'running' };
+    if (sliceHours != null && !SLICE_CHOICES.includes(sliceHours)) return { error: 'slice' };
+    await c.query(`DELETE FROM scan_checkpoints WHERE account_id=$1 AND region=$2`, [job.account_id, job.region]);
+    await c.query(
+      `UPDATE scan_jobs SET status='queued', attempts=0, run_after=now(), finished_at=NULL, last_error=NULL, error_retryable=NULL,
+              locked_by=NULL, locked_until=NULL, progress='{}', options = options - 'sliceHours' || $2::jsonb
+        WHERE id=$1`, [job.id, JSON.stringify(sliceHours ? { sliceHours } : {})]);
+    await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,$2)`,
+      [job.id, `rebuild requested by an operator: reading ${job.region} again from the start${sliceHours ? ` in ${sliceHours} h slices` : ''}`]);
+    const later = await c.query(
+      `UPDATE scan_jobs SET status='queued', attempts=0, run_after=now(), finished_at=NULL
+        WHERE run_id=$1 AND stage > $2 AND status IN ('succeeded','failed','dead','canceled') RETURNING id`, [job.run_id, job.stage]);
+    for (const r of later.rows) await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,'requeued: a region of this scan is being rebuilt')`, [r.id]);
+    await c.query(`UPDATE scan_runs SET status='queued', finished_at=NULL, error=NULL WHERE id=$1`, [job.run_id]);
+    return { requeued: 1 + later.rowCount, accountId: job.account_id, region: job.region };
+  });
+}
+
 export async function cancelRun(runId) {
   return tx(async (c) => {
     const r = await c.query(
@@ -259,7 +289,7 @@ export async function runDetail(runId) {
   if (!run) return null;
   const jobs = (await query(
     `SELECT id, kind, region, stage, status, attempts, max_attempts, run_after, locked_by, heartbeat_at,
-            progress, last_error, error_retryable, started_at, finished_at
+            progress, options, last_error, error_retryable, started_at, finished_at
        FROM scan_jobs WHERE run_id=$1 ORDER BY stage, kind, region`, [runId])).rows;
   return { run, jobs };
 }

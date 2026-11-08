@@ -27,7 +27,15 @@ export async function runEvents(ctx) {
   const now = Date.now();
   const end = now - s.deliveryLagMinutes * MIN;                // newest events may not be delivered yet
   const horizon = now - lookbackFor(account) * DAY;
-  const step = s.sliceHours * HOUR;
+  // Slice size: the operator's choice for this job, else the default. If the last attempt's worker died
+  // mid-run (usually out of memory on a busy slice), halve it so the same slice cannot kill the next one too.
+  let hours = Number(ctx.job.options?.sliceHours) || s.sliceHours;
+  if (ctx.job.attempts > 1 && /lease expired/.test(ctx.job.last_error || '') && hours > 0.25) {
+    hours = Math.max(0.25, hours / 2);
+    await query(`UPDATE scan_jobs SET options = options || jsonb_build_object('sliceHours', $2::numeric) WHERE id=$1`, [ctx.job.id, hours]);
+    await ctx.log?.(`the last attempt's worker was lost; reading in smaller ${hours} h slices`, null, 'warn');
+  }
+  const step = hours * HOUR;
 
   const cp = (await query(`SELECT * FROM scan_checkpoints WHERE account_id=$1 AND region=$2`, [account.id, region])).rows[0];
   const slices = [];          // [start, end, kind]
@@ -107,7 +115,7 @@ export async function runEvents(ctx) {
     const took = (Date.now() - sliceStart) / 1000;
     rate = rate == null ? took : rate * 0.8 + took * 0.2;      // recent slices count more; busy and quiet days differ
     const elapsed = (Date.now() - t0) / 1000;
-    await ctx.progress({ phase: 'events', source: src, region, slice: new Date(kind === 'backfill' ? a : b).toISOString(), direction: kind,
+    await ctx.progress({ phase: 'events', source: src, region, slice: new Date(kind === 'backfill' ? a : b).toISOString(), direction: kind, sliceHours: hours,
       done: i + 1, total: slices.length, events: total, elapsedSeconds: Math.round(elapsed),
       etaSeconds: Math.round(rate * (slices.length - i - 1)), eventsPerSecond: elapsed > 0 ? Math.round(total / elapsed) : null });
   }
