@@ -122,8 +122,9 @@ export async function runEvents(ctx) {
       etaSeconds: Math.round(rate * (slices.length - i - 1)), eventsPerSecond: elapsed > 0 ? Math.round(total / elapsed) : null });
   }
   await query('UPDATE scan_checkpoints SET caught_up_at=now() WHERE account_id=$1 AND region=$2', [account.id, region]);   // reached the present
-  await query(`DELETE FROM seen_events WHERE event_time < now() - interval '3 days'`);
-  await query(`DELETE FROM role_sessions WHERE started_at < now() - interval '2 days'`);   // credentials last at most 12h
+  // Pruned by when they were written, not by event time: another region may still be reading old history that needs them.
+  await query(`DELETE FROM seen_events WHERE seen_at < now() - interval '3 days'`);
+  await query(`DELETE FROM role_sessions WHERE seen_at < now() - interval '2 days' AND started_at < now() - interval '2 days'`);   // credentials last at most 12h
   await query(`DELETE FROM track_sessions WHERE account_id=$1 AND COALESCE(last_call_at, started_at) < now() - make_interval(days => $2)`, [account.id, config.scanner.sessionRetentionDays]);
   return { slices: slices.length, events: total, gap };
 }

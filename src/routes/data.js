@@ -170,6 +170,8 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
       for (const t of ['activity_daily', 'activity_resources', 'passrole_observed', 'principals']) {
         await c.query(`DELETE FROM ${t} WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1)`, [a.id]);
       }
+      // counts that would otherwise be added to again by the re-read
+      for (const t of ['event_coverage', 'unmapped_events', 'track_sessions']) await c.query(`DELETE FROM ${t} WHERE account_id=$1`, [a.id]);
     }
     return (await c.query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
   });

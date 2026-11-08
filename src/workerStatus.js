@@ -102,10 +102,10 @@ export function advise({ workers, reading, fails, queue, accounts }) {
 
   // reading
   const stalled = reading.filter((j) => j.stalled);
-  for (const j of stalled) add('warning', 'reading', `${j.account_name} ${j.region}: no progress for ${dur(j.sinceProgressS ?? 900)}`, 'The job is running but has not finished a slice. A huge slice, or a call hanging on AWS.', 'Look at its log on the Scans page. If it does not move, Rebuild the region with a smaller slice.');
+  for (const j of stalled) add('warning', 'reading', `${j.account_name} ${j.region}: no progress for ${dur(j.sinceProgressS ?? 900)}`, 'The job is running but has not finished a slice. A huge slice, or a call hanging on AWS.', 'Look at its log on the Scans page. If it does not move, cancel the scan and use Resume on that region with a smaller slice.');
   const dead = reading.filter((j) => ['dead', 'failed'].includes(j.status));
   const deadMem = dead.filter((j) => /lease expired|heap|memory/i.test(j.last_error || ''));
-  if (deadMem.length) add('critical', 'reading', `${deadMem.length} region read${deadMem.length > 1 ? 's' : ''} gave up after the worker died`, deadMem.map((j) => `${j.account_name} ${j.region}`).join(', '), 'Rebuild each region on the Scans page with 1 h slices.');
+  if (deadMem.length) add('critical', 'reading', `${deadMem.length} region read${deadMem.length > 1 ? 's' : ''} gave up after the worker died`, deadMem.map((j) => `${j.account_name} ${j.region}`).join(', '), 'Use Resume on each region on the Scans page, with 1 h slices. It continues from where the read stopped.');
   const deadAccess = dead.filter((j) => /AccessDenied|not authorized|InvalidClientTokenId|ExpiredToken/i.test(j.last_error || ''));
   if (deadAccess.length) add('critical', 'reading', `${deadAccess.length} read${deadAccess.length > 1 ? 's' : ''} failed on permissions`, deadAccess.map((j) => `${j.account_name} ${j.region}: ${String(j.last_error).slice(0, 80)}`).join('; '), 'Fix the scanner role, bucket policy or KMS key policy for that account, then Retry.');
   const slowEh = reading.filter((j) => j.kind === 'events' && j.status === 'running' && j.event_source === 'event-history' && (j.progress?.etaSeconds || 0) > 3 * 3600);

@@ -175,25 +175,30 @@ test('a track opened on the middle session still shows the jump it made onward',
   assert.ok(!t.calls.some((c) => c.jumpOutOfView));
 });
 
-test('rebuilding one region re-reads only that region, in the chosen slices, without double counting', async () => {
+test('resuming a region continues from its checkpoint and never counts old history twice', async () => {
   const before = await totals(A);
   const run = (await db.query(`SELECT run_id FROM scan_jobs j JOIN scan_runs r ON r.id=j.run_id WHERE r.account_id=$1 ORDER BY r.created_at DESC LIMIT 1`, [A])).rows[0].run_id;
-  const job = (await db.query(`SELECT * FROM scan_jobs WHERE run_id=$1 AND kind='events' AND region='us-east-1'`, [run])).rows[0];
-  const other = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='ap-southeast-3'`, [A])).rows[0];
+  // ap-southeast-3 is the region the demo writes events to; pretend its read stopped 30 days back, after counting them
+  const job = (await db.query(`SELECT * FROM scan_jobs WHERE run_id=$1 AND kind='events' AND region='ap-southeast-3'`, [run])).rows[0];
+  const cp = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='ap-southeast-3'`, [A])).rows[0];
+  await db.query(`UPDATE scan_checkpoints SET last_event_time = last_event_time - interval '30 days', caught_up_at=NULL WHERE account_id=$1 AND region='ap-southeast-3'`, [A]);
+  await db.query(`UPDATE scan_jobs SET status='dead', last_error='worker lost: lease expired' WHERE id=$1`, [job.id]);
+  const other = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='us-east-1'`, [A])).rows[0];
 
-  assert.equal((await q.rebuildRegion({ jobId: job.id, sliceHours: 7 })).error, 'slice');
-  const r = await q.rebuildRegion({ jobId: job.id, sliceHours: 1 });
-  assert.equal(r.region, 'us-east-1');
+  assert.equal((await q.resumeRegion({ jobId: job.id, sliceHours: 7 })).error, 'slice');
+  const r = await q.resumeRegion({ jobId: job.id, sliceHours: 1 });
+  assert.equal(r.region, 'ap-southeast-3');
   assert.equal(r.requeued, 2);                                                     // the region and the analysis after it
-  assert.equal((await db.query(`SELECT count(*)::int n FROM scan_checkpoints WHERE account_id=$1 AND region='us-east-1'`, [A])).rows[0].n, 0);
   await drain();
 
   const after = (await db.query(`SELECT * FROM scan_jobs WHERE id=$1`, [job.id])).rows[0];
   assert.equal(after.status, 'succeeded');
   assert.equal(after.progress.sliceHours, 1);
-  assert.ok(after.progress.total > 24 * 30, `expected hourly slices, got ${after.progress.total}`);
-  assert.deepEqual(await totals(A), before);                                       // seen events are skipped
-  const same = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='ap-southeast-3'`, [A])).rows[0];
+  assert.ok(after.progress.total >= 24 * 30 && after.progress.total < 24 * 32, `expected ~30 days of hourly slices, got ${after.progress.total}`);
+  assert.deepEqual(await totals(A), before);                                       // 30 days re-read, nothing counted twice
+  const back = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='ap-southeast-3'`, [A])).rows[0];
+  assert.ok(back.last_event_time >= cp.last_event_time - 60 * 60e3);               // caught up again
+  const same = (await db.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region='us-east-1'`, [A])).rows[0];
   assert.deepEqual(same, other);                                                   // the other region was not touched
   assert.equal((await q.runDetail(run)).run.status, 'succeeded');
 });

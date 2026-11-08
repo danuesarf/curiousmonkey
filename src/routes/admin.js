@@ -7,7 +7,7 @@ import { requireUser, requirePerm } from '../auth/sessions.js';
 import { ROLES, TEAMS } from '../auth/rbac.js';
 import { sha256, randomToken } from '../auth/crypto.js';
 import { workerStatus } from '../workerStatus.js';
-import { queueOverview, runDetail, jobLogs, retryJobs, cancelRun, rebuildRegion, SLICE_CHOICES } from '../queue.js';
+import { queueOverview, runDetail, jobLogs, retryJobs, cancelRun, resumeRegion, SLICE_CHOICES } from '../queue.js';
 
 export const admin = Router();
 admin.use(requireUser);
@@ -97,15 +97,15 @@ admin.post('/ops/runs/:id/retry', requirePerm('scan'), wrap(async (req, res) => 
   await audit(req, 'ops.retry_run', { type: 'run', id: req.params.id }, { jobs: n });
   res.json({ requeued: n });
 }));
-admin.post('/ops/jobs/:id/rebuild', requirePerm('scan'), wrap(async (req, res) => {
+admin.post('/ops/jobs/:id/resume', requirePerm('scan'), wrap(async (req, res) => {
   const body = z.object({ sliceHours: z.number().nullable().optional() }).parse(req.body || {});
-  const r = await rebuildRegion({ jobId: uuid.parse(req.params.id), sliceHours: body.sliceHours ?? null });
+  const r = await resumeRegion({ jobId: uuid.parse(req.params.id), sliceHours: body.sliceHours ?? null });
   if (r.error) {
-    const msg = { 'not-found': 'No such job.', 'not-events': 'Only an events step can be rebuilt.', running: 'This step is running. Cancel the scan first.',
+    const msg = { 'not-found': 'No such job.', 'not-events': 'Only an events step can be resumed.', running: 'This step is running. Cancel the scan first.',
       slice: `Slice size must be one of ${SLICE_CHOICES.join(', ')} hours.` }[r.error];
     return res.status(r.error === 'not-found' ? 404 : 409).json({ error: msg });
   }
-  await audit(req, 'ops.rebuild_region', { type: 'job', id: req.params.id }, { region: r.region, sliceHours: body.sliceHours ?? null });
+  await audit(req, 'ops.resume_region', { type: 'job', id: req.params.id }, { region: r.region, sliceHours: body.sliceHours ?? null });
   res.json(r);
 }));
 admin.post('/ops/jobs/:id/retry', requirePerm('scan'), wrap(async (req, res) => {

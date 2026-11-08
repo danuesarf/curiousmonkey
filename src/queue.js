@@ -245,30 +245,31 @@ import { SLICE_CHOICES } from './settings.js';
 export { SLICE_CHOICES };
 
 /**
- * Read one account's region again from the start of its lookback. The region's checkpoint is dropped, so the
- * events job walks every slice again, optionally in smaller slices. Events already applied stay recorded in
- * seen_events and are skipped, so usage is never counted twice. The run's later jobs (analyze) are requeued too.
+ * Continue one account's region from where it stopped, optionally in smaller slices. The checkpoint is kept, so
+ * nothing already counted is read again (re-reading old history would count it twice: seen_events only remembers
+ * the last few days). The run's later jobs (analyze) are requeued too. To start an account's history over, use
+ * the account's "Rebuild stored history", which clears the counts first.
  */
-export async function rebuildRegion({ jobId, sliceHours = null }) {
+export async function resumeRegion({ jobId, sliceHours = null }) {
   return tx(async (c) => {
     const job = (await c.query(`SELECT * FROM scan_jobs WHERE id=$1 FOR UPDATE`, [jobId])).rows[0];
     if (!job) return { error: 'not-found' };
     if (job.kind !== 'events') return { error: 'not-events' };
     if (job.status === 'running') return { error: 'running' };
     if (sliceHours != null && !SLICE_CHOICES.includes(sliceHours)) return { error: 'slice' };
-    await c.query(`DELETE FROM scan_checkpoints WHERE account_id=$1 AND region=$2`, [job.account_id, job.region]);
+    const cp = (await c.query(`SELECT last_event_time FROM scan_checkpoints WHERE account_id=$1 AND region=$2`, [job.account_id, job.region])).rows[0];
     await c.query(
       `UPDATE scan_jobs SET status='queued', attempts=0, run_after=now(), finished_at=NULL, last_error=NULL, error_retryable=NULL,
-              locked_by=NULL, locked_until=NULL, progress='{}', options = options - 'sliceHours' || $2::jsonb
+              locked_by=NULL, locked_until=NULL, options = options - 'sliceHours' || $2::jsonb
         WHERE id=$1`, [job.id, JSON.stringify(sliceHours ? { sliceHours } : {})]);
     await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,$2)`,
-      [job.id, `rebuild requested by an operator: reading ${job.region} again from the start${sliceHours ? ` in ${sliceHours} h slices` : ''}`]);
+      [job.id, `resumed by an operator${cp ? ` from ${cp.last_event_time.toISOString()}` : ' from the start'}${sliceHours ? ` in ${sliceHours} h slices` : ''}`]);
     const later = await c.query(
       `UPDATE scan_jobs SET status='queued', attempts=0, run_after=now(), finished_at=NULL
         WHERE run_id=$1 AND stage > $2 AND status IN ('succeeded','failed','dead','canceled') RETURNING id`, [job.run_id, job.stage]);
-    for (const r of later.rows) await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,'requeued: a region of this scan is being rebuilt')`, [r.id]);
+    for (const r of later.rows) await c.query(`INSERT INTO scan_job_log(job_id, message) VALUES ($1,'requeued: a region of this scan was resumed')`, [r.id]);
     await c.query(`UPDATE scan_runs SET status='queued', finished_at=NULL, error=NULL WHERE id=$1`, [job.run_id]);
-    return { requeued: 1 + later.rowCount, accountId: job.account_id, region: job.region };
+    return { requeued: 1 + later.rowCount, accountId: job.account_id, region: job.region, from: cp?.last_event_time || null };
   });
 }
 
