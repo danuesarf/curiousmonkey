@@ -79,7 +79,7 @@ export async function spaceEstate(user) {
     // account to account: every role or IAM user in one of your accounts that entered a role in another, over 90 days
     query(`SELECT p.id, p.key, p.kind, p.sessions_count, p.first_seen, p.last_seen, r.id AS role_id, r.name AS role_name, r.account_id AS dst
              FROM principals p JOIN roles r ON r.id = p.role_id AND r.deleted_at IS NULL
-            WHERE r.account_id = ANY($1) AND p.kind IN ('role','user') AND p.last_seen >= now() - interval '90 days'`, [ids]),
+            WHERE r.account_id = ANY($1) AND p.kind IN ('role','user','account') AND p.last_seen >= now() - interval '90 days'`, [ids]),
     events('c.account_id = ANY($1)', [ids], start),
   ]);
 
@@ -92,7 +92,11 @@ export async function spaceEstate(user) {
   // the caller's account comes from the principal key: role:<account>:<name> or user:arn:aws:iam::<account>:user/<name>
   const byAws = new Map((await query('SELECT id, account_id FROM cloud_accounts')).rows.map((x) => [x.account_id, x.id]));
   const inScope = new Set(ids);
-  const callerOf = (e) => { const m = e.kind === 'role' ? e.key.match(/^role:(\d{12}):(.+)$/) : e.key.match(/^user:arn:aws[\w-]*:iam::(\d{12}):user\/(.+)$/); return m ? { aws: m[1], name: m[2] } : null; };
+  const callerOf = (e) => {
+    const m = e.kind === 'role' ? e.key.match(/^role:(\d{12}):(.+)$/) : e.kind === 'account' ? e.key.match(/^acct:(\d{12}):(.+)$/) : e.key.match(/^user:arn:aws[\w-]*:iam::(\d{12}):user\/(.+)$/);
+    if (!m) return null;
+    return { aws: m[1], name: e.kind !== 'account' ? m[2] : /^AIDA/.test(m[2]) ? `IAM user ${m[2]}` : /^AROA/.test(m[2]) ? `role ${m[2]}` : m[2] };
+  };
   const pairs = new Map(), todayOf = new Map();
   const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
   if (cross.length) {

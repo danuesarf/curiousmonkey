@@ -93,3 +93,20 @@ test('calls of a session whose start is older than stored history still group, m
   const s = (await db.query('SELECT start_known, via, calls FROM track_sessions WHERE access_key_id=$1', ['ASIACCCCCCCCCCCCCCC3'])).rows[0];
   assert.deepEqual(s, { start_known: false, via: 'started before stored history', calls: 1 });
 });
+
+// In the target account's trail a cross-account AssumeRole carries no ARN: { type: AWSAccount, accountId, principalId }.
+test('a cross-account caller logged as AWSAccount keeps its account, and is named when that account is connected', async () => {
+  await db.query(`UPDATE roles SET aws_id='AROAKNOWNCALLER00001' WHERE id=$1`, [roleA.id]);
+  const asAccount = (id, acct, pid, key) => ({ eventID: id, eventTime: at(10), eventSource: 'sts.amazonaws.com', eventName: 'AssumeRole',
+    userIdentity: { type: 'AWSAccount', accountId: acct, principalId: pid },
+    requestParameters: { roleArn: ARN_B, roleSessionName: 'curious-monkey' }, responseElements: { credentials: { accessKeyId: key } } });
+  await apply([asAccount('x1', '111111111111', 'AROAKNOWNCALLER00001:curious-monkey', 'ASIAXXXXXXXXXXXXXXX1'),
+               asAccount('x2', '333333333333', 'AIDASTRANGERUSER0001', 'ASIAXXXXXXXXXXXXXXX2')], B, [roleB]);
+  const p = (await db.query(`SELECT key, kind, display FROM principals WHERE role_id=$1 AND key NOT LIKE 'session:%' ORDER BY key`, [roleB.id])).rows;
+  assert.ok(p.some((x) => x.key === 'role:111111111111:ci-deployer' && x.kind === 'role'), JSON.stringify(p));
+  const stranger = p.find((x) => x.key.startsWith('acct:'));
+  assert.equal(stranger.key, 'acct:333333333333:AIDASTRANGERUSER0001');
+  assert.equal(stranger.kind, 'account');
+  assert.match(stranger.display, /IAM user .* in 333333333333/);
+  assert.ok(!p.some((x) => x.key.startsWith('other:')));
+});

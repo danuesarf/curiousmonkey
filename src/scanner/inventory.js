@@ -62,14 +62,14 @@ export async function runInventory(ctx) {
     await tx(async (c) => {
       const row = (await c.query(
         `INSERT INTO roles(account_id, arn, name, path, kind, permission_set, trust_policy, boundary_arn, tags, created_in_aws,
-                           last_used_at, last_used_region, inline_count, attached_count, deleted_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL)
+                           last_used_at, last_used_region, inline_count, attached_count, aws_id, deleted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULL)
          ON CONFLICT (account_id, arn) DO UPDATE SET trust_policy=EXCLUDED.trust_policy, boundary_arn=EXCLUDED.boundary_arn, tags=EXCLUDED.tags,
            kind=EXCLUDED.kind, permission_set=EXCLUDED.permission_set, last_used_at=EXCLUDED.last_used_at, last_used_region=EXCLUDED.last_used_region,
-           inline_count=EXCLUDED.inline_count, attached_count=EXCLUDED.attached_count, deleted_at=NULL
+           inline_count=EXCLUDED.inline_count, attached_count=EXCLUDED.attached_count, aws_id=COALESCE(EXCLUDED.aws_id, roles.aws_id), deleted_at=NULL
          RETURNING id`,
         [account.id, r.arn, r.name, r.path, kind, kind === 'identity-center' ? r.name.split('_')[1] : null, JSON.stringify(r.trustPolicy),
-         r.boundaryArn, JSON.stringify(detail.tags), r.createDate, detail.lastUsedAt, detail.lastUsedRegion, pol.inline.length, pol.attached.length])).rows[0];
+         r.boundaryArn, JSON.stringify(detail.tags), r.createDate, detail.lastUsedAt, detail.lastUsedRegion, pol.inline.length, pol.attached.length, r.awsId || null])).rows[0];
       const docs = [
         ...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document })),
         ...managed.map((p) => ({ kind: 'managed', name: p.name, arn: p.arn, aws: p.awsManaged, document: p.document })),

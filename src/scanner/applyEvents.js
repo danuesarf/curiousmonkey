@@ -24,6 +24,12 @@ export function principalFrom(e) {
     const who = c.principalId?.split(':').slice(1).join(':') || e.sessionName;
     return { key: `fed:${c.principalId || e.sessionName}`, kind: 'federated', display: who };
   }
+  if (c.type === 'AWSAccount' && c.accountId) {
+    // the target account's copy of a cross-account call: no ARN, only the caller's account and unique ID
+    const id = (c.principalId || '').split(':')[0];
+    const what = /^AROA/.test(id) ? 'role' : /^AIDA/.test(id) ? 'IAM user' : 'identity';
+    return { key: `acct:${c.accountId}:${id || 'unknown'}`, kind: 'account', display: `${what} ${id || '?'} in ${c.accountId}${e.sessionName ? ` (session ${e.sessionName})` : ''}` };
+  }
   return { key: `other:${c.arn || c.type}`, kind: 'other', display: c.arn || String(c.type) };
 }
 
@@ -42,6 +48,21 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
     for (const part of chunks([...keys])) {
       const r = await c.query(`SELECT access_key_id, principal_id FROM role_sessions WHERE access_key_id = ANY($1)`, [part]);
       for (const x of r.rows) keyOwner.set(x.access_key_id, { id: x.principal_id });
+    }
+  }
+
+  // ---- 1b. cross-account callers seen as { type: AWSAccount }: name the role when its account is connected ----
+  const ids = new Set();
+  for (const e of evs) if (e.type === 'assume' && e.caller?.type === 'AWSAccount' && /^AROA/.test(e.caller.principalId || '')) ids.add(e.caller.principalId.split(':')[0]);
+  if (ids.size) {
+    const known = new Map((await c.query(`SELECT r.aws_id, r.name, a.account_id FROM roles r JOIN cloud_accounts a ON a.id = r.account_id WHERE r.aws_id = ANY($1)`, [[...ids]])).rows
+      .map((x) => [x.aws_id, x]));
+    for (const e of evs) {
+      if (e.type !== 'assume' || e.caller?.type !== 'AWSAccount') continue;
+      const k = known.get((e.caller.principalId || '').split(':')[0]);
+      if (!k || k.account_id !== e.caller.accountId) continue;
+      const session = e.caller.principalId.split(':').slice(1).join(':') || e.sessionName || 'session';
+      e.caller = { ...e.caller, type: 'AssumedRole', arn: `arn:aws:sts::${k.account_id}:assumed-role/${k.name}/${session}`, resolvedFrom: 'AWSAccount' };
     }
   }
 

@@ -49,7 +49,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
         for (const x of r.Roles) roles.push(x);
         Marker = r.IsTruncated ? r.Marker : undefined;
       } while (Marker);
-      return roles.map((x) => ({ arn: x.Arn, name: x.RoleName, path: x.Path, createDate: x.CreateDate,
+      return roles.map((x) => ({ arn: x.Arn, awsId: x.RoleId || null, name: x.RoleName, path: x.Path, createDate: x.CreateDate,
         trustPolicy: decode(x.AssumeRolePolicyDocument), boundaryArn: x.PermissionsBoundary?.PermissionsBoundaryArn || null }));
     },
     async getRoleDetail(name) {   // ListRoles omits last-used and tags

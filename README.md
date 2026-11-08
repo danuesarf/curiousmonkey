@@ -69,6 +69,8 @@ The radar and role pages show data as soon as the first slices are read. Until a
 
 Click anything for a card beside it; links go on from the card. Paths and their tags can be clicked too: a trust path shows the role it reaches, why the trust is flagged, who it trusts and on what conditions, and whether it was ever used. Drag or use the camera buttons to orbit; scroll or use + and − to zoom. The scale never changes on its own. Hours come from `track_sessions` (calls are counted in the hour their session started), heights from `activity_daily`. Red always means a problem and always carries a ⚠ tag.
 
+A cross-account AssumeRole appears in the target account's CloudTrail with no ARN, only `userIdentity { type: AWSAccount, accountId, principalId }`. The scanner keeps the caller's account (principal key `acct:<account>:<unique id>`) so the path still draws, and when the caller's account is connected it names the role from its IAM unique ID (`roles.aws_id`, filled by the inventory scan) so it counts as `role:<account>:<name>` and matches role-ARN trust. Callers recorded before this change sit together under one `other:AWSAccount` principal and cannot be split.
+
 ## Health
 
 `#/workers` (**Health** in the rail, needs the `ops` permission) shows the database and the workers in one place, with one list of what needs attention.
