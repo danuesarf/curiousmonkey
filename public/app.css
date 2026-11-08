@@ -478,3 +478,8 @@ tr.row-bad td{background:rgba(255,122,122,.05)}
 .ev-clip{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ev-detail td{background:#07130e}.ev-detail-body{display:flex;flex-direction:column;gap:12px;padding:6px 4px 10px}
 .ev-res,.ev-ua{overflow-wrap:anywhere}.ev-bad{color:#ffb0a6}
+
+/* ---------- Health: database ---------- */
+.db-bar{display:block;height:6px;background:var(--line);margin:4px 0 2px}
+.db-bar i{display:block;height:100%;background:var(--green)}.db-bar i.warn{background:#fab219}.db-bar i.bad{background:#ff6b5e}
+.warn-text{color:#fab219}

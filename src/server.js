@@ -64,6 +64,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try { const n = await (await import('./analyzer/mappings.js')).applyBuiltins(); if (n) console.log(JSON.stringify({ level: 'info', msg: `settled ${n} event names with built-in mappings` })); }
   catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `built-in mappings: ${e.message}` })); }
   const srv = createApp().listen(config.port, '0.0.0.0', () => console.log(JSON.stringify({ level: 'info', msg: `listening on :${config.port}` })));
+  // database size and free disk, once an hour, for the Health page's growth and days-until-full
+  const sample = () => import('./dbHealth.js').then((m) => m.sampleDatabase()).catch((e) => console.error(JSON.stringify({ level: 'warn', msg: 'database sample failed', error: e.message })));
+  setTimeout(sample, 15e3).unref(); setInterval(sample, 30 * 60e3).unref();
   const stop = () => srv.close(async () => { await closePool(); process.exit(0); });
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
 }

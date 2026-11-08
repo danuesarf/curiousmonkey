@@ -1,27 +1,33 @@
-// Workers: process telemetry (memory, CPU, event loop), what is being read right now, and what is missing.
+// Health: the database (disk left, size and growth, connections, vacuum) and the workers (memory, CPU, event loop),
+// what is being read right now, and what to change.
 import { h, svg, get, num, ago, fmtDate } from '../lib.js';
 
 const MB = 1024 * 1024;
-const bytes = (b) => (b == null ? '—' : b >= 1024 * MB ? `${(b / 1024 / MB).toFixed(2)} GB` : `${Math.round(b / MB)} MB`);
+const bytes = (b) => (b == null ? '—' : b >= 1024 * MB ? `${(b / 1024 / MB).toFixed(2)} GB` : b >= MB ? `${Math.round(b / MB)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 const pct = (a, b) => (a != null && b ? Math.round((a / b) * 100) : null);
 const dur = (s) => (s == null ? '—' : s >= 86400 ? `${Math.floor(s / 86400)} d ${Math.round((s % 86400) / 3600)} h` : s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.round(s / 60)} min` : `${s} s`);
 const LEVEL = { critical: ['Critical', 'lv-critical', '!'], warning: ['Warning', 'lv-warning', '▲'], info: ['Suggestion', 'lv-info', 'i'], good: ['All good', 'lv-good', '✓'] };
-const AREA = { memory: 'Memory', cpu: 'CPU', capacity: 'Capacity', reading: 'Reading', setup: 'Setup' };
+const AREA = { memory: 'Memory', cpu: 'CPU', capacity: 'Capacity', reading: 'Reading', setup: 'Setup', disk: 'Disk', database: 'Database' };
+const ORDER = { critical: 0, warning: 1, info: 2, good: 3 };
 
 export async function workersPage(ctx) {
   let range = '1h';
   const root = h('div', { class: 'stack-lg workers-page' });
   async function draw() {
-    const d = await get(`/ops/workers?range=${range}`);
+    const [d, db] = await Promise.all([get(`/ops/workers?range=${range}`), get('/ops/database').catch((e) => ({ error: e.message }))]);
+    // one list of what needs attention: the database's and the workers', worst first, one 'all good' at most
+    const advice = [...(db.advice || []), ...d.advice].sort((a, b) => ORDER[a.level] - ORDER[b.level]);
+    const real = advice.filter((a) => a.level !== 'good');
     const alive = d.workers.filter((w) => w.alive);
     const gone = d.workers.filter((w) => !w.alive);
     const rangeBtns = h('div', { class: 'seg', role: 'group', 'aria-label': 'Chart range' }, ['1h', '6h', '24h'].map((r) =>
       h('button', { class: r === range ? 'on' : '', 'aria-pressed': String(r === range), onClick: () => { range = r; draw(); } }, r)));
     root.replaceChildren(
-      h('header', { class: 'head row' }, h('div', null, h('div', { class: 'eyebrow' }, 'WORKERS'), h('h1', null, 'Worker status'),
-        h('p', { class: 'muted' }, 'Memory, CPU and throughput of every worker, what each one is reading, and what to change. Refreshes every 15 seconds.')),
+      h('header', { class: 'head row' }, h('div', null, h('div', { class: 'eyebrow' }, 'HEALTH'), h('h1', null, 'Database and workers'),
+        h('p', { class: 'muted' }, 'Disk left under the database, how fast it grows, and whether Postgres keeps up; memory, CPU and throughput of every worker, and what to change. Refreshes every 15 seconds.')),
         h('span', { class: 'grow' }), rangeBtns),
-      adviceCard(d.advice),
+      adviceCard(real.length ? real : advice.filter((a) => a.level === 'good').slice(0, 1)),
+      db.error ? h('div', { class: 'alert bad' }, `Database health could not be read: ${db.error}`) : databaseCard(db),
       h('div', { class: 'tiles' },
         tile('Workers alive', `${alive.length}`, `${alive.reduce((n, w) => n + (w.telemetry?.activeJobs || 0), 0)} of ${alive.reduce((n, w) => n + (w.concurrency || 2), 0)} job slots busy`),
         tile('Jobs running', num(d.queue.running), `${num(d.queue.ready)} ready to start`),
@@ -98,7 +104,7 @@ function workerCard(w, range) {
 }
 
 /** One series, one axis; an optional limit drawn as a reference line. Crosshair tooltip on hover. */
-function chart(title, pts, { limit = null, limitLabel = '', fmt = String, empty = 'No data.' } = {}) {
+function chart(title, pts, { limit = null, limitLabel = '', fmt = String, empty = 'No data.', days = false } = {}) {
   const P = pts.filter(([, v]) => v != null).map(([t, v]) => [new Date(t).getTime(), v]);
   const box = h('figure', { class: 'mini-chart' }, h('figcaption', { class: 'small' }, title));
   if (P.length < 2) { box.append(h('div', { class: 'tiny muted empty-chart' }, empty)); return box; }
@@ -109,7 +115,7 @@ function chart(title, pts, { limit = null, limitLabel = '', fmt = String, empty 
   const y = (v) => T + (1 - v / vmax) * (H - T - B);
   const path = P.map(([t, v], i) => `${i ? 'L' : 'M'}${x(t).toFixed(1)},${y(v).toFixed(1)}`).join('');
   const area = `${path}L${x(t1).toFixed(1)},${y(0)}L${x(t0).toFixed(1)},${y(0)}Z`;
-  const hm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+  const hm = (t) => (days ? new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' }) : new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' }));
   const cross = svg('line', { y1: T, y2: H - B, class: 'cross', visibility: 'hidden' });
   const dot = svg('circle', { r: 4, class: 'hover-dot', visibility: 'hidden' });
   const tip = h('div', { class: 'chart-tip', hidden: true });
@@ -188,4 +194,46 @@ function restartsCard(gone) {
           h('td', null, t.memLimit ? `${bytes(t.memUsed)} of ${bytes(t.memLimit)} (${pct(t.memUsed, t.memLimit)}%)` : '—'),
           h('td', null, `${w.jobs_done} done, ${w.jobs_failed} failed`));
       })))));
+}
+
+// ---- database ----
+function databaseCard(db) {
+  const { pg, disk: dk, growth: g } = db;
+  const used = dk.known ? dk.used / dk.total : null;
+  const bar = (share, label) => { const i = h('i', { class: share >= 0.9 ? 'bad' : share >= 0.8 ? 'warn' : null }); i.style.width = `${Math.max(1, Math.round(share * 100))}%`; return h('span', { class: 'db-bar', role: 'img', 'aria-label': label }, i); };
+  const days = g.daysUntilFull;
+  const tiles = h('div', { class: 'tiles' },
+    h('div', { class: 'tile' }, h('span', { class: 'small muted' }, 'Disk free under the database'),
+      h('b', null, dk.known ? bytes(dk.free) : 'unknown'),
+      dk.known ? [bar(used, `${Math.round(used * 100)}% used`), h('span', { class: 'tiny muted' }, `${Math.round(used * 100)}% of ${bytes(dk.total)} used`)] : h('span', { class: 'tiny muted' }, 'mount the volume to see it')),
+    tile('Database size', bytes(pg.size), g.perDay == null ? (g.days < 1 ? 'growth shows after a day of samples' : 'not growing') : `${g.perDay >= 0 ? '+' : '−'}${bytes(Math.abs(g.perDay))} a day (7 days)`),
+    tile('Full in', days == null ? '—' : days > 365 ? 'over a year' : `${Math.round(days)} days`, days == null ? (dk.known ? 'not growing, or under a day of samples' : 'disk not visible') : 'at the last 7 days’ rate'),
+    tile('Connections', `${pg.connections} / ${pg.maxConnections}`, `${pg.activeConnections} running a query`),
+    tile('Cache hit', pg.cacheHit == null ? '—' : `${(pg.cacheHit * 100).toFixed(1)}%`, 'reads served from memory'));
+  const series = db.samples.map((x) => [x.at, x.db]);
+  const diskSeries = db.samples.filter((x) => x.diskUsed != null).map((x) => [x.at, x.diskUsed]);
+  const lastTotal = db.samples.findLast?.((x) => x.diskTotal)?.diskTotal || null;
+  const vac = (t) => (t ? ago(t) : 'never');
+  const table = h('table', { class: 'small' },
+    h('thead', null, h('tr', null, ['Table', 'Size', 'Of which indexes', 'Rows', 'Dead rows', 'Last vacuum'].map((x) => h('th', null, x)))),
+    h('tbody', null, db.tables.map((t) => {
+      const deadShare = t.dead / Math.max(1, t.live + t.dead);
+      return h('tr', null, h('td', { class: 'mono' }, t.name), h('td', null, bytes(t.total)), h('td', { class: 'muted' }, bytes(t.indexes)), h('td', null, num(t.live)),
+        h('td', { class: deadShare > 0.2 && t.dead > 2e5 ? 'warn-text' : 'muted' }, t.dead ? `${num(t.dead)} (${Math.round(deadShare * 100)}%)` : '0'), h('td', { class: 'muted' }, vac(t.vacuumed)));
+    })));
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Database'),
+      h('p', { class: 'small muted' }, `Postgres ${pg.version}. Sizes are sampled every hour; growth and days until full use the last 7 days. Call history is kept ${db.retentionDays} days (SESSION_RETENTION_DAYS).`))),
+    h('div', { class: 'card-b stack' }, tiles,
+      h('div', { class: 'charts' },
+        chart('Database size, 30 days', series, { fmt: bytes, days: true, empty: 'The first samples arrive within the hour.' }),
+        chart('Disk used under the database, 30 days', diskSeries, { fmt: bytes, days: true, limit: lastTotal, limitLabel: 'disk', empty: dk.known ? 'The first samples arrive within the hour.' : 'The disk is not visible to the app.' })),
+      h('h3', null, `Largest tables${db.tableCount > db.tables.length ? ` (${db.tables.length} of ${db.tableCount})` : ''}`),
+      h('div', { class: 'scroll' }, table),
+      h('dl', { class: 'kv small' },
+        h('dt', null, 'Longest running query'), h('dd', null, pg.longestQuerySec ? `${dur(pg.longestQuerySec)}${pg.longestQuery ? ` · ${pg.longestQuery.slice(0, 120)}` : ''}` : 'none running'),
+        h('dt', null, 'Idle open transaction'), h('dd', null, pg.oldestIdleTxSec ? dur(pg.oldestIdleTxSec) : 'none'),
+        h('dt', null, 'Transaction ID age'), h('dd', null, `${(pg.xidAge * 100).toFixed(1)}% of the wraparound limit`),
+        h('dt', null, 'Deadlocks'), h('dd', null, `${num(pg.deadlocks)}${pg.statsSince ? ` since ${fmtDate(pg.statsSince)}` : ''}`),
+        h('dt', null, 'Disk seen at'), h('dd', { class: 'mono' }, dk.known ? dk.path : '—'))));
 }
