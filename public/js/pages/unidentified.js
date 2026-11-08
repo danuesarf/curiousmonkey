@@ -24,10 +24,17 @@ export function identifyControls(u, { accountId, bedrock, onChange }) {
     run(() => api('PUT', '/event-mappings', { rawAction: u.raw_action, action }), 'Saved. It applies to stored history at the next analysis.');
   };
   const ask = h('button', { class: 'btn sm', disabled: !bedrock, title: bedrock ? 'Ask Bedrock which IAM action this is' : 'Bedrock is off. Set BEDROCK_ENABLED=true on the server.' }, 'Ask Bedrock');
-  ask.addEventListener('click', () => { ask.disabled = true; ask.textContent = 'Asking…'; run(async () => {
-    const r = await post(`/accounts/${accountId}/unmapped/suggest`, { rawActions: [u.raw_action] });
-    if (!r.suggested.length) throw new Error(r.rejected.length ? 'Bedrock’s answer was not a real IAM action, so it was dropped.' : 'Bedrock had no suggestion.');
-  }); });
+  ask.addEventListener('click', async () => {
+    ask.disabled = true; ask.textContent = 'Asking…';
+    await run(async () => {
+      const r = await post(`/accounts/${accountId}/unmapped/suggest`, { rawActions: [u.raw_action] });
+      if (!r.suggested.length) {
+        const x = r.rejected[0];
+        throw new Error(x ? `Bedrock answered ${x.action}, which is ${x.why === 'unknown service' ? 'not a known AWS service' : 'not a real action of that service'}, so it was dropped. Type the right action above, or ask again.` : 'Bedrock had no suggestion.');
+      }
+    });
+    ask.disabled = false; ask.textContent = 'Ask Bedrock again';
+  });
   if (!canDecide) return h('div', { class: 'tiny muted' }, 'You can view this. Deciding needs the decide permission.');
   return h('div', { class: 'stack' },
     m?.status === 'suggested' && h('div', { class: 'suggest' }, h('div', { class: 'eyebrow' }, `BEDROCK SUGGESTS${m.confidence != null ? ` · ${Math.round(m.confidence * 100)}% SURE` : ''}`),

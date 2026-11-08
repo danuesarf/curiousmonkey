@@ -56,6 +56,8 @@ const EVENT_ALIAS = {
   'kms:ReEncrypt': 'kms:ReEncryptFrom',                  // plus kms:ReEncryptTo, see COMPANIONS
   'ce:ListReports': 'ce:DescribeReport',                 // Cost Explorer saved reports
   'tax:ListTaxExemptions': 'tax:GetExemptions',
+  'bedrock:Converse': 'bedrock:InvokeModel',                                  // documented by Bedrock
+  'bedrock:ConverseStream': 'bedrock:InvokeModelWithResponseStream',
   'billingconsole:GetBillingNotifications': 'billing:GetBillingNotifications',
   'billingconsole:GetAccountInformation': 'account:GetAccountInformation',
   'billingconsole:GetPaymentPreferences': 'payments:ListPaymentPreferences',

@@ -178,3 +178,9 @@ test('more renamed services and permissions resolve to the real IAM action', asy
   assert.equal(mapEvent('ssm.amazonaws.com', 'StartSession').action, 'ssm:StartSession');
   assert.equal(mapEvent('billingconsole.amazonaws.com', 'GetTotal').mapped, false);   // no documented permission: left for review
 });
+
+test('Bedrock Converse calls map to the permissions that authorise them', async () => {
+  const { mapEvent } = await import('../src/analyzer/actionNames.js');
+  assert.deepEqual(mapEvent('bedrock.amazonaws.com', 'ConverseStream'), { action: 'bedrock:InvokeModelWithResponseStream', mapped: true });
+  assert.deepEqual(mapEvent('bedrock.amazonaws.com', 'Converse'), { action: 'bedrock:InvokeModel', mapped: true });
+});
