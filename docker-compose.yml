@@ -53,6 +53,8 @@ services:
     environment:
       <<: *app-env
       WORKER_CONCURRENCY: "2"
+      # Node's default heap is about half the container; give it ~75% of mem_limit (keep the two in step).
+      NODE_OPTIONS: "--max-old-space-size=768"
     # No published ports. Probes and metrics are on 8081 inside the network only.
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
