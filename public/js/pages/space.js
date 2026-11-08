@@ -11,15 +11,17 @@ import { h, svg, get, num, ago } from '../lib.js';
 import { go } from '../main.js';
 
 const W = 1000, H = 900;
-// one colour per environment, checked together with every pair compared (colour-blind ΔE ≥ 10, normal vision ≥ 18).
+// one colour per environment, checked together with every pair compared (colour-blind ΔE ≥ 10, normal vision ≥ 17).
+// Shared is a muted olive: the only non-red hue that still clears both floors next to the other four.
 // base = rings, paths, swatches; hot/dim = the brightest and faintest stars. Red is never an environment.
 const ENV = {
   production: { name: 'Production', base: '#c68405', dim: '#8a5d0a', hot: '#ffd27f' },
+  shared: { name: 'Shared', base: '#676815', dim: '#4a4b10', hot: '#dcd98f' },
   staging: { name: 'Staging', base: '#4b95f0', dim: '#3a6db0', hot: '#b3d4ff' },
   development: { name: 'Development', base: '#37ac78', dim: '#2a7f59', hot: '#a6ecc8' },
   sandbox: { name: 'Sandbox', base: '#a947a3', dim: '#7c3878', hot: '#f2b0ec' },
 };
-const ORDER = ['production', 'staging', 'development', 'sandbox'];   // east to west across the plane
+const ORDER = ['production', 'shared', 'staging', 'development', 'sandbox'];   // east to west across the plane
 const RED = '#ff5a4f', WARN = '#fab219', COLD = '#7a8780', OUT = '#c3cbd9';
 const TONE = { high: RED, warn: WARN, info: '#ffffff', good: '#6fe3b0', medium: WARN, low: '#d5dceb' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };

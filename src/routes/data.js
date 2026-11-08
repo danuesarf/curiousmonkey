@@ -51,7 +51,7 @@ const KeysIn = z.object({
 });
 const AccountFields = {
   name: z.string().trim().min(1).max(80),
-  environment: z.enum(['production', 'staging', 'development', 'sandbox']),
+  environment: z.enum(['production', 'shared', 'staging', 'development', 'sandbox']),
   ou: z.string().trim().max(120).nullable().or(z.literal('')),
   regions: z.array(z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/)).min(1).max(20),
   eventSource: z.enum(['event-history', 's3']),

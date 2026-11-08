@@ -2,6 +2,7 @@ import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog
 import { session, go } from '../main.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
+const ENVIRONMENTS = ['production', 'shared', 'staging', 'development', 'sandbox'];
 const STATUS = { connected: 'b-green', pending: 'b-medium', error: 'b-high', planned: 'b-neutral' };
 const SOURCE_LABEL = { 'event-history': 'Event History', s3: 'S3 trail' };
 const MODE_LABEL = { assume_role: 'Assumes a role', access_key: 'IAM user key' };
@@ -117,7 +118,7 @@ function checkAccess(root, m, { hasStored = false, keysInThisStep = true } = {})
 
 // ---------- sections ----------
 function detailsSection(m, { lockId = false } = {}) {
-  const env = h('select', { 'data-f': 'environment' }, ['production', 'staging', 'development', 'sandbox'].map((e) => h('option', { value: e, selected: e === m.environment }, e)));
+  const env = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((e) => h('option', { value: e, selected: e === m.environment }, e)));
   env.addEventListener('change', () => { m.environment = env.value; });
   const regions = h('div', { class: 'pill-bar', 'data-f': 'regions', tabindex: '-1' }, REGIONS.map((r) => {
     const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': m.regions.has(r) }, r);
@@ -284,7 +285,7 @@ function planDialog(ctx) {
   const st = { many: false, text: '' };
   const body = h('div', { class: 'stack form' });
   const err = h('div', { class: 'err', role: 'alert' });
-  const env = () => { const e = h('select', { 'data-f': 'environment' }, ['production', 'staging', 'development', 'sandbox'].map((x) => h('option', { value: x, selected: x === m.environment }, x))); e.addEventListener('change', () => { m.environment = e.value; }); return e; };
+  const env = () => { const e = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((x) => h('option', { value: x, selected: x === m.environment }, x))); e.addEventListener('change', () => { m.environment = e.value; }); return e; };
   const draw = () => {
     const tabs = h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'How many' },
       h('button', { type: 'button', class: 'chip', 'aria-pressed': String(!st.many), onClick: () => { st.many = false; draw(); } }, 'One account'),
@@ -292,7 +293,7 @@ function planDialog(ctx) {
     if (st.many) {
       const ta = h('textarea', { 'data-f': 'text', rows: 9, class: 'mono', placeholder: '123456789012, payments-prod, production, Workloads/Prod\n210987654321, payments-stg, staging' }, st.text);
       ta.addEventListener('input', () => { st.text = ta.value; });
-      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, staging, development or sandbox), OU. Only the ID is required. Accounts already in Curious Monkey are skipped.'));
+      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, shared, staging, development or sandbox), OU. Only the ID is required. Accounts already in Curious Monkey are skipped.'));
     } else {
       body.replaceChildren(tabs,
         field('AWS account ID', input(m, 'accountId', { 'data-f': 'accountId', inputmode: 'numeric', maxlength: '12', placeholder: '123456789012' }), 'Twelve digits, no dashes.'),
@@ -530,7 +531,7 @@ export const COVERAGE_ROWS = [
 function editPlanned(a) {
   const m = { name: a.name, environment: a.environment, ou: a.ou || '', note: a.note || '' };
   const box = h('div', { class: 'card-b stack form' });
-  const env = h('select', { 'data-f': 'environment' }, ['production', 'staging', 'development', 'sandbox'].map((x) => h('option', { value: x, selected: x === m.environment }, x)));
+  const env = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((x) => h('option', { value: x, selected: x === m.environment }, x)));
   env.addEventListener('change', () => { m.environment = env.value; });
   box.append(field('Name', input(m, 'name', { 'data-f': 'name', maxlength: '80' })), field('AWS account ID', h('input', { value: a.account_id, disabled: true })), field('Environment', env),
     field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', maxlength: '120' })), field('Note (optional)', input(m, 'note', { 'data-f': 'note', maxlength: '500', placeholder: 'Owner, ticket, when it should be onboarded' })));

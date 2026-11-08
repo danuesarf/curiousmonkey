@@ -348,7 +348,7 @@ test('planned accounts: placeholders with no access, never scanned, onboarded la
   assert.ok(!st.json.reading.some((r) => r.id === p.json.id));
   // many at once: bad lines are reported, existing IDs are skipped
   assert.match((await owner.post('/api/accounts/planned/bulk', { text: '12345, x' })).json.message, /Line 1/);
-  const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n601553210983, network-hub, production, Infra\n473951143579, management\n889900112233' });
+  const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n601553210983, network-hub, shared, Infra\n473951143579, management\n889900112233' });
   assert.equal(bulk.json.added, 2); assert.deepEqual(bulk.json.skipped, ['473951143579']);
   // editing a planned account changes details only
   const e = await owner.patch(`/api/accounts/${p.json.id}`, { name: 'org-management', authMode: 'access_key' });

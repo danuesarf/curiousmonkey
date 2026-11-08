@@ -10,7 +10,7 @@ import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
 
 const num = (x) => Number(x || 0);
-const ENVS = ['production', 'staging', 'development', 'sandbox'];
+const ENVS = ['production', 'shared', 'staging', 'development', 'sandbox'];
 const OUTSIDE = new Set(['public', 'external-account', 'oidc', 'saml']);
 const SEV = { high: 0, medium: 1, low: 2, info: 3, none: 4 };   // the trust map's severities
 const MAX_STARS = 2400;            // across the estate; each account gets a share

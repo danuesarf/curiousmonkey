@@ -12,7 +12,7 @@ const CX = 400, CY = 400;
 const SEV = { high: '#ff6b5e', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: 'DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'DEAD', cleaned: 'CLEANED' };
 const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked' };
-const ENV_ORDER = ['production', 'staging', 'development', 'sandbox'];
+const ENV_ORDER = ['production', 'shared', 'staging', 'development', 'sandbox'];
 const ui = { group: 'env', chip: null };          // remembered while you move between views
 const r1 = (v) => Math.round(v * 10) / 10;
 const P = (deg, r) => { const a = ((deg - 90) * Math.PI) / 180; return [r1(CX + Math.cos(a) * r), r1(CY + Math.sin(a) * r)]; };
