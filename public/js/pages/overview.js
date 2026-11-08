@@ -6,6 +6,9 @@ const saved = { ...DEFAULT };   // survives navigating to a role and back
 
 export async function overview(ctx) {
   const f = saved;
+  // a link can open the list already filtered: #/roles?accounts=<id>,<id>&risks=High
+  const ids = (k) => (ctx.params.get(k) || '').split(',').filter(Boolean);
+  if (ids('accounts').length || ids('risks').length) Object.assign(f, { ...DEFAULT, accounts: new Set(ids('accounts')), risks: new Set(ids('risks')), kinds: new Set(), teams: new Set() });
   ctx.setCrumbs('Roles');
   const [ov, accts] = await Promise.all([get('/overview'), get('/accounts')]);
   const accounts = accts.items;

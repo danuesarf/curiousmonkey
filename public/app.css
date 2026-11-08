@@ -418,6 +418,7 @@ tr.row-bad td{background:rgba(255,122,122,.05)}
 .sp-card-head{display:flex;justify-content:space-between;gap:8px}.sp-card-titles{display:flex;flex-direction:column;gap:3px;min-width:0}
 .sp-eyebrow{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;color:var(--faint)}
 .sp-tag{font-size:10px;letter-spacing:.08em;padding:1px 6px;border:1px solid}
+.sp-tag-link{text-decoration:none;min-height:24px;display:inline-flex;align-items:center}.sp-tag-link:hover{background:rgba(255,90,79,.12)}
 .sp-card-title{display:flex;align-items:center;gap:8px;min-width:0}.sp-card-title b{font-size:15px;font-weight:500;overflow-wrap:anywhere}
 .sp-swatch{width:10px;height:10px;flex:none}
 .sp-card-sub{font-family:var(--mono);font-size:11px;color:var(--muted);overflow-wrap:anywhere}

@@ -68,7 +68,7 @@ export async function spaceEstate(user) {
   const start = await hourStart();
   if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, events: [], hourStart: new Date(start).toISOString() };
 
-  const [roles, hourly, chains, ev] = await Promise.all([
+  const [roles, hourly, entries, ev] = await Promise.all([
     query(`SELECT r.id, r.account_id, r.name, r.kind, r.risk, coalesce(t.c7,0)::bigint AS calls7, coalesce(t.c1,0)::bigint AS calls24h, coalesce(t.all_calls,0)::bigint AS calls_all
              FROM roles r
              LEFT JOIN (SELECT role_id, sum(count) all_calls, sum(count) FILTER (WHERE day >= current_date - 6) c7, sum(count) FILTER (WHERE day >= current_date - 1) c1
@@ -76,13 +76,10 @@ export async function spaceEstate(user) {
             WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL`, [ids]),
     query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
              FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [ids]),
-    // role chaining across accounts: a session whose parent session lives in another connected account
-    query(`SELECT p.account_id AS src, s.account_id AS dst, count(*) FILTER (WHERE s.started_at >= ${BUCKETS})::int AS today, count(*)::int AS month,
-                  min(s.started_at) AS first, array_agg(DISTINCT date_trunc('hour', s.started_at)) FILTER (WHERE s.started_at >= ${BUCKETS}) AS hours,
-                  sum(s.denied)::bigint AS denied
-             FROM track_sessions s JOIN track_sessions p ON p.access_key_id = s.parent_key_id
-            WHERE s.account_id = ANY($1) AND p.account_id = ANY($1) AND p.account_id <> s.account_id AND s.started_at >= now() - interval '30 days'
-            GROUP BY 1, 2`, [ids]),
+    // account to account: every role or IAM user in one of your accounts that entered a role in another, over 90 days
+    query(`SELECT p.id, p.key, p.kind, p.sessions_count, p.first_seen, p.last_seen, r.id AS role_id, r.name AS role_name, r.account_id AS dst
+             FROM principals p JOIN roles r ON r.id = p.role_id AND r.deleted_at IS NULL
+            WHERE r.account_id = ANY($1) AND p.kind IN ('role','user') AND p.last_seen >= now() - interval '90 days'`, [ids]),
     events('c.account_id = ANY($1)', [ids], start),
   ]);
 
@@ -92,6 +89,26 @@ export async function spaceEstate(user) {
   const per = Math.max(10, Math.floor(MAX_STARS / accts.length));
 
   const outside = await outsiders(user, new Set(ids));
+  // the caller's account comes from the principal key: role:<account>:<name> or user:arn:aws:iam::<account>:user/<name>
+  const byAws = new Map((await query('SELECT id, account_id FROM cloud_accounts')).rows.map((x) => [x.account_id, x.id]));
+  const inScope = new Set(ids);
+  const callerOf = (e) => { const m = e.kind === 'role' ? e.key.match(/^role:(\d{12}):(.+)$/) : e.key.match(/^user:arn:aws[\w-]*:iam::(\d{12}):user\/(.+)$/); return m ? { aws: m[1], name: m[2] } : null; };
+  const pairs = new Map(), todayOf = new Map();
+  const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
+  if (cross.length) {
+    for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h, count(*)::int AS n FROM role_sessions WHERE started_at >= ${BUCKETS} AND principal_id = ANY($1) GROUP BY 1, 2`,
+      [cross.map(({ e }) => e.id)])).rows) { if (!todayOf.has(x.principal_id)) todayOf.set(x.principal_id, []); todayOf.get(x.principal_id).push([bucketOf(x.h, start), x.n]); }
+  }
+  for (const { e, c } of cross) {
+    const from = byAws.get(c.aws), k = `${from}|${e.dst}`;
+    if (!pairs.has(k)) pairs.set(k, { from, to: e.dst, sessions: 0, firstSeen: null, lastSeen: null, today: Array(24).fill(0), roles: [] });
+    const pr = pairs.get(k);
+    pr.sessions += num(e.sessions_count);
+    if (e.first_seen && (!pr.firstSeen || e.first_seen < pr.firstSeen)) pr.firstSeen = e.first_seen;
+    if (e.last_seen && (!pr.lastSeen || e.last_seen > pr.lastSeen)) pr.lastSeen = e.last_seen;
+    for (const [b, n] of todayOf.get(e.id) || []) pr.today[b] += n;
+    pr.roles.push({ caller: `${e.kind === 'user' ? 'user/' : ''}${c.name}`, callerKind: e.kind, roleId: e.role_id, role: e.role_name, sessions: num(e.sessions_count), lastSeen: e.last_seen });
+  }
   return {
     hourStart: new Date(start).toISOString(),
     accounts: accts.map((a) => {
@@ -108,8 +125,9 @@ export async function spaceEstate(user) {
         hourly: x.hourly,
       };
     }),
-    chains: chains.rows.filter((c) => c.today > 0).map((c) => ({ from: c.src, to: c.dst, sessions: c.today, denied: num(c.denied),
-      isNew: new Date(c.first).getTime() >= start, hours: (c.hours || []).map((t) => bucketOf(t, start)).sort((m, n) => m - n) })),
+    chains: [...pairs.values()].map((x) => ({ from: x.from, to: x.to, sessions: x.sessions, today: x.today.reduce((a, b) => a + b, 0),
+      hours: x.today.map((n, b) => (n ? b : -1)).filter((b) => b >= 0), isNew: !!x.firstSeen && new Date(x.firstSeen).getTime() >= start,
+      firstSeen: x.firstSeen, lastSeen: x.lastSeen, roles: x.roles.sort((m, n) => n.sessions - m.sessions).slice(0, 12), moreRoles: Math.max(0, x.roles.length - 12) })),
     outside,
     events: ev,
   };

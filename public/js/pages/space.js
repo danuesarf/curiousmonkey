@@ -93,13 +93,13 @@ function estateModel(d) {
     return { ...s, id: `src:${s.key}`, kind: GLYPH[s.group] || 'account', risk: s.worst, ...off(deg, gap, z) };
   });
   const links = [];
-  for (const c of d.chains) if (by.has(c.from) && by.has(c.to)) links.push({ from: c.from, to: c.to, kind: c.isNew ? 'new' : 'chain', vol: Math.min(3, 1 + lg(c.sessions)), at: c.hours, sessions: c.sessions, denied: c.denied });
+  for (const c of d.chains) if (by.has(c.from) && by.has(c.to)) links.push({ ...c, kind: c.isNew ? 'new' : 'chain', vol: Math.min(3, 1 + lg(c.sessions) / 2), at: c.hours.length ? c.hours : null, denied: 0 });
   for (const s of sources) for (const t of s.targets) if (by.has(t.accountId)) links.push({ from: s.id, to: t.accountId, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges || [], roles: t.roles.length });
   links.forEach((l, i) => { l.id = `link:${i}`; });
   const name = (id) => by.get(id)?.name || 'an account';
   const events = [
     ...d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: `${name(e.accountId)}${e.roleName ? ` · ${e.roleName}` : ''}`, target: e.accountId })),
-    ...d.chains.filter((c) => c.isNew && by.has(c.from) && by.has(c.to)).map((c) => ({ id: `n${c.from}${c.to}`, kind: 'NEW PATH', tone: 'info', hour: c.hours[0] ?? 23, text: `${name(c.from)} chained into ${name(c.to)} for the first time`, where: `${c.sessions} session${c.sessions === 1 ? '' : 's'} today`, target: c.to })),
+    ...d.chains.filter((c) => c.isNew && by.has(c.from) && by.has(c.to)).map((c) => ({ id: `n${c.from}${c.to}`, kind: 'NEW PATH', tone: 'info', hour: c.hours[0] ?? 23, text: `${name(c.from)} entered ${name(c.to)} for the first time`, where: c.roles.slice(0, 2).map((r) => `${r.caller} → ${r.role}`).join(' · '), target: c.to })),
   ].sort((a, b) => b.hour - a.hour);
   return { view: 'estate', zones, groups, by, sources, hidden: d.outside.hidden, links, events, hourStart: new Date(d.hourStart).getTime(),
     defaultSel: events[0]?.target || [...groups].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
@@ -163,10 +163,13 @@ export async function spacePage(ctx) {
 
   // drag to orbit: the framing is held while dragging, then refitted
   let drag = null;
-  stage.addEventListener('pointerdown', (ev) => { drag = { x: ev.clientX, y: ev.clientY, az: st.az, el: st.el, moved: false }; stage.setPointerCapture(ev.pointerId); });
+  // the pointer is captured only once a drag has really started: capturing on press would send every click to the
+  // scene itself instead of the thing under the pointer, and nothing could be clicked
+  stage.addEventListener('pointerdown', (ev) => { if (ev.button === 0) drag = { x: ev.clientX, y: ev.clientY, az: st.az, el: st.el, moved: false, id: ev.pointerId }; });
   stage.addEventListener('pointermove', (ev) => {
     if (!drag) return; const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
     if (!drag.moved && Math.hypot(dx, dy) < 5) return;
+    if (!drag.moved) { try { stage.setPointerCapture(drag.id); } catch { /* pointer already gone */ } }
     drag.moved = true; st.dragging = true;
     const az = Math.round(drag.az - dx * 0.35), el = Math.max(18, Math.min(70, Math.round(drag.el + dy * 0.2)));
     if (az !== st.az || el !== st.el) { st.az = az; st.el = el; if (!drag.raf) drag.raf = requestAnimationFrame(() => { drag && (drag.raf = 0); render(); }); }
@@ -311,8 +314,8 @@ export async function spacePage(ctx) {
       const t = l.from === sel || l.to === sel || sel === l.id || (selRole && l.owner === selRole.id);
       const past = l.at ? l.at.some((x) => x <= hour) : true, now = l.at ? l.at.includes(hour) : false;
       let show = true, color = OUT, w = 1, o = 0.22, dash = null, cls = null, cut = 1, flow = 0, flag = null;
-      if (l.kind === 'chain') { color = ENV[a.env]?.base || OUT; w = 0.6 + 0.4 * l.vol; o = t || now ? 0.95 : 0.4; flow = t || now ? Math.round(l.vol) : 0; if (l.denied && (t || now)) flag = { text: `⚠ ${l.denied} DENIED`, bg: RED }; }
-      else if (l.kind === 'new') { show = past || t; color = '#fff'; w = 1.8; dash = '6 5'; cls = 'sp-dash'; o = now || t ? 1 : 0.5; flow = now || t ? 2 : 0; flag = { text: 'NEW PATH', bg: '#fff' }; }
+      if (l.kind === 'chain') { color = ENV[a.env]?.base || OUT; w = 0.6 + 0.4 * l.vol; o = t || now ? 0.95 : l.today ? 0.45 : 0.22; flow = t || now ? Math.max(1, Math.round(l.vol)) : 0; }
+      else if (l.kind === 'new') { show = true; color = '#fff'; w = 1.8; dash = '6 5'; cls = 'sp-dash'; o = now || t ? 1 : 0.5; flow = now || t ? 2 : 0; flag = { text: 'NEW PATH', bg: '#fff' }; }
       else if (l.kind === 'denied') { color = RED; w = 1.5; dash = '4 4'; cut = 0.72; o = t ? 1 : 0.45; flow = t ? 2 : 0; flag = { text: `⚠ ${l.denied} DENIED`, bg: RED }; }
       else if (l.kind === 'ext') { o = t ? 0.9 : 0.2; flow = t ? 1 : 0; }
       else if (l.kind === 'extWarn') { color = WARN; o = t ? 0.95 : 0.35; flow = t ? 1 : 0; if (t) flag = { text: 'LOOSE TRUST', bg: WARN }; }
@@ -437,7 +440,7 @@ export async function spacePage(ctx) {
   function linkTitle(l) {
     const a = nameOf(l.from), b = nameOf(l.to);
     if (/^ext/.test(l.kind)) return `${a} can enter ${b}${l.kind === 'extHigh' ? ' · risky trust' : l.kind === 'extWarn' ? ' · loose trust' : ''} · click for the trust statement`;
-    if (l.kind === 'chain' || l.kind === 'new') return `${a} chained into ${b} · ${l.sessions} sessions today${l.kind === 'new' ? ' · first time' : ''}`;
+    if (l.kind === 'chain' || l.kind === 'new') return `${a} entered ${b} · ${num(l.sessions)} sessions in 90 days${l.today ? ` · ${l.today} today` : ''}${l.kind === 'new' ? ' · first seen today' : ''} · click for who`;
     if (l.kind === 'denied') return `${a} → ${b} · ${l.denied} calls refused in 7 days`;
     return `${a} → ${b}`;
   }
@@ -464,10 +467,15 @@ export async function spacePage(ctx) {
         rows: rows.length ? rows : [row('Trust', s.findings.join('; ') || 'nothing flagged')],
         actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/roles/${edges[0].roleId}`]] : [])] };
     }
-    if (l.kind === 'chain' || l.kind === 'new') return { eyebrow: l.kind === 'new' ? 'ROLE CHAINING · NEW TODAY' : 'ROLE CHAINING', title: `${a} → ${b}`, sub: `${l.sessions} sessions in the last 24 h`, swatch: l.kind === 'new' ? '#fff' : ENV[M.by.get(l.from).env].base, round: true,
-      tags: [...(l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : []), ...(l.denied ? [{ t: `⚠ ${l.denied} DENIED`, c: RED }] : [])],
-      rows: [row('When', l.at.map((x) => hourLabel(x)).join(', ') + ' WIB'), row('What it means', `A session in ${a} assumed a role in ${b}.${l.kind === 'new' ? ' This pair had not been seen in the 30 days before today.' : ''}`)],
-      actions: [[`Open ${b}`, `#/space?view=account&account=${l.to}`, true], [`Open ${a}`, `#/space?view=account&account=${l.from}`]] };
+    if (l.kind === 'chain' || l.kind === 'new') {
+      const who = l.roles.slice(0, 4).map((r) => row(`${r.caller} → ${r.role}`, `${num(r.sessions)} session${r.sessions === 1 ? '' : 's'} · last ${ago(r.lastSeen)}`));
+      if (l.roles.length > 4 || l.moreRoles) who.push(row('And', `${l.roles.length - 4 + (l.moreRoles || 0)} more role pairs`));
+      const top = l.roles[0];
+      return { eyebrow: l.kind === 'new' ? 'ACCOUNT TO ACCOUNT · FIRST SEEN TODAY' : 'ACCOUNT TO ACCOUNT', title: `${a} → ${b}`, sub: `${num(l.sessions)} sessions in 90 days · last ${ago(l.lastSeen)}`, swatch: l.kind === 'new' ? '#fff' : ENV[M.by.get(l.from).env].base, round: true,
+        tags: l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : [],
+        rows: [...who, row('Today', l.today ? `${num(l.today)} session${l.today === 1 ? '' : 's'} at ${l.hours.map((x) => hourLabel(x)).join(', ')} WIB` : 'nothing today')],
+        actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ...(top ? [['Role', `#/roles/${top.roleId}`]] : [])] };
+    }
     if (l.kind === 'denied') return { eyebrow: 'REFUSED CALLS', title: `${a} → ${b}`, sub: '7 days', swatch: RED, round: true, tags: [{ t: `⚠ ${num(l.denied)} DENIED`, c: RED }],
       rows: [row('What it means', `${num(l.denied)} calls from ${a} to ${b} were refused by IAM. A missing permission, or something trying what it should not.`, 'bad')], actions: [['Open role', `#/roles/${l.from}`, true]] };
     if (l.kind === 'in' || l.kind === 'out') return { eyebrow: 'ROLE CHAINING · 7 DAYS', title: `${a} → ${b}`, sub: 'between this account and a neighbour', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
@@ -487,11 +495,12 @@ export async function spacePage(ctx) {
         const look = M.events.find((e) => e.target === g.id);
         const ins = M.links.filter((l) => l.to === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => `${M.by.get(l.from).name}${l.kind === 'new' ? ' (new)' : ''}`);
         const outs = M.links.filter((l) => l.from === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => M.by.get(l.to).name);
+        const none = 'no other account in 90 days';
         const today = g.hourly.reduce((s, x) => s + x.sessions, 0);
         return { eyebrow: `ACCOUNT · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base,
-          tags: [...(g.high ? [tag(`${g.high} HIGH`, RED)] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
+          tags: [...(g.high ? [{ t: `⚠ ${g.high} HIGH-RISK ROLE${g.high === 1 ? '' : 'S'}`, c: RED, href: `#/roles?accounts=${g.id}&risks=High` }] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
           rows: [row('Roles', `${g.roles} · ${g.active} called · ${g.cold} never called`), row('Calls', `${kfmt(g.calls7)} in 7 days · ${today} sessions today`),
-            ...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [row('Entered from', ins.length ? ins.join(', ') : 'no other account today'), row('Reaches', outs.length ? outs.join(', ') : 'no other account today')])],
+            ...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [row('Entered from', ins.length ? ins.join(', ') : none), row('Reaches', outs.length ? outs.join(', ') : none)])],
           actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
@@ -510,7 +519,7 @@ export async function spacePage(ctx) {
       const callers = M.sources.filter((x) => x.targets.some((t) => t.roles.includes(r.id))).map((x) => x.label);
       const chained = M.fars.flatMap((n) => n.links.filter((l) => l.roleId === r.id).map((l) => `${l.dir === 'in' ? 'from' : 'into'} ${n.name} · ${l.otherRole}`));
       return { eyebrow: `ROLE · ${r.cluster.label.toUpperCase()}`, title: r.name, sub: `${M.account.name} · ${M.account.awsAccountId}`, swatch: ENV[r.cluster.env].base, round: true,
-        tags: [...(r.risk === 'High' ? [tag('HIGH', RED)] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
+        tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/roles/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
         rows: [row('Calls', `${kfmt(r.calls7)} in 7 days · into ${r.services.map((x) => x.name).join(', ') || 'nothing'}`),
           row('Entered by', [...callers, ...chained].join(', ') || 'only callers inside this account'),
           ...(r.denied7 ? [row('Look at', `${num(r.denied7)} calls refused in 7 days: ${r.services.filter((x) => x.denied).map((x) => `${x.name} ×${x.denied}`).join(', ')}`, 'bad')] : [])],
@@ -532,7 +541,7 @@ export async function spacePage(ctx) {
     const el = h('div', { class: 'sp-card', role: 'dialog', 'aria-label': b.title, style: pos },
       h('div', { class: 'sp-card-head' },
         h('div', { class: 'sp-card-titles' },
-          h('div', { class: 'sp-eyebrow' }, h('span', null, b.eyebrow), ...b.tags.map((t) => h('span', { class: 'sp-tag', style: `color:${t.c};border-color:${t.c}` }, t.t))),
+          h('div', { class: 'sp-eyebrow' }, h('span', null, b.eyebrow), ...b.tags.map((t) => t.href ? h('a', { class: 'sp-tag sp-tag-link', href: t.href, title: 'Show them', style: `color:${t.c};border-color:${t.c}` }, `${t.t} →`) : h('span', { class: 'sp-tag', style: `color:${t.c};border-color:${t.c}` }, t.t))),
           h('div', { class: 'sp-card-title' }, h('span', { class: 'sp-swatch', style: `background:${b.swatch}${b.round ? ';border-radius:50%' : ''}` }), h('b', null, b.title)),
           h('span', { class: 'sp-card-sub' }, b.sub)),
         h('button', { class: 'sp-x', 'aria-label': 'Close', onClick: () => set({ sel: null }) }, '×')),
@@ -586,7 +595,8 @@ export async function spacePage(ctx) {
       ...(M.groups.some((g) => g.planned) ? [[sw('width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px dashed #d5dceb'), 'Dashed empty ring: planned, not onboarded yet']] : []),
       [sw(`width:30px;height:10px;border-radius:50%;background:radial-gradient(${ENV.production.base},transparent 70%)`), 'Glow under a ring: calls in the hour you picked'],
       [sw('width:10px;height:10px;margin:0 10px;background:#d5dceb;transform:rotate(45deg)'), 'White shapes off the plane are outside your org. Close and low = risky trust, far and high = pinned'],
-      [sw('width:30px;border-top:2px dashed #fff'), 'White dashed path: role chaining first seen today'],
+      [sw('width:30px;border-top:2px solid #4b95f0'), 'Path between accounts: a role or user in one entered a role in the other (90 days). Bright in the hours it happened'],
+      [sw('width:30px;border-top:2px dashed #fff'), 'White dashed path: first seen today'],
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],
     ] : [
       [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), `The plane is one account: ${M.account.name}`],

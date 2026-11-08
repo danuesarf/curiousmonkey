@@ -43,6 +43,14 @@ before(async () => {
   await sess(A, R.api, 'ASIAA3', hoursAgo(5), 50);
   await sess(B, R.release, 'ASIAB3', hoursAgo(5), 2, 'ASIAA3', 1);
   await db.query(`INSERT INTO changes(account_id, role_id, kind, severity, title, dedupe, at) VALUES ($1,$2,'denied','warn','kms:Decrypt refused','d1',$3)`, [A, R.api, hoursAgo(1)]);
+  // who entered whom: staging's release role entered production's deploy role for the first time two hours ago;
+  // production's payments-api has entered staging's release role for ten days
+  const entered = async (role, key, display, first, last, n) => (await db.query(
+    `INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen, sessions_count) VALUES ($1,$2,'role',$3,'sts:AssumeRole',$4,$5,$6) RETURNING id`, [role, key, display, first, last, n])).rows[0].id;
+  const up = await entered(R.deploy, 'role:222222222222:release', 'role/release (222222222222)', hoursAgo(2), hoursAgo(2), 1);
+  const down = await entered(R.release, 'role:111111111111:payments-api', 'role/payments-api (111111111111)', hoursAgo(240), hoursAgo(5), 11);
+  await entered(R.api, 'role:999999999999:vendor', 'role/vendor (999999999999)', hoursAgo(5), hoursAgo(5), 2);   // not in the org: not an account-to-account path
+  await db.query(`INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at) VALUES ('ASIAA1',$1,$2,$3),('ASIAB3',$4,$5,$6)`, [R.deploy, up, hoursAgo(2), R.release, down, hoursAgo(5)]);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 
@@ -58,12 +66,13 @@ test('the estate: accounts by environment, stars for active roles, the hours the
   assert.equal(a.hourly[21].calls + a.hourly[22].calls, 12);              // two hours ago
 });
 
-test('role chaining across accounts: a pair seen for the first time today is new', async () => {
+test('account to account: every entry recorded between your accounts, new when first seen today', async () => {
   const s = await api.spaceEstate(owner);
+  assert.equal(s.chains.length, 2);
   const up = s.chains.find((c) => c.from === B && c.to === A), down = s.chains.find((c) => c.from === A && c.to === B);
-  assert.equal(up.isNew, true); assert.equal(up.sessions, 1);
-  assert.equal(down.isNew, false); assert.equal(down.sessions, 1); assert.equal(down.denied, 1);
-  assert.equal(up.hours.length, 1);
+  assert.equal(up.isNew, true); assert.deepEqual(up.roles.map((r) => [r.caller, r.role]), [['release', 'deploy']]);
+  assert.equal(up.today, 1); assert.equal(up.hours.length, 1);
+  assert.equal(down.isNew, false); assert.equal(down.sessions, 11); assert.equal(down.today, 1);
 });
 
 test('identities outside the org come from trust policies, the worst first', async () => {
