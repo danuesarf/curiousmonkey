@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import v8 from 'node:v8';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { parserCount } from './scanner/decode.js';
 
 const read = (p) => { try { return fs.readFileSync(p, 'utf8').trim(); } catch { return null; } };
 const num = (v) => (v == null || v === '' || v === 'max' || !Number.isFinite(Number(v)) || Number(v) > 2 ** 60 ? null : Number(v));
@@ -30,7 +31,7 @@ export function runtime(concurrency) {
   const cg = cgroup();
   return { node: process.version, platform: `${os.platform()} ${os.arch()}`, pid: process.pid, hostCores: os.cpus().length,
     availableCores: os.availableParallelism?.() ?? os.cpus().length, cpuLimit: cg.cpuLimit, memLimit: cg.memLimit, hostMemory: os.totalmem(),
-    heapLimit: v8.getHeapStatistics().heap_size_limit, cgroup: cg.version, concurrency,
+    heapLimit: v8.getHeapStatistics().heap_size_limit, cgroup: cg.version, concurrency, parserThreads: parserCount(),
     nodeOptions: (process.env.NODE_OPTIONS || '').replace(/--require\s+\S+/g, '').trim() || null };
 }
 

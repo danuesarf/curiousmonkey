@@ -217,19 +217,25 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
         [accountId, H.map((x) => x.role.id), H.map((x) => x.key), H.map((x) => resolve(x.pr)), H.map((x) => x.e.sessionName || null), H.map((x) => x.e.ip), H.map((x) => x.e.userAgent), H.map((x) => x.e.time)]);
       for (const x of r.rows) sessionId.set(x.access_key_id, x.id);
     }
+    // duplicates were removed before this point, so every row counts; the session tallies are worked out here
+    // instead of being sent back by the database
     const tally = new Map();
     for (const part of chunks(callRows)) {
-      const r = await c.query(
+      await c.query(
         `INSERT INTO track_calls(session_id, event_id, at, action, event_source, event_name, resources, denied, error_code, child_key_id)
          SELECT s, ev, t, a, src, nm, CASE WHEN res = '' THEN '{}'::text[] ELSE string_to_array(res, chr(31)) END, d, ec, ck
            FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[], $8::bool[], $9::text[], $10::text[]) AS u(s, ev, t, a, src, nm, res, d, ec, ck)
-         ON CONFLICT DO NOTHING RETURNING session_id, at, denied`,
+         ON CONFLICT DO NOTHING`,
         [part.map((x) => sessionId.get(x.key)), part.map((x) => x.e.id), part.map((x) => x.e.time), part.map((x) => x.action), part.map((x) => x.e.eventSource || 'sts.amazonaws.com'),
          part.map((x) => x.e.eventName), part.map((x) => x.resources.join('\u001f')), part.map((x) => !!x.e.denied), part.map((x) => x.e.errorCode), part.map((x) => x.childKey || null)]);
-      for (const x of r.rows) {
-        const t = tally.get(x.session_id) || { n: 0, denied: 0, last: x.at };
-        t.n++; if (x.denied) t.denied++; if (x.at > t.last) t.last = x.at; tally.set(x.session_id, t);
-      }
+    }
+    const once = new Set();
+    for (const x of callRows) {
+      const sid = sessionId.get(x.key), k = `${sid}|${x.e.id}`;
+      if (once.has(k)) continue;                       // the same event twice in one session (it cannot be stored twice)
+      once.add(k);
+      const t = tally.get(sid) || { n: 0, denied: 0, last: x.e.time };
+      t.n++; if (x.e.denied) t.denied++; if (x.e.time > t.last) t.last = x.e.time; tally.set(sid, t);
     }
     if (tally.size) {
       const T = [...tally.entries()];

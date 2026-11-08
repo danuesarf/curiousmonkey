@@ -25,3 +25,20 @@ test('an empty or record-less file yields nothing; a corrupt one rejects', async
   assert.equal(await streamRecords(Readable.from([gzipSync(Buffer.from('{"Records":[]}'))]), () => {}), 0);
   await assert.rejects(streamRecords(Readable.from([Buffer.from('not gzip')]), () => {}));
 });
+
+test('parser threads return exactly what parsing on the main thread does, small pooled buffers included', async () => {
+  process.env.TRAIL_PARSERS = '2';
+  const { decodeInline, decodeTrailFile, closeDecoders } = await import('../src/scanner/decode.js');
+  const small = gzipSync(Buffer.from(JSON.stringify({ Records: recs.slice(0, 3) })));       // < 4 KB: Node hands out a slice of a shared pool
+  const pooled = Buffer.from(small);
+  const [a, b, c] = await Promise.all([decodeTrailFile(Buffer.from(file)), decodeTrailFile(pooled), decodeTrailFile(Buffer.from(file))]);
+  const ref = await decodeInline(file);
+  assert.equal(a.length, recs.length);
+  assert.deepEqual(a, ref); assert.deepEqual(c, ref);
+  assert.deepEqual(b, await decodeInline(small));
+  assert.equal(pooled.length, small.length);                                                 // the caller's buffer is not detached
+  await assert.rejects(decodeTrailFile(Buffer.from('not gzip')));
+  assert.equal((await decodeTrailFile(Buffer.from(file))).length, recs.length);              // still working after an error
+  await closeDecoders();
+  delete process.env.TRAIL_PARSERS;
+});

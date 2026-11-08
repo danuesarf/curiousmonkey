@@ -92,6 +92,7 @@ function workerCard(w, range) {
           h('dt', null, 'Heap limit'), h('dd', null, bytes(rt.heapLimit), rt.nodeOptions ? h('span', { class: 'mono tiny muted' }, ` NODE_OPTIONS=${rt.nodeOptions}`) : h('span', { class: 'tiny muted' }, ' (Node default)')),
           h('dt', null, 'Container'), h('dd', null, rt.cgroup ? `cgroup v${rt.cgroup} · memory ${bytes(rt.memLimit) || 'unlimited'} · CPU ${rt.cpuLimit ?? 'unlimited'}` : 'not in a container'),
           h('dt', null, 'Host'), h('dd', null, `${rt.hostCores} cores · ${bytes(rt.hostMemory)}`),
+          h('dt', null, 'Trail parsing'), h('dd', null, rt.parserThreads ? `${rt.parserThreads} parser thread${rt.parserThreads > 1 ? 's' : ''}` : 'on the main thread (fewer than 4 cores)'),
           h('dt', null, 'AWS identity'), h('dd', { class: 'mono tiny' }, w.aws_identity?.arn || w.aws_identity?.error || '—'),
           h('dt', null, 'Started'), h('dd', null, fmtDate(w.started_at))))));
 }
