@@ -36,7 +36,7 @@ export async function workersPage(ctx) {
       ...alive.map((w) => workerCard(w, range)),
       !alive.length && h('div', { class: 'alert bad' }, 'No worker has checked in in the last minute.'),
       readingCard(d.reading, d.settings),
-      gone.length > 0 && restartsCard(gone),
+      gone.length > 0 && restartsCard(gone, draw),
       d.failures.length > 0 && h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Failures in the last 24 hours')),
         h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Error', 'Jobs', 'Last'].map((x) => h('th', null, x)))),
           h('tbody', null, d.failures.map((f) => h('tr', null, h('td', { class: 'mono small err' }, f.error || '—'), h('td', null, f.n), h('td', null, ago(f.last))))))));
@@ -178,9 +178,20 @@ function readingCard(rows, settings) {
     other.length > 0 && h('p', { class: 'small muted card-b' }, `Also ${other.length} other job${other.length > 1 ? 's' : ''} (inventory, advisor, analyze) running or waiting.`));
 }
 
-function restartsCard(gone) {
-  return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Workers that ended, last 24 hours'),
-    h('p', { class: 'muted small' }, 'A worker that stopped heartbeating without shutting down is “lost”. If its last sample had the heap or container memory near the limit, it is marked as likely out of memory.'))),
+// Unexpected ends (lost, likely out of memory) by default; clean stops from deploys only on request, 20 at a time.
+const endedView = { clean: false, shown: 20 };
+function restartsCard(all, redraw) {
+  const bad = all.filter((w) => w.end_reason && w.end_reason !== 'stopped'), clean = all.length - bad.length;
+  const list = endedView.clean ? all : bad;
+  const gone = list.slice(0, endedView.shown);
+  const controls = h('div', { class: 'row' },
+    clean > 0 && h('button', { class: 'btn sm', 'aria-pressed': String(endedView.clean), onClick: () => { endedView.clean = !endedView.clean; endedView.shown = 20; redraw(); } },
+      endedView.clean ? 'Hide clean stops' : `Also show ${clean} clean stop${clean === 1 ? '' : 's'}`),
+    list.length > endedView.shown && h('button', { class: 'btn sm', onClick: () => { endedView.shown += 20; redraw(); } }, `Show ${Math.min(20, list.length - endedView.shown)} more of ${list.length - endedView.shown}`));
+  if (!list.length) return h('section', { class: 'card' }, h('div', { class: 'card-h row' }, h('div', null, h('h2', null, 'Workers that ended, last 24 hours'),
+    h('p', { class: 'muted small' }, `None ended unexpectedly. ${clean} stopped cleanly (a deploy or a scale-down).`)), h('span', { class: 'grow' }), controls));
+  return h('section', { class: 'card' }, h('div', { class: 'card-h row' }, h('div', null, h('h2', null, `Workers that ended, last 24 hours · ${bad.length} unexpectedly`),
+    h('p', { class: 'muted small' }, 'A worker that stopped heartbeating without shutting down is “lost”. If its last sample had the heap or container memory near the limit, it is marked as likely out of memory.')), h('span', { class: 'grow' }), controls),
     h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Worker', 'Ran', 'Ended', 'Reason', 'Heap at the end', 'Container memory at the end', 'Jobs'].map((x) => h('th', null, x)))),
       h('tbody', null, gone.map((w) => {
         const t = w.telemetry || {};
