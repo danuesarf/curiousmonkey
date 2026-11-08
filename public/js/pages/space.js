@@ -25,6 +25,7 @@ const ORDER = ['production', 'shared', 'staging', 'development', 'sandbox'];   /
 const RED = '#ff5a4f', WARN = '#fab219', COLD = '#7a8780', OUT = '#c3cbd9';
 const TONE = { high: RED, warn: WARN, info: '#ffffff', good: '#6fe3b0', medium: WARN, low: '#d5dceb' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
+const CM = '#c79a6b', CM_ID = 'cm';                 // Curious Monkey, this portal's own scanner: its own colour and shape
 const GLYPH = { oidc: 'oidc', saml: 'saml', 'external-account': 'account', public: 'web' };
 
 const f = (n) => Math.round(n * 10) / 10;
@@ -46,6 +47,7 @@ function glyph(kind, x, y, s) {
   if (kind === 'oidc') return `M${ring(6, 0).join(' L')} Z`;
   if (kind === 'saml') return `M${ring(4, -Math.PI / 2).join(' L')} Z`;
   if (kind === 'web') return `M${ring(3, -Math.PI / 2).join(' L')} Z`;
+  if (kind === 'monkey') { const e = s * 0.45, c = (cx, cy, r) => `M${f(cx - r)} ${f(cy)} a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0 a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0 Z`; return `${c(x, y, s)} ${c(x - s * 0.95, y - s * 0.35, e)} ${c(x + s * 0.95, y - s * 0.35, e)}`; }
   if (kind === 'service') return `M${ring(6, Math.PI / 6).join(' L')} Z`;
   return `M${f(x - s)} ${f(y)} a${f(s)} ${f(s)} 0 1 0 ${f(2 * s)} 0 a${f(s)} ${f(s)} 0 1 0 ${f(-2 * s)} 0 Z`;
 }
@@ -97,13 +99,21 @@ function estateModel(d) {
   const links = [];
   for (const c of d.chains) if (by.has(c.from) && by.has(c.to)) links.push({ ...c, kind: c.isNew ? 'new' : 'chain', vol: Math.min(3, 1 + lg(c.sessions) / 2), at: c.hours.length ? c.hours : null, denied: 0 });
   for (const s of sources) for (const t of s.targets) if (by.has(t.accountId)) links.push({ from: s.id, to: t.accountId, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges || [], roles: t.roles.length });
+  // Curious Monkey floats above the account its identity lives in (or off the plane when that one is not connected),
+  // one dotted path to the scanner role in every account it reads
+  let scanner = null;
+  if (d.scanner) {
+    const home = by.get(d.scanner.homeAccountId);
+    scanner = { ...d.scanner, id: CM_ID, ...(home ? { x: home.x, y: home.y, z: 190 } : off(350, 110, 170)), home: home?.id || null };
+    for (const t of d.scanner.targets) if (by.has(t.accountId)) links.push({ from: CM_ID, to: t.accountId, kind: 'scan', vol: 1, at: t.hours, target: t });
+  }
   links.forEach((l, i) => { l.id = `link:${i}`; });
   const name = (id) => by.get(id)?.name || 'an account';
   const events = [
     ...d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: `${name(e.accountId)}${e.roleName ? ` · ${e.roleName}` : ''}`, target: e.accountId })),
     ...d.chains.filter((c) => c.isNew && by.has(c.from) && by.has(c.to)).map((c) => ({ id: `n${c.from}${c.to}`, kind: 'NEW PATH', tone: 'info', hour: c.hours[0] ?? 23, text: `${name(c.from)} entered ${name(c.to)} for the first time`, where: c.roles.slice(0, 2).map((r) => `${r.caller} → ${r.role}`).join(' · '), target: c.to })),
   ].sort((a, b) => b.hour - a.hour);
-  return { view: 'estate', zones, groups, by, sources, hidden: d.outside.hidden, links, events, hourStart: new Date(d.hourStart).getTime(),
+  return { view: 'estate', zones, groups, by, sources, scanner, hidden: d.outside.hidden, links, events, hourStart: new Date(d.hourStart).getTime(),
     defaultSel: events[0]?.target || [...groups].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
 }
 
@@ -142,11 +152,16 @@ function accountModel(d) {
     links.push({ from: s.id, to: g.id, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, edges: s.targets.flatMap((t) => t.edges || []), roles: g.roles.length });
     for (const id of g.roles) if (byRole.has(id)) links.push({ from: g.id, to: id, kind: 'fan', src: s.id, risk: s.worst, vol: 1 });
   }
+  let scanner = null;
+  if (d.scanner) {
+    scanner = { ...d.scanner, id: CM_ID, ...off(8, 100, 170) };
+    for (const t of d.scanner.targets) if (byRole.has(t.roleId)) links.push({ from: CM_ID, to: t.roleId, kind: 'scan', vol: 1, at: t.hours, target: t });
+  }
   for (const n of fars) for (const l of n.links) if (byRole.has(l.roleId)) links.push(l.dir === 'in' ? { from: `far:${n.id}`, to: l.roleId, kind: 'in', vol: 2 } : { from: l.roleId, to: `far:${n.id}`, kind: 'out', vol: 2 });
   links.forEach((l, i) => { l.id = `link:${i}`; });
   const events = d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
   for (const t of towers) t.denied = roles.reduce((n, r) => n + (r.services.find((v) => v.name === t.name)?.denied || 0), 0);
-  return { view: 'account', account: d.account, zones: [], groups, roles, byRole, towers, gates, rim, sources, fars, links, events, hidden: d.outside.hidden,
+  return { view: 'account', account: d.account, zones: [], groups, roles, byRole, towers, gates, rim, sources, scanner, fars, links, events, hidden: d.outside.hidden,
     coldCount: d.coldCount, roleCount: d.roleCount, hourStart: new Date(d.hourStart).getTime(),
     defaultSel: events.find((e) => e.target)?.target || [...roles].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
 }
@@ -219,10 +234,12 @@ export async function spacePage(ctx) {
     const ent = new Map();
     for (const g of M.groups) ent.set(g.id, { p3: [g.x, g.y, 22], env: g.env });
     for (const s of M.sources) ent.set(s.id, { p3: [s.x, s.y, s.z], env: 'outer' });
+    if (M.scanner) ent.set(CM_ID, { p3: [M.scanner.x, M.scanner.y, M.scanner.z], env: 'scanner' });
     if (M.view === 'account') { for (const t of M.towers) ent.set(t.id, { p3: [t.x, t.y, t.h], env: 'svc' }); for (const r of M.roles) ent.set(r.id, { p3: [r.x, r.y, r.z], env: r.cluster.env }); for (const n of M.fars) ent.set(`far:${n.id}`, { p3: [n.x, n.y, 8], env: n.env }); for (const g of M.gates) ent.set(g.id, { p3: [g.x, g.y, 4], env: 'outer' }); }
-    const liftOf = (l, a, b) => (l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
+    const liftOf = (l, a, b) => (l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
     const fitPts = [[-560, -380, 0], [560, -380, 0], [560, 380, 0], [-560, 380, 0], [0, -440, 0], ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0]]), ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
     if (M.view === 'estate') fitPts.push([-760, 0, 0], [760, 0, 0]);
+    if (M.scanner) fitPts.push([M.scanner.x, M.scanner.y, M.scanner.z + 20]);
     for (const l of M.links) { const a = ent.get(l.from), b = ent.get(l.to); if (a && b) fitPts.push(apex3(a.p3, b.p3, l.from < l.to ? 1 : -1, liftOf(l, a.p3, b.p3))); }
     const P = camera(fitPts), ref = (st.fit.F * st.zoom) / st.fit.D, sinEl = Math.sin((st.el * Math.PI) / 180);
     const path = (pts) => `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')}`;
@@ -340,6 +357,7 @@ export async function spacePage(ctx) {
       else if (l.kind === 'extHigh') { color = RED; w = 1.4; o = t ? 1 : 0.5; flow = t ? 1 : 0; if (t) flag = { text: '⚠ RISKY TRUST', bg: RED }; }
       else if (l.kind === 'use') { color = ENV[a.env].base; w = 0.5 + 1.6 * l.vol; o = selRole ? 0.12 : 0.28; }
       else if (l.kind === 'use1') { show = t; color = ENV[a.env].hot; w = 1.4; o = 0.95; flow = 1; }
+      else if (l.kind === 'scan') { color = CM; w = 1.1; dash = '1.5 4'; o = t || now ? 0.95 : 0.3; flow = now ? 1 : 0; }
       else if (l.kind === 'in' || l.kind === 'out') { color = ENV[(ent.get(l.kind === 'in' ? l.from : l.to)).env]?.base || OUT; w = 1.3; o = t ? 0.95 : 0.45; flow = t ? 2 : 1; }
       if (!show) continue;
       if (focus && focus !== 'outer' && a.env !== focus && b.env !== focus) o *= 0.25;
@@ -385,6 +403,25 @@ export async function spacePage(ctx) {
         svg('text', { x: f(lx), y: f(ly), 'text-anchor': anchor, fill: '#e6ebf4', class: 'sp-name' }, s.label),
         svg('text', { x: f(lx), y: f(ly + 13), 'text-anchor': anchor, fill: s.risk === 'high' ? '#ffb0a6' : '#a9b4c6', class: 'sp-small' }, s.sub)));
     }
+    if (M.scanner) {
+      const sc = M.scanner, p = P(sc.x, sc.y, sc.z), g0 = P(sc.x, sc.y, 0), on = sel === CM_ID, today = sc.targets.filter((t) => t.hours.includes(hour)).length;
+      tops.set(CM_ID, p);
+      const label = 'Curious Monkey', sub = `this portal's scanner · ${sc.targets.length} account${sc.targets.length === 1 ? '' : 's'}`;
+      const w = Math.max(label.length * 6.7, sub.length * 6.15) + 4;
+      const tries = [['start', p[0] + 18, p[1] - 2], ['end', p[0] - 18, p[1] - 2], ['middle', p[0], p[1] - 30]];
+      let pl = tries[0];
+      for (const tr of tries) { const x0 = tr[0] === 'start' ? tr[1] : tr[0] === 'end' ? tr[1] - w : tr[1] - w / 2, r = [x0, tr[2] - 11, x0 + w, tr[2] + 17]; if (fits(r)) { pl = tr; blocks.push(r); break; } }
+      blocks.push([p[0] - 16, p[1] - 16, p[0] + 16, p[1] + 16]);
+      if (on) out.marks.push(svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 17, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
+      out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(CM_ID), opacity: focus ? 0.4 : 1 },
+        svg('title', null, `Curious Monkey · this portal's scanner${today ? ` · reading ${today} account${today === 1 ? '' : 's'} in this hour` : ''} · click for where it reads`),
+        svg('line', { x1: f(p[0]), y1: f(p[1]), x2: f(g0[0]), y2: f(g0[1]), stroke: CM, 'stroke-width': 0.8, 'stroke-dasharray': '1.5 3.5', opacity: 0.7 }),
+        svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 16, fill: '#000', opacity: 0 }),
+        svg('path', { d: glyph('monkey', p[0], p[1], 7), fill: CM, stroke: '#fff', 'stroke-width': 0.8, filter: 'url(#sp-glow)' }),
+        today ? svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 13, fill: 'none', stroke: CM, 'stroke-width': 1.2, class: 'sp-pulse' }) : null,
+        svg('text', { x: f(pl[1]), y: f(pl[2]), 'text-anchor': pl[0], fill: '#f3e3d0', class: 'sp-name' }, label),
+        svg('text', { x: f(pl[1]), y: f(pl[2] + 13), 'text-anchor': pl[0], fill: '#c9b39b', class: 'sp-small' }, sub)));
+    }
     for (const c of flagC.sort((a, x) => x.pr - a.pr)) {
       const bw = Math.round(c.text.length * 6.3 + 14);
       for (const [dx, dy] of [[0, -22], [bw / 2 + 12, -14], [-bw / 2 - 12, -14], [0, 22], [0, -44]]) {
@@ -427,6 +464,7 @@ export async function spacePage(ctx) {
   // ---------- the card ----------
   function nameOf(id) {
     if (M.view === 'estate' && M.by.has(id)) return M.by.get(id).name;
+    if (id === CM_ID) return 'Curious Monkey';
     const s = M.sources.find((x) => x.id === id); if (s) return s.label;
     if (M.view === 'account') {
       if (M.byRole.has(id)) return M.byRole.get(id).name;
@@ -441,6 +479,7 @@ export async function spacePage(ctx) {
     if (/^ext/.test(l.kind)) return `${a} can enter ${b}${l.kind === 'extHigh' ? ' · risky trust' : l.kind === 'extWarn' ? ' · loose trust' : ''} · click for the trust statement`;
     if (l.kind === 'chain' || l.kind === 'new') return `${a} entered ${b} · ${num(l.sessions)} sessions in 90 days${l.today ? ` · ${l.today} today` : ''}${l.kind === 'new' ? ' · first seen today' : ''} · click for who`;
     if (l.kind === 'denied') return `${a} → ${b} · ${l.denied} calls refused in 7 days`;
+    if (l.kind === 'scan') return `Curious Monkey reads ${b} through ${pretty(l.target.role).label} · ${num(l.target.sessions)} sign-ins in 90 days · click for more`;
     return `${a} → ${b}`;
   }
   const clip = (t, n = 170) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
@@ -466,6 +505,13 @@ export async function spacePage(ctx) {
         lists: edges.length > 1 ? [{ title: 'Roles it can enter', items: roleItems(edges, []) }] : [],
         actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/roles/${edges[0].roleId}`]] : [])] };
     }
+    if (l.kind === 'scan') {
+      const t = l.target, acct = M.view === 'estate' ? M.by.get(t.accountId) : M.account;
+      return { eyebrow: 'CURIOUS MONKEY · SCANNER', title: `Curious Monkey → ${acct?.name || b}`, sub: `reads it through ${t.role}`, swatch: CM, round: true, tags: [],
+        rows: [row('Scanner role', t.role), row('Signed in', t.sessions ? `${num(t.sessions)} times in 90 days, last ${ago(t.lastSeen)}` : 'not seen in CloudTrail yet'),
+          row('Today', t.hours.length ? t.hours.map(hourLabel).join(', ') : 'no sign-in in the last 24 h'), row('Last scan', t.lastScan ? ago(t.lastScan) : 'never')],
+        actions: [['Open role', `#/roles/${t.roleId}`, true], ['Its calls', `#/events?account=${t.accountId}&role=${t.roleId}&range=24h`]] };
+    }
     if (l.kind === 'chain' || l.kind === 'new') {
       const who = [];
       if (l.moreRoles) who.push(row('And', `${l.moreRoles} more role pairs not listed`));
@@ -486,6 +532,17 @@ export async function spacePage(ctx) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
     const tag = (t, c) => ({ t, c });
     if (id?.startsWith('link:')) { const l = M.links.find((x) => x.id === id); return l ? linkDetail(l) : null; }
+    if (id === CM_ID && M.scanner) {
+      const sc = M.scanner, acctName = (aid) => (M.view === 'estate' ? M.by.get(aid)?.name : M.account.name) || 'an account';
+      const linkOf = (t) => M.links.find((l) => l.kind === 'scan' && l.target === t)?.id || null;
+      const home = M.view === 'estate' && sc.home ? M.by.get(sc.home).name : null;
+      return { eyebrow: "CURIOUS MONKEY · THIS PORTAL'S SCANNER", title: 'Curious Monkey', sub: home ? `runs as an identity in ${home}` : sc.homeAws ? `runs as an identity in ${sc.homeAws}` : 'the workers that scan your accounts', swatch: CM, round: true, tags: [],
+        rows: [...sc.identities.slice(0, 3).map((x) => row('Identity', x.replace(/^arn:aws[a-z-]*:iam::/, ''))),
+          row('Signs in to', `${sc.targets.length} account${sc.targets.length === 1 ? '' : 's'}`),
+          row('This hour', `${sc.targets.filter((t) => t.hours.includes(st.hour)).length} of them`)],
+        lists: [{ title: 'Where it reads', items: [...sc.targets].sort((a, b) => b.sessions - a.sessions).map((t) => ({ label: acctName(t.accountId), meta: `${pretty(t.role).label} · ${t.sessions ? `last ${ago(t.lastSeen)}` : 'no sign-in seen yet'}`, value: num(t.sessions), pick: linkOf(t), href: linkOf(t) ? null : `#/roles/${t.roleId}` })), empty: 'no scanner role found' }],
+        actions: [['Workers', '#/workers', true], ['Accounts', '#/accounts']] };
+    }
     if (M.view === 'estate') {
       const g = M.by.get(id);
       if (g?.planned) return { eyebrow: `PLANNED · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base, tags: [tag('NOT ONBOARDED', '#d5dceb')],
@@ -523,6 +580,8 @@ export async function spacePage(ctx) {
     if (r) {
       const p = pretty(r.name);
       const callers = M.sources.filter((x) => x.targets.some((t) => t.roles.includes(r.id))).map((x) => ({ label: x.label, meta: x.sub, tone: x.risk === 'high' ? 'bad' : null, pick: x.id }));
+      const cmT = M.scanner?.targets.find((t) => t.roleId === r.id);
+      if (cmT) callers.unshift({ label: 'Curious Monkey', meta: `this portal's scanner · last ${ago(cmT.lastSeen)}`, value: num(cmT.sessions), pick: CM_ID });
       const chained = M.fars.flatMap((n) => n.links.filter((l) => l.roleId === r.id).map((l) => ({ label: `${n.name} · ${l.otherRole}`, meta: l.dir === 'in' ? 'chains in' : 'it chains out to', value: `${l.sessions}`, pick: `far:${n.id}` })));
       return { eyebrow: `ROLE · ${r.cluster.label.toUpperCase()}`, title: p.label, sub: p.kind ? `${p.kind} · ${r.name}` : `${M.account.name} · ${M.account.awsAccountId}`, swatch: ENV[r.cluster.env].base, round: true,
         tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/roles/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
@@ -635,6 +694,7 @@ export async function spacePage(ctx) {
       [sw('width:10px;height:10px;margin:0 10px;background:#d5dceb;transform:rotate(45deg)'), 'White shapes off the plane are outside your org. Close and low = risky trust, far and high = pinned'],
       [sw('width:30px;border-top:2px solid #4b95f0'), 'Path between accounts: a role or user in one entered a role in the other (90 days). Bright in the hours it happened'],
       [sw('width:30px;border-top:2px dashed #fff'), 'White dashed path: first seen today'],
+      ...(M.scanner ? [[sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;background:${CM}`), 'Curious Monkey: this portal. Its dotted paths are the scanner signing in to each account, kept apart from account-to-account paths']] : []),
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],
     ] : [
       [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), `The plane is one account: ${M.account.name}`],
@@ -643,6 +703,7 @@ export async function spacePage(ctx) {
       [sw('width:6px;height:6px;margin:0 12px;border-radius:50%;background:#8d9a93'), 'Grey dots round the edge: roles never called'],
       [sw(`width:30px;border-top:2px solid ${ENV[M.account.environment].base}`), 'Thin paths: which services each ring calls. Click a role for its own'],
       [sw('width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid #9cc7b4'), 'Rings past the edge: accounts that chain in or out'],
+      ...(M.scanner ? [[sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;background:${CM}`), 'Curious Monkey: this portal, signing in to its scanner role here']] : []),
       [sw('width:10px;height:10px;margin:0 10px;border:1.5px solid #d5dceb;transform:rotate(45deg)'), 'Diamond at the edge: where an identity from outside comes in. The number is how many roles it can enter; click it for the list'],
       [sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid ${RED}`), 'Red ring on a service: calls to it were refused this week'],
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],

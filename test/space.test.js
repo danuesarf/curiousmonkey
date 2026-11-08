@@ -95,3 +95,27 @@ test('one account: roles clustered by the service they call most, services as to
   assert.deepEqual(s.neighbours.map((n) => [n.name, n.links.map((l) => l.dir).sort()]), [['payments-stg', ['in', 'out']]]);
   assert.equal(await api.spaceAccount({ id: 'x', scope_accounts: [B] }, A), null);
 });
+
+test('Curious Monkey is its own identity: its sign-ins to the scanner roles are not account-to-account paths', async () => {
+  const scan = async (acc, aws) => {
+    const arn = `arn:aws:iam::${aws}:role/CuriousMonkeyScanner`;
+    await db.query('UPDATE cloud_accounts SET role_arn=$2, last_scan_at=now() WHERE id=$1', [acc, arn]);
+    return (await db.query(`INSERT INTO roles(account_id, arn, name, kind, trust_policy) VALUES ($1,$2,'CuriousMonkeyScanner','custom','{}') RETURNING id`, [acc, arn])).rows[0].id;
+  };
+  const sA = await scan(A, '111111111111'), sB = await scan(B, '222222222222');
+  await db.query(`INSERT INTO workers(id, hostname, aws_identity) VALUES ('w1','h',$1)`, [JSON.stringify({ mode: 'aws', account: '222222222222', principal: 'arn:aws:iam::222222222222:user/CuriousMonkey' })]);
+  const pin = async (role, key, kind, n) => (await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen, sessions_count) VALUES ($1,$2,$3,'x','sts:AssumeRole',$4,$4,$5) RETURNING id`,
+    [role, key, kind, hoursAgo(1), n])).rows[0].id;
+  const cross = await pin(sA, 'acct:222222222222:AIDACURIOUSMONKEY001', 'account', 30);   // the target account's copy: no ARN
+  await pin(sB, 'user:arn:aws:iam::222222222222:user/CuriousMonkey', 'user', 34);
+  await db.query(`INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at) VALUES ('ASIACM1',$1,$2,$3)`, [sA, cross, hoursAgo(1)]);
+
+  const s = await api.spaceEstate(owner);
+  assert.equal(s.chains.length, 2, 'the scanner adds no account-to-account path');
+  assert.equal(s.scanner.homeAccountId, B);
+  const t = new Map(s.scanner.targets.map((x) => [x.accountId, x]));
+  assert.equal(t.get(A).sessions, 30); assert.equal(t.get(A).role, 'CuriousMonkeyScanner'); assert.equal(t.get(A).hours.length, 1);
+  assert.equal(t.get(B).sessions, 34);
+  const one = await api.spaceAccount(owner, A);
+  assert.deepEqual(one.scanner.targets.map((x) => [x.roleId, x.sessions]), [[sA, 30]]);
+});

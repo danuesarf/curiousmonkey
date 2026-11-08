@@ -71,6 +71,8 @@ Click anything for a card beside it; links go on from the card. Paths and their 
 
 A cross-account AssumeRole appears in the target account's CloudTrail with no ARN, only `userIdentity { type: AWSAccount, accountId, principalId }`. The scanner keeps the caller's account (principal key `acct:<account>:<unique id>`) so the path still draws, and when the caller's account is connected it names the role from its IAM unique ID (`roles.aws_id`, filled by the inventory scan) so it counts as `role:<account>:<name>` and matches role-ARN trust. Callers recorded before this change sit together under one `other:AWSAccount` principal and cannot be split.
 
+**Curious Monkey** (the portal itself) is drawn as its own identity, a brown monkey face: above the account its worker identity lives in when that account is connected, off the plane otherwise. Dotted paths go to the scanner role (each account's `role_arn`) in every account it reads, lit in the hours it signed in; its sign-ins are kept out of the account-to-account paths. It is recognised by the workers' AWS identity (`workers.aws_identity`, or `SCANNER_PRINCIPAL_ARN`) and by the `curious-monkey` session name. Click it for every account it reads, the role, sign-ins and last scan.
+
 ## Health
 
 `#/workers` (**Health** in the rail, needs the `ops` permission) shows the database and the workers in one place, with one list of what needs attention.

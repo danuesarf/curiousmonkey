@@ -8,6 +8,7 @@
 import { query } from './db.js';
 import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
+import { config } from './config.js';
 
 const num = (x) => Number(x || 0);
 const ENVS = ['production', 'shared', 'staging', 'development', 'sandbox'];
@@ -52,6 +53,44 @@ async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12 } = {}
   };
 }
 
+/**
+ * Curious Monkey itself: the identity the workers run as, and the scanner role it enters in each account.
+ * Its sign-ins are drawn as their own labelled identity, not mixed into account-to-account paths.
+ */
+const SCANNER_SESSION = 'session:curious-monkey';
+async function scannerOf(ids, start) {
+  const idRows = (await query(`SELECT DISTINCT aws_identity->>'principal' AS principal, aws_identity->>'account' AS account FROM workers
+                                 WHERE aws_identity ? 'principal' AND heartbeat_at >= now() - interval '30 days'`)).rows.filter((x) => x.principal);
+  if (config.scanner.principalArn && !idRows.some((x) => x.principal === config.scanner.principalArn))
+    idRows.push({ principal: config.scanner.principalArn, account: config.scanner.principalArn.match(/::(\d{12}):/)?.[1] || null });
+  const keys = new Set([SCANNER_SESSION]), accts = new Set();
+  for (const x of idRows) {
+    const acct = x.account || x.principal.match(/::(\d{12}):/)?.[1];
+    if (acct) accts.add(acct);
+    if (/:user\//.test(x.principal)) keys.add(`user:${x.principal}`);
+    const role = x.principal.match(/::(\d{12}):role\/(?:.*\/)?([^/]+)$/);
+    if (role) keys.add(`role:${role[1]}:${role[2]}`);
+  }
+  const roles = (await query(`SELECT r.id, r.name, r.account_id, a.last_scan_at FROM roles r JOIN cloud_accounts a ON a.id = r.account_id AND r.arn = a.role_arn
+                                WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL`, [ids])).rows;
+  if (!roles.length) return { item: null, principalIds: new Set() };
+  const pr = (await query(`SELECT id, key, role_id, sessions_count, last_seen FROM principals WHERE role_id = ANY($1)`, [roles.map((r) => r.id)])).rows
+    .filter((p) => keys.has(p.key) || [...accts].some((a) => p.key.startsWith(`acct:${a}:`)));
+  const hours = new Map();
+  if (pr.length) for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h FROM role_sessions WHERE started_at >= ${BUCKETS} AND principal_id = ANY($1) GROUP BY 1, 2`,
+    [pr.map((p) => p.id)])).rows) { if (!hours.has(x.principal_id)) hours.set(x.principal_id, new Set()); hours.get(x.principal_id).add(bucketOf(x.h, start)); }
+  const home = idRows.length ? (await query(`SELECT id FROM cloud_accounts WHERE account_id = ANY($1) AND id = ANY($2) LIMIT 1`, [[...accts], ids])).rows[0]?.id || null : null;
+  const targets = roles.map((r) => {
+    const mine = pr.filter((p) => p.role_id === r.id), h = new Set(mine.flatMap((p) => [...(hours.get(p.id) || [])]));
+    return { accountId: r.account_id, roleId: r.id, role: r.name, sessions: mine.reduce((n, p) => n + num(p.sessions_count), 0),
+      lastSeen: mine.map((p) => p.last_seen).filter(Boolean).sort((a, b) => b - a)[0] || null, lastScan: r.last_scan_at, hours: [...h].sort((a, b) => a - b) };
+  });
+  return {
+    principalIds: new Set(pr.map((p) => p.id)),
+    item: { identities: idRows.map((x) => x.principal), homeAccountId: home, homeAws: [...accts][0] || null, targets },
+  };
+}
+
 /** Changes in the last 24 h, as replay events. */
 async function events(where, p, start) {
   const rows = (await query(
@@ -66,7 +105,7 @@ export async function spaceEstate(user) {
   const accts = (await query(`SELECT a.id, a.name, a.account_id, a.environment, a.ou, a.status, a.note FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', p)} ORDER BY a.environment, a.ou NULLS LAST, a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
   const start = await hourStart();
-  if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, events: [], hourStart: new Date(start).toISOString() };
+  if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, scanner: null, events: [], hourStart: new Date(start).toISOString() };
 
   const [roles, hourly, entries, ev] = await Promise.all([
     query(`SELECT r.id, r.account_id, r.name, r.kind, r.risk, coalesce(t.c7,0)::bigint AS calls7, coalesce(t.c1,0)::bigint AS calls24h, coalesce(t.all_calls,0)::bigint AS calls_all
@@ -98,7 +137,8 @@ export async function spaceEstate(user) {
     return { aws: m[1], name: e.kind !== 'account' ? m[2] : /^AIDA/.test(m[2]) ? `IAM user ${m[2]}` : /^AROA/.test(m[2]) ? `role ${m[2]}` : m[2] };
   };
   const pairs = new Map(), todayOf = new Map();
-  const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
+  const scanner = await scannerOf(ids, start);
+  const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && !scanner.principalIds.has(e.id) && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
   if (cross.length) {
     for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h, count(*)::int AS n FROM role_sessions WHERE started_at >= ${BUCKETS} AND principal_id = ANY($1) GROUP BY 1, 2`,
       [cross.map(({ e }) => e.id)])).rows) { if (!todayOf.has(x.principal_id)) todayOf.set(x.principal_id, []); todayOf.get(x.principal_id).push([bucketOf(x.h, start), x.n]); }
@@ -133,6 +173,7 @@ export async function spaceEstate(user) {
       hours: x.today.map((n, b) => (n ? b : -1)).filter((b) => b >= 0), isNew: !!x.firstSeen && new Date(x.firstSeen).getTime() >= start,
       firstSeen: x.firstSeen, lastSeen: x.lastSeen, roles: x.roles.sort((m, n) => n.sessions - m.sessions).slice(0, 12), moreRoles: Math.max(0, x.roles.length - 12) })),
     outside,
+    scanner: scanner.item,
     events: ev,
   };
 }
@@ -201,6 +242,6 @@ export async function spaceAccount(user, accountId) {
     account: { id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort((m, n) => n.calls7 - m.calls7).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
-    neighbours: [...neighbours.values()].slice(0, 6), outside, events: ev,
+    neighbours: [...neighbours.values()].slice(0, 6), outside, scanner: (await scannerOf([a.id], start)).item, events: ev,
   };
 }
