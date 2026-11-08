@@ -11,6 +11,7 @@ import { sealCredentials } from '../aws/credentials.js';
 import { suggestMappings, decideMapping, markUnresolved } from '../recommender/eventMap.js';
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
+import { effectiveLookback } from '../settings.js';
 import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
@@ -64,7 +65,7 @@ const AccountFields = {
 const AccountIn = z.object({
   ...AccountFields, accountId: z.string().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
   environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null), regions: AccountFields.regions.default(config.scanner.defaultRegions),
-  eventSource: AccountFields.eventSource.default('event-history'), lookbackDays: AccountFields.lookbackDays.default(90),
+  eventSource: AccountFields.eventSource.default('event-history'), lookbackDays: AccountFields.lookbackDays.optional(),
   s3: AccountFields.s3.default(null), authMode: AccountFields.authMode.default('assume_role'), baseIdentity: AccountFields.baseIdentity.default('system'),
   roleName: AccountFields.roleName.default(config.scanner.roleName), trustPrincipal: AccountFields.trustPrincipal.default(null),
   credentials: AccountFields.credentials.default(null),
@@ -73,9 +74,10 @@ const AccountPatch = z.object({ ...Object.fromEntries(Object.entries(AccountFiel
 
 const say = (res, message, field) => res.status(400).json({ error: 'invalid', message, field });
 /** Rules that span several fields. Returns an error message or null. */
-function checkAccount(x, hasStored) {
+function checkAccount(x, hasStored, lookbackChanged = true) {
   if (x.eventSource === 's3' && !x.s3?.bucket) return ['Name the S3 bucket your trail writes to.', 's3.bucket'];
   if (x.eventSource === 'event-history' && x.lookbackDays > 90) return ['Event History only keeps 90 days. Pick 90 or less, or use an S3 trail.', 'lookbackDays'];
+  if (lookbackChanged && x.lookbackDays > config.scanner.maxLookbackDays) return [`This workspace reads at most ${config.scanner.maxLookbackDays} days back. An owner or admin can raise it under Configuration.`, 'lookbackDays'];
   const needsKeys = x.authMode === 'access_key' || x.baseIdentity === 'stored';
   if (needsKeys && !x.credentials && !hasStored) return [x.authMode === 'access_key' ? 'Enter the scanner user’s access key.' : 'Enter the access key the worker should start from.', 'credentials'];
   return null;
@@ -126,6 +128,7 @@ data.get('/onboarding/snippets', requirePerm('accounts'), wrap(async (req, res) 
 
 data.post('/accounts', requirePerm('accounts'), wrap(async (req, res) => {
   const b = AccountIn.parse(req.body);
+  if (b.lookbackDays == null) b.lookbackDays = Math.min(config.scanner.defaultLookbackDays, b.eventSource === 's3' ? config.scanner.maxLookbackDays : 90);
   const bad = checkAccount(b, false);
   if (bad) return say(res, ...bad);
   const dup = await query('SELECT 1 FROM cloud_accounts WHERE account_id=$1', [b.accountId]);
@@ -151,7 +154,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
     trustPrincipal: a.trust_principal, credentials: null,
   };
   const next = { ...cur, ...Object.fromEntries(Object.entries(p).filter(([k, v]) => v !== undefined && k !== 'rebuildHistory')) };
-  const bad = checkAccount(next, !!a.credentials_enc);
+  const bad = checkAccount(next, !!a.credentials_enc, p.lookbackDays !== undefined && p.lookbackDays !== a.lookback_days);
   if (bad) return say(res, ...bad);
   const cols = accountColumns(next, a.account_id, a);
   const accessChanged = ['auth_mode', 'base_identity', 'role_arn', 'credentials_enc', 'event_source', 's3_bucket', 's3_prefix', 's3_org_id', 's3_region']
@@ -484,7 +487,7 @@ data.get('/signal', requirePerm('view'), wrap(async (req, res) => {
       WHERE ${where} GROUP BY d.day ORDER BY d.day`, p)).rows;
   const ap = []; const accts = (await query(`SELECT * FROM cloud_accounts a WHERE ${accountFilter(req, ap, 'a.id')}`, ap)).rows;
   const hist = [...(await historyFor(accts)).values()];
-  const lookback = Math.max(90, ...accts.map((a) => (a.event_source === 's3' ? a.lookback_days : Math.min(a.lookback_days, 90))));
+  const lookback = Math.max(90, ...accts.map(effectiveLookback));
   res.json({ days, from: new Date(Date.now() - lookback * 864e5), to: new Date(), readUpTo: hist.filter((x) => !x.complete).map((x) => x.readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null,
     complete: hist.every((x) => x.complete) });
 }));

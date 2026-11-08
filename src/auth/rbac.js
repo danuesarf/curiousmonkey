@@ -3,8 +3,8 @@ export const ROLES = ['owner', 'admin', 'reviewer', 'account_owner', 'auditor'];
 export const TEAMS = ['infrasec', 'infosec'];
 
 export const PERMS = {
-  owner:         ['view', 'scan', 'accounts', 'decide', 'recommend', 'approve', 'export', 'members', 'audit', 'ops', 'sso'],
-  admin:         ['view', 'scan', 'accounts', 'decide', 'recommend', 'export', 'members', 'audit', 'ops'],
+  owner:         ['view', 'scan', 'accounts', 'decide', 'recommend', 'approve', 'export', 'members', 'audit', 'ops', 'sso', 'settings'],
+  admin:         ['view', 'scan', 'accounts', 'decide', 'recommend', 'export', 'members', 'audit', 'ops', 'settings'],
   reviewer:      ['view', 'scan', 'decide', 'recommend', 'approve', 'export', 'ops'],
   account_owner: ['view', 'scan', 'recommend', 'export'],
   auditor:       ['view', 'audit', 'ops'],

@@ -6,13 +6,14 @@ import { loadContext } from './inventory.js';
 import { provisionalAnalyze } from './analyzeJob.js';
 import { recordNewCaller } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
+import { effectiveLookback } from '../settings.js';
 
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3600e3, MIN = 60e3, DAY = 24 * HOUR;
 
 /** Days of history to keep reading. Event History stops at 90; an S3 trail goes as far back as its files. */
-export const lookbackFor = (account) => (account.event_source === 's3' ? account.lookback_days : Math.min(account.lookback_days || 90, 90));
+export const lookbackFor = (account) => effectiveLookback(account);
 
 /**
  * Everything needed to resume lives in scan_checkpoints, so a retry never reads a finished slice again.

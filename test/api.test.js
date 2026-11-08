@@ -276,3 +276,36 @@ test('security headers are set', async () => {
   assert.match(r.headers.get('content-security-policy'), /script-src 'self'/);
   assert.equal(r.headers.get('x-powered-by'), null);
 });
+
+test('configuration: owners change Bedrock and lookback limits; others cannot; limits apply to accounts', async () => {
+  const put = (c, b) => c.call('PUT', '/api/settings', b);
+  let r = await owner.get('/api/settings');
+  assert.equal(r.status, 200);
+  assert.equal(r.json.settings['ai.enabled'].overridden, false);
+  assert.ok(Array.isArray(r.json.history));
+
+  assert.equal((await put(owner, { 'ai.region': 'not a region' })).status, 400);
+  assert.equal((await put(owner, { 'history.defaultLookbackDays': 400, 'history.maxLookbackDays': 180 })).status, 400);   // default above max
+  r = await put(owner, { 'ai.enabled': true, 'ai.region': 'ap-southeast-1', 'ai.modelId': 'apac.anthropic.claude-sonnet-4-5-20250929-v1:0', 'history.maxLookbackDays': 180, 'history.sliceHours': 1 });
+  assert.equal(r.status, 200); assert.equal(r.json.changed.length, 5);
+  const { config } = await import('../src/config.js');
+  assert.equal(config.ai.region, 'ap-southeast-1'); assert.equal(config.scanner.sliceHours, 1); assert.equal(config.scanner.maxLookbackDays, 180);
+  r = await owner.get('/api/settings');
+  assert.equal(r.json.settings['ai.region'].overridden, true);
+  assert.equal((await owner.get('/api/settings/limits')).json.maxLookbackDays, 180);
+
+  // an account cannot ask for more than the workspace maximum
+  r = await owner.post('/api/accounts', { accountId: '999999999990', name: 'too-far', eventSource: 's3', s3: { bucket: 'kbi-org-trail' }, lookbackDays: 365 });
+  assert.equal(r.status, 400, JSON.stringify(r.json)); assert.equal(r.json.field, 'lookbackDays', JSON.stringify(r.json));
+
+  // reset to default, audited
+  r = await put(owner, { 'ai.region': null, 'ai.enabled': null, 'ai.modelId': null, 'history.maxLookbackDays': null, 'history.sliceHours': null });
+  assert.equal(r.status, 200);
+  assert.equal(config.scanner.sliceHours, 6);
+  const audit = await db.query(`SELECT count(*)::int n FROM audit_log WHERE action='settings.update'`);
+  assert.ok(audit.rows[0].n >= 2);
+  assert.equal((await owner.post('/api/settings/bedrock/test', {})).json.ok, false);              // demo mode does not call AWS
+
+  assert.equal((await reviewerClient.get('/api/settings')).status, 403);
+  assert.equal((await put(reviewerClient, { 'ai.enabled': true })).status, 403);
+});

@@ -12,6 +12,7 @@ import { trustPage } from './pages/trust.js';
 import { sectorPage } from './pages/sector.js';
 import { trackPage } from './pages/track.js';
 import { unidentifiedPage } from './pages/unidentified.js';
+import { settingsPage } from './pages/settings.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -33,6 +34,7 @@ const routes = [
   [/^#\/scans$/, () => opsPage, 'scans'],
   [/^#\/members$/, () => membersPage, 'members'],
   [/^#\/audit$/, () => auditPage, 'audit'],
+  [/^#\/settings$/, () => settingsPage, 'settings'],
 ];
 
 export function go(hash) { location.hash = hash; }
@@ -43,6 +45,7 @@ const ICON = {
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   roles: 'M4 6h16M4 12h16M4 18h10', scans: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
   members: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6s7 2 7 6M17 11a3 3 0 1 0 0-6M22 20c0-3-2-5-4-5', audit: 'M6 3h9l4 4v14H6zM9 12h7M9 16h7M9 8h3',
+  settings: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
 };
 const mark = (size = 40) => svg('svg', { width: size, height: size, viewBox: '0 0 40 40', 'aria-hidden': 'true' },
   svg('circle', { cx: 20, cy: 20, r: 18, fill: 'none', stroke: '#1f4a35' }), svg('circle', { cx: 20, cy: 20, r: 11, fill: 'none', stroke: '#1f4a35' }),
@@ -81,14 +84,14 @@ setInterval(() => refreshStatus(), 20000);
 function shell(active, content, full) {
   const item = (key, href, label, perm) => (!perm || can(perm)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label);
-  setCrumbs({ radar: 'Radar', trust: 'Trust map', roles: 'Roles', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit' }[active] || '');
+  setCrumbs({ radar: 'Radar', trust: 'Trust map', roles: 'Roles', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
       item('radar', '#/', 'Radar', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('scans', '#/scans', 'Scans', 'ops'),
-      item('accounts', '#/accounts', 'Accounts', 'view'), item('members', '#/members', 'Members', 'members'), item('audit', '#/audit', 'Audit', 'audit'),
+      item('accounts', '#/accounts', 'Accounts', 'view'), item('members', '#/members', 'Members', 'members'), item('audit', '#/audit', 'Audit', 'audit'), item('settings', '#/settings', 'Config', 'settings'),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),
         h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; setCsrf(''); go('#/signin'); } }, 'Sign out'))),

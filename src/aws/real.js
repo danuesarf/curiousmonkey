@@ -5,7 +5,7 @@ import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, G
   ListAttachedRolePoliciesCommand, GetPolicyCommand, GetPolicyVersionCommand,
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
-import { gunzipSync } from 'node:zlib';
+import { streamRecords } from './trailStream.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, fileTimeFromKey } from './trailKeys.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
@@ -108,14 +108,15 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       }
       const out = [];
       let i = 0;
-      await Promise.all(Array.from({ length: Math.min(8, keys.length) }, async () => {
+      // Files are streamed record by record, 4 at a time: memory no longer grows with file size.
+      await Promise.all(Array.from({ length: Math.min(4, keys.length) }, async () => {
         while (i < keys.length) {
           const Key = keys[i++];
-          const body = await (await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }))).Body.transformToByteArray();
-          for (const r of JSON.parse(gunzipSync(Buffer.from(body)).toString('utf8')).Records || []) {
+          const { Body } = await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }));
+          await streamRecords(Body, (r) => {
             const t = new Date(r.eventTime).getTime();
             if (t >= from && t < end.getTime()) out.push(map(r));   // map keeps only what the scan needs, not the whole record
-          }
+          });
         }
       }));
       return out;

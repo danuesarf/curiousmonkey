@@ -324,3 +324,16 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .fnd p{margin:4px 0 0;max-width:46ch;line-height:1.45}
 .src-tag{font-family:var(--mono);font-size:10px;letter-spacing:.06em;padding:1px 5px;border:1px solid var(--edge);color:var(--muted);text-transform:uppercase;flex:none}
 .src-tag.g-public{color:#ff6b5e;border-color:#ff6b5e}.src-tag.g-external-account{color:#f0b45a;border-color:#f0b45a}.src-tag.g-oidc,.src-tag.g-saml{color:#8ec5ff;border-color:#2e4f6b}
+
+/* configuration */
+.settings-grid{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:28px;align-items:start}
+@media (max-width:1000px){.settings-grid{grid-template-columns:1fr}}
+.settings-page .field input,.settings-page .field select{max-width:520px}
+.settings-page label.check{flex-direction:row;align-items:center;gap:10px;font-size:14px}
+.settings-page label.check input{width:18px;height:18px;accent-color:var(--banana,#f6e016)}
+.test-result:empty{display:none}
+.reach-bar{width:120px;height:6px;border-radius:3px;background:#173528;overflow:hidden;flex:none}
+.reach-bar i{display:block;height:100%;background:#f6e016}
+.reach-bar i.done{background:#6fe3b0}
+.reach-table tr.group-end td{border-bottom:1px solid #1f4a35}
+.reach-table td[rowspan]{vertical-align:top}

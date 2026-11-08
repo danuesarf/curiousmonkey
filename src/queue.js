@@ -211,7 +211,8 @@ export async function retryJobs({ runId, jobId }) {
   });
 }
 
-export const SLICE_CHOICES = [6, 2, 1, 0.5, 0.25];
+import { SLICE_CHOICES } from './settings.js';
+export { SLICE_CHOICES };
 
 /**
  * Read one account's region again from the start of its lookback. The region's checkpoint is dropped, so the

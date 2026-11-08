@@ -10,6 +10,8 @@ import { loadSession, csrfGuard } from './auth/sessions.js';
 import { auth } from './routes/auth.js';
 import { data } from './routes/data.js';
 import { admin } from './routes/admin.js';
+import { settings } from './routes/settings.js';
+import { refreshSettings } from './settings.js';
 import { metricsText } from './queue.js';
 
 const pub = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
@@ -34,6 +36,7 @@ export function createApp() {
   app.use('/api/auth', auth);
   app.use('/api', data);
   app.use('/api', admin);
+  app.use('/api', settings);
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found' }));
 
   app.use(express.static(pub, { maxAge: config.env === 'production' ? '1h' : 0, index: 'index.html' }));
@@ -52,6 +55,7 @@ export function createApp() {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   assertConfig();
   if (process.env.RUN_MIGRATIONS !== 'false') await migrate((m) => console.log(JSON.stringify({ level: 'info', msg: m })));
+  await refreshSettings();
   // event names a newer version knows how to map: settle them now, so the Unidentified list is right before the next scan
   try { const n = await (await import('./analyzer/mappings.js')).applyBuiltins(); if (n) console.log(JSON.stringify({ level: 'info', msg: `settled ${n} event names with built-in mappings` })); }
   catch (e) { console.log(JSON.stringify({ level: 'warn', msg: `built-in mappings: ${e.message}` })); }

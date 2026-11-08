@@ -9,7 +9,14 @@ const RE = {
   account: /^\d{12}$/, role: /^[\w+=,.@-]{1,64}$/, arn: /^arn:aws[\w-]*:(iam|sts)::\d{12}:[\w+=,.@/-]+$/,
   bucket: /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, org: /^o-[a-z0-9]{10,32}$/, key: /^(AKIA|ASIA)[A-Z0-9]{12,20}$/,
 };
-const LOOKBACK = { 'event-history': [30, 60, 90], s3: [30, 90, 180, 365, 730] };
+// The S3 lookback offered is capped by the workspace maximum (Configuration page).
+let LIMITS = { defaultLookbackDays: 90, maxLookbackDays: 365, eventHistoryMaxDays: 90 };
+const loadLimits = async () => { try { LIMITS = await get('/settings/limits'); } catch { /* keep defaults */ } return LIMITS; };
+const lookbackOptions = (source, cur) => {
+  if (source === 'event-history') return [30, 60, 90];
+  const max = LIMITS.maxLookbackDays;
+  return [...new Set([...[30, 90, 180, 365, 730].filter((d) => d <= max), max, ...(cur > max ? [cur] : [])])].sort((a, b) => a - b);
+};
 const VOLUMES = [[1000, 'about 1,000'], [10000, 'about 10,000'], [50000, 'about 50,000'], [100000, 'about 100,000'], [500000, 'about 500,000']];
 const WORKER_CONCURRENCY = 2;
 
@@ -128,7 +135,7 @@ function detailsSection(m, { lockId = false } = {}) {
 }
 
 function sourceSection(m, rerender, { editing = false, original = null } = {}) {
-  const lb = h('select', { 'data-f': 'lookbackDays' }, LOOKBACK[m.eventSource].map((d) => h('option', { value: d, selected: d === Number(m.lookbackDays) }, `${d} days`)));
+  const lb = h('select', { 'data-f': 'lookbackDays' }, lookbackOptions(m.eventSource, Number(m.lookbackDays)).map((d) => h('option', { value: d, selected: d === Number(m.lookbackDays) }, `${d} days${d > LIMITS.maxLookbackDays ? ' (above the workspace maximum)' : ''}`)));
   lb.addEventListener('change', () => { m.lookbackDays = Number(lb.value); rerender(); });
   const vol = h('select', { 'aria-label': 'Events per day in one region' }, VOLUMES.map(([v, l]) => h('option', { value: v, selected: v === m.perDay }, l)));
   vol.addEventListener('change', () => { m.perDay = Number(vol.value); rerender(); });
@@ -151,10 +158,10 @@ function sourceSection(m, rerender, { editing = false, original = null } = {}) {
         ['bad', 'Slow: AWS allows 2 requests a second, about 100 events a second per region.']] },
       { value: 's3', title: 'CloudTrail trail in S3', badge: 'Faster, longer history', points: [
         ['good', 'Fast: no request limit, usually minutes instead of hours.'],
-        ['good', 'As far back as the bucket keeps files (up to 2 years here).'],
+        ['good', `As far back as the bucket keeps files (up to ${LIMITS.maxLookbackDays} days in this workspace).`],
         ['good', 'Includes data events if the trail logs them, so object and item calls count as use.'],
         ['bad', 'Needs a trail delivering to S3 and read access to that bucket. Adds small S3 request charges.']] },
-    ], m.eventSource, (v) => { m.eventSource = v; if (v === 'event-history' && m.lookbackDays > 90) m.lookbackDays = 90; rerender(); }),
+    ], m.eventSource, (v) => { m.eventSource = v; if (v === 'event-history' && m.lookbackDays > 90) m.lookbackDays = 90; if (v === 's3' && !editing) m.lookbackDays = Math.min(LIMITS.defaultLookbackDays, LIMITS.maxLookbackDays); rerender(); }),
     s3Fields,
     field('How far back to read', lb, m.eventSource === 's3' ? 'Only files that still exist in the bucket can be read.' : 'Event History cannot go further back than 90 days.'),
     widened && h('div', { class: 'alert ok' }, `The next scan backfills the extra ${Number(m.lookbackDays) - original.lookback_days} days. History already stored is kept and not read again.`),
@@ -310,9 +317,10 @@ const STEPS = ['Account', 'CloudTrail source', 'Access', 'Deploy and connect'];
 const STEP_OF = { name: 1, accountId: 1, environment: 1, regions: 1, eventSource: 2, lookbackDays: 2, 's3.bucket': 2, s3: 2, roleName: 3, trustPrincipal: 3, baseIdentity: 3, authMode: 3 };
 
 export async function newAccountPage() {
-  const [{ items }, identity] = await Promise.all([get('/accounts'), get('/onboarding/identity').catch(() => null)]);
+  const [{ items }, identity] = await Promise.all([get('/accounts'), get('/onboarding/identity').catch(() => null), loadLimits()]);
   const taken = new Set(items.map((a) => a.account_id));
   const m = blankModel();
+  m.lookbackDays = Math.min(LIMITS.defaultLookbackDays, LIMITS.eventHistoryMaxDays);
   const st = { step: 1, snip: null, pendingError: null };
   const body = h('div', { class: 'stack-lg' });
 
@@ -395,7 +403,7 @@ export async function newAccountPage() {
 
 // ---------- edit ----------
 export async function editAccountPage(ctx, id) {
-  const [a, identity] = await Promise.all([get(`/accounts/${id}`), get('/onboarding/identity').catch(() => null)]);
+  const [a, identity] = await Promise.all([get(`/accounts/${id}`), get('/onboarding/identity').catch(() => null), loadLimits()]);
   const m = modelFrom(a);
   const root = h('div', { class: 'stack-lg' });
   const sections = h('div', { class: 'stack-lg' });

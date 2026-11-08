@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { config, assertConfig } from './config.js';
 import { pool, query, closePool } from './db.js';
 import { migrate } from './migrate.js';
+import { refreshSettings, watchSettings } from './settings.js';
 import {
   workerId, registerWorker, workerBeat, workerStop, claimJob, heartbeat, jobLog,
   completeJob, failJob, reapExpired, enqueueRun,
@@ -180,6 +181,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   assertConfig();
   if (process.env.WORKER_RUN_MIGRATIONS === 'true') await migrate((m) => log('info', m));
   await waitForSchema();
+  await refreshSettings(); watchSettings();             // slice size and lookback changed in the portal reach the worker
   const health = await startHealthServer(Number(process.env.WORKER_HEALTH_PORT || 8081));
   const w = await startWorker();
   const shutdown = async (sig) => {

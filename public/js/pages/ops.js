@@ -49,7 +49,7 @@ export async function opsPage(ctx) {
 // Read one region of one account again from the start, optionally in smaller slices.
 function rebuildDialog(run, j, redraw) {
   const cur = Number(j.options?.sliceHours) || null;
-  const sel = h('select', null, [['', 'Default (6 h)'], ['2', '2 hours'], ['1', '1 hour'], ['0.5', '30 minutes'], ['0.25', '15 minutes']]
+  const sel = h('select', null, [['', 'Workspace default'], ['2', '2 hours'], ['1', '1 hour'], ['0.5', '30 minutes'], ['0.25', '15 minutes']]
     .map(([v, t]) => h('option', { value: v }, t)));
   sel.value = cur ? String(cur) : '1';                // 1 h is the useful default when a region needs rebuilding
   let bg;
