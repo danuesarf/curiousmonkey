@@ -293,7 +293,7 @@ function planDialog(ctx) {
     if (st.many) {
       const ta = h('textarea', { 'data-f': 'text', rows: 9, class: 'mono', placeholder: '123456789012, payments-prod, production, Workloads/Prod\n210987654321, payments-stg, staging' }, st.text);
       ta.addEventListener('input', () => { st.text = ta.value; });
-      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, shared, staging, development or sandbox), OU. Only the ID is required. Accounts already in Curious Monkey are skipped.'));
+      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, shared, staging, development or sandbox), OU. Only the ID is required. Planned accounts already here take the new name, environment and OU; onboarded ones are left alone.'));
     } else {
       body.replaceChildren(tabs,
         field('AWS account ID', input(m, 'accountId', { 'data-f': 'accountId', inputmode: 'numeric', maxlength: '12', placeholder: '123456789012' }), 'Twelve digits, no dashes.'),
@@ -314,7 +314,7 @@ function planDialog(ctx) {
     }
     save.disabled = true;
     try {
-      if (st.many) { const r = await post('/accounts/planned/bulk', { text: st.text }); toast(`${r.added} planned account${r.added === 1 ? '' : 's'} added${r.skipped.length ? `, ${r.skipped.length} already here` : ''}.`); }
+      if (st.many) { const r = await post('/accounts/planned/bulk', { text: st.text }); toast([`${r.added} planned account${r.added === 1 ? '' : 's'} added`, r.updated && `${r.updated} updated`, r.skipped.length && `${r.skipped.length} already onboarded or unchanged`].filter(Boolean).join(', ') + '.'); }
       else { await post('/accounts/planned', m); toast(`${m.name} added as planned.`); }
       bg.remove(); ctx.reload();
     } catch (x) {
@@ -344,6 +344,7 @@ function accountCard(a, ctx, can) {
         can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
         h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
         h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}` }, 'Trust map'),
+        h('a', { class: 'btn sm', href: `#/events?account=${a.id}` }, 'Event history'),
         h('a', { class: 'btn sm', href: `#/accounts/${a.id}/unidentified` }, 'Unidentified calls'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),

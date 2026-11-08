@@ -39,7 +39,11 @@ export function createApp() {
   app.use('/api', settings);
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found' }));
 
-  app.use(express.static(pub, { maxAge: config.env === 'production' ? '1h' : 0, index: 'index.html' }));
+  // Page code (HTML, JS modules, CSS) is revalidated on every load: the files carry no version in their names, so a
+  // cached copy would keep running old code after a deploy (and could mix old and new modules). Unchanged files come
+  // back as 304 Not Modified. Images and fonts may be cached for an hour.
+  app.use(express.static(pub, { index: 'index.html', maxAge: config.env === 'production' ? '1h' : 0,
+    setHeaders: (res, file) => { if (/\.(html|js|mjs|css|json)$/.test(file)) res.setHeader('Cache-Control', 'no-cache'); } }));
   app.get(/^\/(?!api).*/, (req, res) => res.sendFile(path.join(pub, 'index.html')));
 
   // eslint-disable-next-line no-unused-vars

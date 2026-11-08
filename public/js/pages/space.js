@@ -492,7 +492,7 @@ export async function spacePage(ctx) {
           tags: [...(g.high ? [tag(`${g.high} HIGH`, RED)] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
           rows: [row('Roles', `${g.roles} · ${g.active} called · ${g.cold} never called`), row('Calls', `${kfmt(g.calls7)} in 7 days · ${today} sessions today`),
             ...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [row('Entered from', ins.length ? ins.join(', ') : 'no other account today'), row('Reaches', outs.length ? outs.join(', ') : 'no other account today')])],
-          actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Account radar', `#/?view=account&account=${g.id}`]] };
+          actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
     const s = M.sources.find((x) => x.id === id);
@@ -514,7 +514,7 @@ export async function spacePage(ctx) {
         rows: [row('Calls', `${kfmt(r.calls7)} in 7 days · into ${r.services.map((x) => x.name).join(', ') || 'nothing'}`),
           row('Entered by', [...callers, ...chained].join(', ') || 'only callers inside this account'),
           ...(r.denied7 ? [row('Look at', `${num(r.denied7)} calls refused in 7 days: ${r.services.filter((x) => x.denied).map((x) => `${x.name} ×${x.denied}`).join(', ')}`, 'bad')] : [])],
-        actions: [['Open role', `#/roles/${r.id}`, true], ['Blast radius', `#/?view=blast&key=${encodeURIComponent(`role:${M.account.awsAccountId}:${r.name}`)}`]] };
+        actions: [['Open role', `#/roles/${r.id}`, true], ['Its calls', `#/events?role=${r.id}&range=7d`], ['Blast radius', `#/?view=blast&key=${encodeURIComponent(`role:${M.account.awsAccountId}:${r.name}`)}`]] };
     }
     const t = M.towers.find((x) => x.id === id);
     if (t) {

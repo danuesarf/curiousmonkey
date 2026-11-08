@@ -15,6 +15,7 @@ import { effectiveLookback } from '../settings.js';
 import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
+import { searchEvents, eventsCsv } from '../eventsApi.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
@@ -148,12 +149,16 @@ const PlannedIn = z.object({
   environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null),
   note: z.string().trim().max(500).nullable().or(z.literal('')).default(null),
 });
-async function insertPlanned(req, b) {
+async function insertPlanned(req, b, { update = false } = {}) {
+  // update: an account that is still planned takes the new name, environment and OU (bulk paste); onboarded ones are left alone
   const row = (await query(
     `INSERT INTO cloud_accounts(account_id, name, environment, ou, note, status, regions, created_by) VALUES ($1,$2,$3,$4,$5,'planned',$6,$7)
-     ON CONFLICT (account_id) DO NOTHING RETURNING *`,
+     ON CONFLICT (account_id) DO ${update ? `UPDATE SET name=EXCLUDED.name, environment=EXCLUDED.environment, ou=COALESCE(EXCLUDED.ou, cloud_accounts.ou), updated_at=now()
+       WHERE cloud_accounts.status='planned'
+         AND (cloud_accounts.name, cloud_accounts.environment, COALESCE(cloud_accounts.ou,'')) IS DISTINCT FROM (EXCLUDED.name, EXCLUDED.environment, COALESCE(EXCLUDED.ou, cloud_accounts.ou, ''))` : 'NOTHING'}
+     RETURNING *, (xmax = 0) AS inserted`,
     [b.accountId, b.name, b.environment, b.ou || null, b.note || null, config.scanner.defaultRegions, req.user.id])).rows[0];
-  if (row) await audit(req, 'account.plan', { type: 'account', id: row.id }, { accountId: b.accountId });
+  if (row) await audit(req, row.inserted ? 'account.plan' : 'account.update', { type: 'account', id: row.id }, { accountId: b.accountId, planned: true });
   return row;
 }
 data.post('/accounts/planned', requirePerm('accounts'), wrap(async (req, res) => {
@@ -173,9 +178,9 @@ data.post('/accounts/planned/bulk', requirePerm('accounts'), wrap(async (req, re
   });
   const bad = parsed.filter((x) => !x.ok);
   if (bad.length) return res.status(400).json({ error: 'invalid', message: `Line ${bad[0].line}: ${bad[0].message}`, field: 'text', lines: bad.slice(0, 20) });
-  const added = [], skipped = [];
-  for (const { ok } of parsed) (await insertPlanned(req, ok) ? added : skipped).push(ok.accountId);
-  res.status(201).json({ added: added.length, skipped });
+  const added = [], updated = [], skipped = [];
+  for (const { ok } of parsed) { const r = await insertPlanned(req, ok, { update: true }); (!r ? skipped : r.inserted ? added : updated).push(ok.accountId); }
+  res.status(201).json({ added: added.length, updated: updated.length, skipped });
 }));
 
 data.get('/accounts/:id', requirePerm('view'), wrap(async (req, res) => {
@@ -522,6 +527,22 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user))));
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const r = await accountRadar(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
+}));
+// ---------- event history: the calls kept per role session ----------
+const EventsQ = z.object({
+  q: z.string().max(500).optional(), account: z.string().uuid().optional().or(z.literal('')), role: z.string().uuid().optional().or(z.literal('')),
+  session: z.string().uuid().optional().or(z.literal('')), outcome: z.enum(['all', 'denied', 'allowed']).optional(),
+  range: z.enum(['1h', '24h', '7d', '30d']).optional(), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional(),
+  before: z.string().regex(/^\d{10,14}\|[\w-]{0,80}$/).optional(),
+});
+const eventsOpts = (req) => { const o = EventsQ.parse(req.query); return { ...o, account: o.account || null, role: o.role || null, session: o.session || null }; };
+data.get('/events', requirePerm('view'), wrap(async (req, res) => res.json(await searchEvents(req.user, { ...eventsOpts(req), limit: 100 }))));
+data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
+  const r = await searchEvents(req.user, { ...eventsOpts(req), limit: 5000 });
+  await audit(req, 'events.export', { type: 'events' }, { q: req.query.q || null, rows: r.items.length });
+  res.setHeader('content-type', 'text/csv; charset=utf-8');
+  res.setHeader('content-disposition', `attachment; filename="curious-monkey-events-${new Date().toISOString().slice(0, 16).replace(':', '')}.csv"`);
+  res.send(eventsCsv(r.items));
 }));
 data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await spaceEstate(req.user))));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {

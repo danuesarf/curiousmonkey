@@ -349,7 +349,12 @@ test('planned accounts: placeholders with no access, never scanned, onboarded la
   // many at once: bad lines are reported, existing IDs are skipped
   assert.match((await owner.post('/api/accounts/planned/bulk', { text: '12345, x' })).json.message, /Line 1/);
   const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n601553210983, network-hub, shared, Infra\n473951143579, management\n889900112233' });
-  assert.equal(bulk.json.added, 2); assert.deepEqual(bulk.json.skipped, ['473951143579']);
+  assert.equal(bulk.json.added, 2); assert.equal(bulk.json.updated, 0); assert.deepEqual(bulk.json.skipped, ['473951143579']);   // same details: unchanged
+  const moved = await owner.post('/api/accounts/planned/bulk', { text: '473951143579, management, shared, Root' });
+  assert.equal(moved.json.updated, 1);
+  assert.equal((await owner.get(`/api/accounts/${p.json.id}`)).json.environment, 'shared');
+  // static page code is revalidated on every load, so a deploy is picked up at once
+  assert.equal((await owner.get('/js/main.js')).headers.get('cache-control'), 'no-cache');
   // editing a planned account changes details only
   const e = await owner.patch(`/api/accounts/${p.json.id}`, { name: 'org-management', authMode: 'access_key' });
   assert.equal(e.json.name, 'org-management'); assert.equal(e.json.status, 'planned'); assert.equal(e.json.auth_mode, 'assume_role');
