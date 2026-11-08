@@ -1,13 +1,15 @@
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
 import { fileURLToPath } from 'node:url';
+import v8 from 'node:v8';
 import { config, assertConfig } from './config.js';
 import { pool, query, closePool } from './db.js';
 import { migrate } from './migrate.js';
 import { refreshSettings, watchSettings } from './settings.js';
+import { runtime, sample, jobStarted, jobEnded } from './telemetry.js';
 import {
   workerId, registerWorker, workerBeat, workerStop, claimJob, heartbeat, jobLog,
-  completeJob, failJob, reapExpired, enqueueRun,
+  completeJob, failJob, reapExpired, enqueueRun, workerTelemetry, workerRuntime, markLostWorkers, pruneSamples, workerMemoryAlarm,
 } from './queue.js';
 import { handlers } from './scanner/jobs.js';
 
@@ -58,6 +60,7 @@ async function loop(stop, slot) {
     }
     if (!job) { await sleep(config.schedule.pollSeconds * 1000 * (0.5 + Math.random())); continue; }
     log('info', 'job started', { job: job.id, kind: job.kind, region: job.region, attempt: job.attempts, slot });
+    jobStarted();
     try {
       await runJob(job);
       log('info', 'job succeeded', { job: job.id, kind: job.kind });
@@ -65,7 +68,7 @@ async function loop(stop, slot) {
       if (e.name === 'LeaseLost') { log('warn', 'lease lost, abandoning job', { job: job.id }); continue; }
       const r = await failJob(job, e).catch((x) => { log('error', 'failJob failed', { error: x.message }); return {}; });
       log('warn', 'job failed', { job: job.id, kind: job.kind, error: e.message, giveUp: r.giveUp });
-    }
+    } finally { jobEnded(); }
   }
 }
 
@@ -126,12 +129,24 @@ async function reportIdentity() {
   log(identity.error ? 'warn' : 'info', 'worker aws identity', identity);
 }
 
+let lastAlarm = 0;
+const heapLimit = () => v8.getHeapStatistics().heap_size_limit;
 export async function startWorker({ concurrency = Number(process.env.WORKER_CONCURRENCY || 2), scheduler = true } = {}) {
   const stop = { stopped: false };
   await registerWorker();
   reportIdentity().catch(() => {});
+  await workerRuntime(runtime(concurrency)).catch(() => {});
+  const beat = () => workerTelemetry(sample()).catch(() => workerBeat().catch(() => {}));
   const timers = [
-    setInterval(() => workerBeat().catch(() => {}), 15_000),
+    setInterval(beat, 15_000),
+    setInterval(() => markLostWorkers().then((r) => r.length && log('warn', 'workers lost', { workers: r })).catch(() => {}), 60_000),
+    setInterval(() => pruneSamples().catch(() => {}), 600_000),
+    setInterval(() => {                                  // heap watchdog: V8 out-of-memory cannot be caught, so report early
+      const used = process.memoryUsage().heapUsed, limit = heapLimit();
+      const r = used / limit;
+      if (r > 0.7 && r > lastAlarm + 0.05) { lastAlarm = r; workerMemoryAlarm({ heapUsed: used, heapLimit: limit, alarmAt: new Date().toISOString() }).catch(() => {}); }
+      if (r < 0.5) lastAlarm = 0;
+    }, 2000),
     setInterval(() => reapExpired().then((n) => n && log('warn', 'reaped expired jobs', { n })).catch(() => {}), 30_000),
   ];
   if (scheduler) timers.push(setInterval(() => scheduleTick().catch((e) => log('error', 'schedule failed', { error: e.message })), 60_000));

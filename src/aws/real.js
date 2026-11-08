@@ -6,6 +6,7 @@ import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, G
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { streamRecords } from './trailStream.js';
+import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, fileTimeFromKey } from './trailKeys.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
@@ -85,6 +86,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
     },
     /** One page of Event History. LookupEvents allows 2 requests per second per account and region. */
     async lookupEventsPage({ region, start, end, token }) {
+      bump('apiCalls');
       const r = await ct(region).send(new LookupEventsCommand({ StartTime: start, EndTime: end, NextToken: token, MaxResults: 50 }));
       return { events: (r.Events || []).map((e) => JSON.parse(e.CloudTrailEvent)), nextToken: r.NextToken || null };
     },
@@ -98,6 +100,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
         if (!listCache.has(prefix)) {
           const all = []; let ContinuationToken;
           do {
+            bump('apiCalls');
             const r = await s3.send(new ListObjectsV2Command({ Bucket: account.s3_bucket, Prefix: prefix, ContinuationToken }));
             for (const o of r.Contents || []) all.push(o.Key);
             ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
@@ -112,7 +115,8 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       await Promise.all(Array.from({ length: Math.min(4, keys.length) }, async () => {
         while (i < keys.length) {
           const Key = keys[i++];
-          const { Body } = await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }));
+          const { Body, ContentLength } = await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }));
+          bump('s3Files'); bump('s3Bytes', ContentLength || 0); bump('apiCalls');
           await streamRecords(Body, (r) => {
             const t = new Date(r.eventTime).getTime();
             if (t >= from && t < end.getTime()) out.push(map(r));   // map keeps only what the scan needs, not the whole record

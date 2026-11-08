@@ -6,6 +6,7 @@ import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { ROLES, TEAMS } from '../auth/rbac.js';
 import { sha256, randomToken } from '../auth/crypto.js';
+import { workerStatus } from '../workerStatus.js';
 import { queueOverview, runDetail, jobLogs, retryJobs, cancelRun, rebuildRegion, SLICE_CHOICES } from '../queue.js';
 
 export const admin = Router();
@@ -83,6 +84,7 @@ admin.get('/audit', requirePerm('audit'), wrap(async (req, res) => {
 }));
 
 // ---------- scanner monitoring ----------
+admin.get('/ops/workers', requirePerm('ops'), wrap(async (req, res) => res.json(await workerStatus({ range: String(req.query.range || '1h') })))) ;
 admin.get('/ops/overview', requirePerm('ops'), wrap(async (req, res) => res.json(await queueOverview())));
 admin.get('/ops/runs/:id', requirePerm('ops'), wrap(async (req, res) => {
   const d = await runDetail(uuid.parse(req.params.id));

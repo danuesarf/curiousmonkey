@@ -7,6 +7,7 @@ import { provisionalAnalyze } from './analyzeJob.js';
 import { recordNewCaller } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
 import { effectiveLookback } from '../settings.js';
+import { bump } from '../telemetry.js';
 
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -107,7 +108,7 @@ export async function runEvents(ctx) {
         [account.id, region, a / 1000, kind === 'backfill' ? (cp?.last_event_time ? new Date(cp.last_event_time).getTime() / 1000 : b / 1000) : b / 1000, usable.length, gap, src]);
       return usable.length;
     });
-    total += n;
+    total += n; bump('events', n);
     // show what is known so far: refresh results every few minutes during a long first read
     if (Date.now() - lastProvisional > s.provisionalEveryMs && i < slices.length - 1) {
       lastProvisional = Date.now();
@@ -116,7 +117,7 @@ export async function runEvents(ctx) {
     const took = (Date.now() - sliceStart) / 1000;
     rate = rate == null ? took : rate * 0.8 + took * 0.2;      // recent slices count more; busy and quiet days differ
     const elapsed = (Date.now() - t0) / 1000;
-    await ctx.progress({ phase: 'events', source: src, region, slice: new Date(kind === 'backfill' ? a : b).toISOString(), direction: kind, sliceHours: hours,
+    await ctx.progress({ phase: 'events', source: src, region, slice: new Date(kind === 'backfill' ? a : b).toISOString(), direction: kind, sliceHours: hours, at: new Date().toISOString(),
       done: i + 1, total: slices.length, events: total, elapsedSeconds: Math.round(elapsed),
       etaSeconds: Math.round(rate * (slices.length - i - 1)), eventsPerSecond: elapsed > 0 ? Math.round(total / elapsed) : null });
   }

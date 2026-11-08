@@ -309,3 +309,30 @@ test('configuration: owners change Bedrock and lookback limits; others cannot; l
   assert.equal((await reviewerClient.get('/api/settings')).status, 403);
   assert.equal((await put(reviewerClient, { 'ai.enabled': true })).status, 403);
 });
+
+test('worker status: telemetry, lost-worker detection and advice', async () => {
+  const tel = await import('../src/telemetry.js');
+  tel.bump('events', 500);
+  const s = tel.sample();
+  assert.ok(s.rss > 0 && s.heapLimit > 0 && s.events >= 500);
+  await q.workerRuntime(tel.runtime(2));
+  await q.workerTelemetry(s);
+  // a worker that died with its heap nearly full
+  await db.query(`INSERT INTO workers(id, hostname, started_at, heartbeat_at, telemetry) VALUES ('dead-1','box', now() - interval '1 hour', now() - interval '5 minutes', $1)`,
+    [JSON.stringify({ heapUsed: 470e6, heapLimit: 512e6 })]);
+  const r = await owner.get('/api/ops/workers?range=1h');
+  assert.equal(r.status, 200);
+  const me = r.json.workers.find((w) => w.id === q.workerId);
+  assert.ok(me.telemetry.heapLimit > 0 && me.series.length >= 1 && me.runtime.node);
+  assert.equal(r.json.workers.find((w) => w.id === 'dead-1').end_reason, 'out-of-memory (likely)');
+  assert.ok(r.json.advice.some((a) => a.level === 'critical' && a.area === 'memory'));
+  assert.equal((await reviewerClient.get('/api/ops/workers')).status, 200);       // reviewers have ops
+});
+
+test('advice flags a heap too small for the container and a stalled read', async () => {
+  const { advise } = await import('../src/workerStatus.js');
+  const w = { alive: true, hostname: 'w1', concurrency: 2, series: [], telemetry: { heapUsed: 100e6, heapLimit: 512e6 }, runtime: { memLimit: 4096 * 1048576, heapLimit: 512e6, cgroup: 2, cpuLimit: 1, availableCores: 8 } };
+  const out = advise({ workers: [w], reading: [{ kind: 'events', status: 'running', stalled: true, sinceProgressS: 1800, account_name: 'NonProduction', region: 'ap-southeast-1' }], fails: [], queue: { ready: 0, oldest_wait_s: 0 }, accounts: [] });
+  assert.ok(out.some((a) => /max-old-space-size=3072/.test(a.fix || '')));
+  assert.ok(out.some((a) => a.area === 'reading' && /no progress/.test(a.title)));
+});

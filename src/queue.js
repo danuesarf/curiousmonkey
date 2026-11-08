@@ -67,7 +67,37 @@ export async function registerWorker(version = '0.1.0') {
 export const workerBeat = (jobId = null) =>
   query(`UPDATE workers SET heartbeat_at=now(), current_job=$2 WHERE id=$1`, [workerId, jobId]);
 export const workerStop = () =>
-  query(`UPDATE workers SET stopped_at=now(), current_job=NULL WHERE id=$1`, [workerId]);
+  query(`UPDATE workers SET stopped_at=now(), current_job=NULL, end_reason='stopped' WHERE id=$1`, [workerId]);
+
+/** Heartbeat with telemetry: the latest snapshot on the worker row, plus a sample for the 24-hour charts. */
+export async function workerTelemetry(s) {
+  await query(`UPDATE workers SET heartbeat_at=now(), telemetry=$2 WHERE id=$1`, [workerId, JSON.stringify(s)]);
+  await query(
+    `INSERT INTO worker_samples(worker_id, at, rss, heap_used, heap_limit, external, mem_used, mem_limit, cpu_pct, cpu_limit, loop_p99_ms, active_jobs,
+                                events, s3_files, s3_bytes, api_calls, throttles)
+     VALUES ($1, now(), $2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT DO NOTHING`,
+    [workerId, s.rss, s.heapUsed, s.heapLimit, s.external, s.memUsed, s.memLimit, s.cpuPct, s.cpuLimit, s.loopP99Ms, s.activeJobs,
+     s.events, s.s3Files, s.s3Bytes, s.apiCalls, s.throttles]);
+}
+/** Between samples: record a rising heap at once, so a crash a few seconds later is still recognised as memory. */
+export const workerMemoryAlarm = (m) => query(`UPDATE workers SET telemetry = COALESCE(telemetry, '{}'::jsonb) || $2::jsonb WHERE id=$1`, [workerId, JSON.stringify(m)]);
+export const workerRuntime = (rt) => query(`UPDATE workers SET runtime=$2, concurrency=$3 WHERE id=$1`, [workerId, JSON.stringify(rt), rt.concurrency]);
+
+/**
+ * Workers that stopped heartbeating without saying goodbye. If the last sample showed the heap or the container
+ * near its limit, the process was most likely killed for memory (V8 heap limit or the container's OOM killer).
+ */
+export async function markLostWorkers() {
+  const { rows } = await query(
+    `UPDATE workers SET stopped_at = heartbeat_at, current_job = NULL,
+            end_reason = CASE
+              WHEN (telemetry->>'heapUsed')::float >= 0.85 * NULLIF((telemetry->>'heapLimit')::float, 0)
+                OR (telemetry->>'memUsed')::float >= 0.9 * NULLIF((telemetry->>'memLimit')::float, 0) THEN 'out-of-memory (likely)'
+              ELSE 'lost' END
+      WHERE stopped_at IS NULL AND heartbeat_at < now() - interval '90 seconds' RETURNING id, end_reason`);
+  return rows;
+}
+export const pruneSamples = () => query(`DELETE FROM worker_samples WHERE at < now() - interval '24 hours'`);
 
 /**
  * Claim one runnable job: queued, due, and every job of an earlier stage in the same run has succeeded.
