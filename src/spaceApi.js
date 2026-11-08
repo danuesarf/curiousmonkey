@@ -23,7 +23,7 @@ const bucketOf = (t, start) => Math.max(0, Math.min(23, Math.floor((new Date(t).
 async function hourStart() { return new Date((await query(`SELECT ${BUCKETS} AS t`)).rows[0].t).getTime(); }
 
 /** Identities outside the org that can enter roles in these accounts, grouped by source, worst trust first. */
-async function outsiders(user, accountIds, roleIds = null) {
+async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12 } = {}) {
   const m = await trustMap(user, '', { limit: 1e6 });
   const by = new Map();
   for (const e of m.rows) {
@@ -38,7 +38,7 @@ async function outsiders(user, accountIds, roleIds = null) {
     const t = s.targets.get(e.accountId) || { roles: new Set(), sessions: 0, edges: [] };
     t.roles.add(e.roleId); s.targets.set(e.accountId, t);
     // what the trust statement says, so a click on the path can explain the warning
-    if (t.edges.length < 12) t.edges.push({ roleId: e.roleId, role: e.role, principal: e.principal, actions: e.actions, conditions: e.conditions, worst: e.worst, sid: e.sid || null,
+    if (t.edges.length < edgeCap) t.edges.push({ roleId: e.roleId, role: e.role, principal: e.principal, actions: e.actions, conditions: e.conditions, worst: e.worst, sid: e.sid || null,
       findings: e.findings.filter((x) => x.severity !== 'info').map((x) => ({ title: x.title, severity: x.severity, detail: x.detail || null })),
       sessions: e.seen.reduce((n, x) => n + num(x.sessions), 0), lastSeen: e.seen.map((x) => x.lastSeen).filter(Boolean).sort().pop() || null });
     for (const seen of e.seen) { t.sessions += num(seen.sessions); s.sessions += num(seen.sessions); if (seen.lastSeen && (!s.lastSeen || new Date(seen.lastSeen) > new Date(s.lastSeen))) s.lastSeen = seen.lastSeen; }
@@ -184,7 +184,7 @@ export async function spaceAccount(user, accountId) {
   if (clusters.length > 6) clusters = [...clusters.slice(0, 5), { key: 'other', roles: clusters.slice(5).flatMap((c) => c.roles) }];
 
   const ids = new Set([a.id]);
-  const outside = await outsiders(user, ids);
+  const outside = await outsiders(user, ids, null, { edgeCap: 500 });   // one account: every role an identity can enter, for the list
   const names = new Map((await query('SELECT id, name, environment FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(chains.rows.flatMap((c) => [c.src, c.dst]))]])).rows.map((x) => [x.id, x]));
   const neighbours = new Map();
   for (const c of chains.rows) {
