@@ -89,7 +89,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       return { events: (r.Events || []).map((e) => JSON.parse(e.CloudTrailEvent)), nextToken: r.NextToken || null };
     },
     /** All records of one time slice from the trail's S3 log files. No 2 TPS limit, and history can exceed 90 days. */
-    async trailEventsForSlice({ region, start, end, listCache = new Map() }) {
+    async trailEventsForSlice({ region, start, end, listCache = new Map(), map = (r) => r }) {
       const s3 = s3c || (s3c = new S3Client({ region: account.s3_region || region, credentials }));
       const from = start.getTime(), to = end.getTime() + 60 * 60e3;          // a record is published up to ~1 h after it happens
       const keys = [];
@@ -114,7 +114,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
           const body = await (await s3.send(new GetObjectCommand({ Bucket: account.s3_bucket, Key }))).Body.transformToByteArray();
           for (const r of JSON.parse(gunzipSync(Buffer.from(body)).toString('utf8')).Records || []) {
             const t = new Date(r.eventTime).getTime();
-            if (t >= from && t < end.getTime()) out.push(r);
+            if (t >= from && t < end.getTime()) out.push(map(r));   // map keeps only what the scan needs, not the whole record
           }
         }
       }));

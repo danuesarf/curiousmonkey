@@ -98,10 +98,10 @@ export function demoGateway(account) {
       const next = from + 50;
       return { events: all.slice(from, next), nextToken: next < all.length ? String(next) : null };
     },
-    async trailEventsForSlice({ region, start, end }) {
+    async trailEventsForSlice({ region, start, end, map = (r) => r }) {
       const all = [];
       for (let h = Math.floor(start.getTime() / HOUR) * HOUR; h < end.getTime(); h += HOUR) {
-        for (const e of eventsForHour(h, region)) { const t = new Date(e.eventTime).getTime(); if (t >= start.getTime() && t < end.getTime()) all.push(e); }
+        for (const e of eventsForHour(h, region)) { const t = new Date(e.eventTime).getTime(); if (t >= start.getTime() && t < end.getTime()) all.push(map(e)); }
       }
       return all;
     },

@@ -58,13 +58,16 @@ export async function runEvents(ctx) {
     ctx.alive();
     const [a, b, kind] = slices[i];
     const sliceStart = Date.now();
-    const raw = [];
-    if (src === 's3') raw.push(...await gw.trailEventsForSlice({ region, start: new Date(a), end: new Date(b), listCache }));
+    // Records are parsed as they arrive, so a slice holds compact events rather than whole CloudTrail records
+    // (a busy region's 6 hours can be 100k+ records). Never spread a big array into push: it overflows the stack.
+    let parsed;
+    if (src === 's3') parsed = await gw.trailEventsForSlice({ region, start: new Date(a), end: new Date(b), listCache, map: parseEvent });
     else {
+      parsed = [];
       let token = null;
       do {
         const page = await gw.lookupEventsPage({ region, start: new Date(a), end: new Date(b), token });
-        raw.push(...page.events);
+        for (const e of page.events) parsed.push(parseEvent(e));
         token = page.nextToken;
         if (token && s.lookupDelayMs) await sleep(s.lookupDelayMs);             // LookupEvents: 2 requests/second
       } while (token);
@@ -74,7 +77,7 @@ export async function runEvents(ctx) {
       // Regions of one account fetch in parallel but write one at a time: they update the same roles' rows,
       // and two transactions taking those row locks in different orders deadlock.
       await c.query('SELECT pg_advisory_xact_lock(727100, hashtext($1))', [account.id]);
-      const all = raw.map(parseEvent).filter((e) => e.id);
+      const all = parsed.filter((e) => e.id);
       const fresh = new Set((await c.query(
         `INSERT INTO seen_events(account_id, event_id, event_time) SELECT $3, x, to_timestamp($2) FROM unnest($1::text[]) x ON CONFLICT DO NOTHING RETURNING event_id`,
         [all.map((e) => e.id), b / 1000, account.id])).rows.map((r) => r.event_id));
