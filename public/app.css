@@ -374,3 +374,18 @@ tr.row-bad td{background:rgba(255,122,122,.05)}
 .kv{display:grid;grid-template-columns:140px 1fr;gap:4px 12px;margin:8px 0 0}
 .kv dt{color:#8fb3a3}
 .meter-tile .wgauge{flex:none;width:100%}
+
+/* blast radius: details bubble beside the clicked node */
+.blast-pop{position:absolute;z-index:5;width:320px;max-width:calc(100% - 16px);background:#0b1c14;border:1px solid #2f6e52;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:8px;box-shadow:0 8px 28px rgba(0,0,0,.5);user-select:text}
+.blast-pop[hidden]{display:none}
+.blast-pop .pop-head{align-items:flex-start;justify-content:space-between;gap:8px}
+.blast-pop .pop-name{overflow-wrap:anywhere;font-size:14px;line-height:1.3}
+.blast-pop .pop-x{background:none;border:0;color:#a9bfb2;font-size:20px;line-height:1;cursor:pointer;padding:0 2px}
+.blast-pop .pop-x:hover{color:#f6e016}
+.blast-pop .pop-kv{display:flex;flex-direction:column;gap:1px}
+.blast-pop .pop-path{display:flex;flex-direction:column;gap:2px;border-top:1px solid #173528;padding-top:8px}
+.blast-pop .pop-path .mono{white-space:pre-line;overflow-wrap:anywhere;line-height:1.5}
+.blast-pop .pop-actions{flex-wrap:wrap;gap:6px;border-top:1px solid #173528;padding-top:8px}
+.blast-pop .pop-list{display:flex;flex-direction:column;gap:2px}
+.blast-pop .pop-row{display:flex;justify-content:space-between;gap:8px;background:none;border:0;border-radius:4px;color:inherit;text-align:left;padding:4px 6px;cursor:pointer}
+.blast-pop .pop-row:hover{background:#12291d}

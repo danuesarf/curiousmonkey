@@ -79,7 +79,7 @@ function drawSectors(kids, secs, sub, onClick) {
     const mid = (s.a0 + s.a1) / 2; const [lx, lyr] = P(mid, 344); const ly = r1(lyr + (lyr < CY ? -8 : 6));
     const anchor = Math.abs(lx - CX) < 40 ? 'middle' : lx > CX ? 'start' : 'end';
     const t2 = sub(s); const fit = (w) => (anchor === 'start' ? Math.min(lx, 906 - w) : anchor === 'end' ? Math.max(lx, -106 + w) : lx);
-    kids.push(svg('g', onClick ? { style: 'cursor:pointer', onClick: () => onClick(s) } : null,
+    kids.push(svg('g', onClick ? { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); onClick(s); } } : null,
       svg('text', { x: r1(fit(s.name.length * 7.3)), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': 12 }, s.name),
       svg('text', { x: r1(fit(t2.length * 5.6)), y: ly + 14, 'text-anchor': anchor, fill: '#7e978a', 'font-size': 11 }, t2)));
   }
@@ -390,30 +390,102 @@ async function blastView(ctx, shell) {
     L.forEach((n, i) => { n.ang = s.a0 + 1 + ((i + 0.5) / L.length) * (s.a1 - s.a0 - 2); n.rad = HOP[hop]; [n.x, n.y] = P(n.ang, n.rad); n.s = r1(3 + Math.log10(Math.max(1, n.perms)) * 1.6); });
   }
   const maxHop = Math.max(1, ...nodes.map((n) => n.hop));
-  const kids = [];
-  const rings = [[HOP[Math.min(4, maxHop)] + 18, '#051209', null]].concat([4, 3, 2, 1].filter((h0) => h0 <= maxHop).map((h0) => [HOP[h0] + (h0 === 1 ? -40 : -36), h0 % 2 ? '#081a10' : '#0a1d12', '3 5']));
-  const top = base(kids, rings, [[`HOP 1 · TRUSTS IT OR SEEN ENTERING`, HOP[1] + 14, '#a9bfb2'], ...(maxHop >= 2 ? [['HOP 2 · CHAINED', HOP[2] + 14, '#a9bfb2']] : []), ...(maxHop >= 3 ? [['HOP 3+', HOP[3] + 14, '#a9bfb2']] : [])]);
-  drawSectors(kids, secs, (s) => `${s.weight} role${s.weight > 1 ? 's' : ''}${s.env === 'production' ? ' · prod' : ''}`, (s) => go(`#/?view=account&account=${s.id}`));
-  top();
-  for (const n of nodes) {
-    const from = n.parent ? byId.get(n.parent) : null;
-    const color = n.admin ? '#ff6b5e' : n.hop === 1 ? '#6fe3b0' : '#8ec5ff';
-    const d = from ? (() => { const [mx, my] = P((from.ang + n.ang) / 2, (from.rad + n.rad) / 2); return `M${from.x} ${from.y} Q${mx} ${my} ${n.x} ${n.y}`; })() : `M${CX} ${CY} L${n.x} ${n.y}`;
-    kids.push(svg('path', { d, stroke: color, 'stroke-width': n.admin ? 1.8 : 1.1, fill: 'none', opacity: n.admin ? 0.95 : 0.55, 'stroke-dasharray': n.edge === 'trust' ? '4 3' : null }));
-  }
-  for (const n of nodes) contact(kids, { d: shape(n.kind, n.x, n.y, n.s), x: n.x, y: n.y, s: n.s, fill: n.admin ? '#ff6b5e' : n.perms > 2000 ? '#f0b45a' : '#6fe3b0', base: 0.95, act: null, ang: n.ang,
-    title: `${n.name} in ${n.account} · hop ${n.hop} · ${n.edge === 'trust' ? 'trust policy names it' : 'seen entering'} · ${num(n.perms)} permissions`, onClick: () => go(`#/roles/${n.id}`) });
-  tags(kids, nodes.filter((n) => n.admin).sort((x, y) => x.hop - y.hop).map((n) => ({ ...n, text: `${short(n.name, 18)} · ${short(n.account, 16)}`, color: '#ff8a7a' })), 9);
-  dial(kids, 'CAN REACH', kfmt(B.totals.perms), '#ff8a7a', `${B.totals.roles} roles · ${B.totals.accounts} accts`, '#a9bfb2');
   const svgEl = stage(`Blast radius of ${B.identity.display}: the identity at the centre; rings are hops; slices are the accounts reached.`);
-  svgEl.replaceChildren(...kids);
+  const chainOf = (n) => { const c = []; let x = n; while (x) { c.unshift(x); x = x.parent ? byId.get(x.parent) : null; } return c; };
+  let sel = null;                                       // { type: 'node', n } | { type: 'account', s }
+  const bubble = h('div', { class: 'blast-pop', hidden: true, role: 'dialog', 'aria-label': 'Details' });
+
+  // Clicking a node or slice selects it and opens a bubble beside it; the page never navigates on its own.
+  function drawScene() {
+    const kids = [];
+    const onPath = sel?.type === 'node' ? new Set(chainOf(sel.n).map((x) => x.id)) : null;
+    const inAcct = sel?.type === 'account' ? sel.s.id : null;
+    const dim = (n) => (onPath ? !onPath.has(n.id) : inAcct ? n.accountId !== inAcct : false);
+    const rings = [[HOP[Math.min(4, maxHop)] + 18, '#051209', null]].concat([4, 3, 2, 1].filter((h0) => h0 <= maxHop).map((h0) => [HOP[h0] + (h0 === 1 ? -40 : -36), h0 % 2 ? '#081a10' : '#0a1d12', '3 5']));
+    const top = base(kids, rings, [[`HOP 1 · TRUSTS IT OR SEEN ENTERING`, HOP[1] + 14, '#a9bfb2'], ...(maxHop >= 2 ? [['HOP 2 · CHAINED', HOP[2] + 14, '#a9bfb2']] : []), ...(maxHop >= 3 ? [['HOP 3+', HOP[3] + 14, '#a9bfb2']] : [])]);
+    drawSectors(kids, secs, (s) => `${s.weight} role${s.weight > 1 ? 's' : ''}${s.env === 'production' ? ' · prod' : ''}`, (s) => select({ type: 'account', s }));
+    top();
+    for (const n of nodes) {
+      const from = n.parent ? byId.get(n.parent) : null;
+      const color = n.admin ? '#ff6b5e' : n.hop === 1 ? '#6fe3b0' : '#8ec5ff';
+      const d = from ? (() => { const [mx, my] = P((from.ang + n.ang) / 2, (from.rad + n.rad) / 2); return `M${from.x} ${from.y} Q${mx} ${my} ${n.x} ${n.y}`; })() : `M${CX} ${CY} L${n.x} ${n.y}`;
+      const hot = onPath?.has(n.id);
+      kids.push(svg('path', { d, stroke: hot ? '#f6e016' : color, 'stroke-width': hot ? 2.4 : n.admin ? 1.8 : 1.1, fill: 'none', opacity: dim(n) ? 0.12 : hot ? 1 : n.admin ? 0.95 : 0.55, 'stroke-dasharray': n.edge === 'trust' ? '4 3' : null }));
+    }
+    for (const n of nodes) contact(kids, { d: shape(n.kind, n.x, n.y, n.s), x: n.x, y: n.y, s: n.s, fill: n.admin ? '#ff6b5e' : n.perms > 2000 ? '#f0b45a' : '#6fe3b0', base: dim(n) ? 0.2 : 0.95, act: null, ang: n.ang,
+      sel: sel?.type === 'node' && sel.n === n,
+      title: `${n.name} in ${n.account} · hop ${n.hop} · ${n.edge === 'trust' ? 'trust policy names it' : 'seen entering'} · ${num(n.perms)} permissions`, onClick: () => select({ type: 'node', n }) });
+    tags(kids, nodes.filter((n) => n.admin && !dim(n)).sort((x, y) => x.hop - y.hop).map((n) => ({ ...n, text: `${short(n.name, 18)} · ${short(n.account, 16)}`, color: '#ff8a7a' })), 9);
+    dial(kids, 'CAN REACH', kfmt(B.totals.perms), '#ff8a7a', `${B.totals.roles} roles · ${B.totals.accounts} accts`, '#a9bfb2');
+    svgEl.replaceChildren(...kids);
+  }
+
+  function select(next) {
+    sel = next && sel && ((next.type === 'node' && sel.n === next.n) || (next.type === 'account' && sel.s === next.s)) ? null : next;   // a second click closes
+    drawScene();
+    if (!sel) { bubble.hidden = true; return; }
+    bubble.replaceChildren(...(sel.type === 'node' ? nodeBubble(sel.n) : accountBubble(sel.s)));
+    bubble.hidden = false;
+    place(sel.type === 'node' ? [sel.n.x, sel.n.y] : P((sel.s.a0 + sel.s.a1) / 2, 300));
+  }
+  // put the bubble next to the point, inside the scene, on whichever side has room
+  function place([x, y]) {
+    const m = svgEl.getScreenCTM(); if (!m) return;
+    const pt = svgEl.createSVGPoint(); pt.x = x; pt.y = y;
+    const c = pt.matrixTransform(m), box = shell.scene.getBoundingClientRect();
+    const px = c.x - box.left, py = c.y - box.top, bw = bubble.offsetWidth || 300, bh = bubble.offsetHeight || 200;
+    const left = px + 16 + bw > box.width - 8 ? px - 16 - bw : px + 16;
+    bubble.style.left = `${Math.max(8, left)}px`;
+    bubble.style.top = `${Math.min(Math.max(8, py - bh / 2), box.height - bh - 8)}px`;
+  }
+  const closeBtn = () => h('button', { class: 'pop-x', 'aria-label': 'Close', onClick: () => select(null) }, '×');
+  const kv = (k, v) => h('div', { class: 'pop-kv' }, h('span', { class: 'tiny muted' }, k), h('span', { class: 'small' }, v));
+  function nodeBubble(n) {
+    const chain = chainOf(n);
+    const next = nodes.filter((x) => x.parent === n.id);
+    const roleKey = `role:${n.awsAccountId}:${n.name}`;
+    return [
+      h('div', { class: 'row pop-head' }, h('div', { class: 'stack', style: 'gap:2px;min-width:0' },
+        h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'eyebrow' }, `HOP ${n.hop} · ROLE`), n.admin && pill('ADMIN', '#ff6b5e'), n.environment === 'production' && pill('PROD', '#ff8a7a')),
+        h('b', { class: 'pop-name' }, n.name)), closeBtn()),
+      kv('Account', `${n.account} · ${n.awsAccountId}${n.environment ? ` · ${n.environment}` : ''}`),
+      kv('How it is reached', n.edge === 'trust' ? 'Its trust policy names the previous step (not seen used yet)' : 'Seen being entered in CloudTrail'),
+      kv('Permissions', `${num(n.perms)}${n.risk ? ` · risk ${n.risk}` : ''}${n.kind ? ` · ${n.kind}` : ''}`),
+      next.length > 0 && kv('Leads on to', `${next.length} more role${next.length > 1 ? 's' : ''}: ${next.slice(0, 3).map((x) => short(x.name, 28)).join(', ')}${next.length > 3 ? '…' : ''}`),
+      h('div', { class: 'pop-path' }, h('span', { class: 'tiny muted' }, 'Path'),
+        h('div', { class: 'small mono' }, [short(B.identity.display, 34), ...chain.map((x) => `${short(x.name, 34)} (${short(x.account, 16)})`)].join('\n→ '))),
+      h('div', { class: 'row pop-actions' },
+        h('a', { class: 'btn sm primary', href: `#/roles/${n.id}` }, 'Open role'),
+        h('a', { class: 'btn sm', href: `#/?view=blast&key=${encodeURIComponent(roleKey)}` }, 'Blast radius from here'),
+        h('a', { class: 'btn sm', href: `#/?view=account&account=${n.accountId}` }, 'Account radar')),
+    ];
+  }
+  function accountBubble(s) {
+    const L = nodes.filter((n) => n.accountId === s.id);
+    return [
+      h('div', { class: 'row pop-head' }, h('div', { class: 'stack', style: 'gap:2px;min-width:0' },
+        h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'eyebrow' }, 'ACCOUNT REACHED'), s.env === 'production' && pill('PROD', '#ff8a7a')), h('b', { class: 'pop-name' }, s.name)), closeBtn()),
+      kv('Roles reachable', `${L.length} · ${L.filter((n) => n.admin).length} admin-level`),
+      kv('Permissions', num(L.reduce((t, n) => t + n.perms, 0))),
+      h('div', { class: 'pop-list' }, L.sort((a, b) => b.perms - a.perms).slice(0, 6).map((n) => h('button', { class: 'pop-row', onClick: () => select({ type: 'node', n }) },
+        h('span', { class: 'small' }, short(n.name, 36)), h('span', { class: 'tiny muted' }, `hop ${n.hop} · ${num(n.perms)}`)))),
+      h('div', { class: 'row pop-actions' }, h('a', { class: 'btn sm primary', href: `#/?view=account&account=${s.id}` }, 'Open account radar')),
+    ];
+  }
+  svgEl.addEventListener('click', () => sel && select(null));       // clicking empty space closes
+  const onKey = (e) => { if (e.key === 'Escape' && sel) select(null); };
+  document.addEventListener('keydown', onKey);
+  const onResize = () => sel && place(sel.type === 'node' ? [sel.n.x, sel.n.y] : P((sel.s.a0 + sel.s.a1) / 2, 300));
+  window.addEventListener('resize', onResize);
+  ctx.onLeave?.(() => { document.removeEventListener('keydown', onKey); window.removeEventListener('resize', onResize); });
+  drawScene();
 
   const paths = nodes.filter((n) => n.admin).sort((x, y) => x.hop - y.hop).slice(0, 6).map((n) => {
     const chain = []; let c = n; while (c) { chain.unshift(`${c.name} (${c.account})`); c = c.parent ? byId.get(c.parent) : null; }
     return { n, text: [B.identity.display, ...chain].join(' → ') };
   });
   const id = B.identity;
-  shell.scene.append(svgEl,
+  shell.scene.append(svgEl, bubble,
     hudEl(`RADAR · BLAST RADIUS · ${short(id.display, 40).toUpperCase()}`,
       `${B.totals.roles} ROLES · ${B.totals.accounts} ACCOUNTS · ${B.totals.admin} ADMIN-LEVEL · ${B.totals.production} IN PRODUCTION${B.hidden ? ` · ${B.hidden} OUTSIDE YOUR SCOPE` : ''}`,
       'CENTRE = IDENTITY · RING = HOPS · SLICE = ACCOUNT REACHED · SIZE = PERMISSIONS'),
