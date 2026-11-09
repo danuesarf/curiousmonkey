@@ -122,7 +122,7 @@ jobs:
         with: { fetch-depth: 0, persist-credentials: false }     # the whole history, not just the last commit
       - name: Install gitleaks (checksum verified)
         run: |
-          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL --retry 5 --retry-delay 5 --retry-all-errors -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
           tar xzf gitleaks.tgz gitleaks
       - name: Gitleaks over all commits (reviewed false positives in .gitleaksignore)
