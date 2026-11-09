@@ -122,13 +122,18 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0, persist-credentials: false }     # the whole history, not just the last commit
-      - name: Install gitleaks (checksum verified)
-        run: |
-          curl -sSfL --retry 5 --retry-delay 5 --retry-all-errors -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
-          tar xzf gitleaks.tgz gitleaks
       - name: Gitleaks over all commits (reviewed false positives in .gitleaksignore)
-        run: ./gitleaks git --no-banner --redact --exit-code 1 .
+        # The release binary (checksum verified) is preferred; GitHub's release downloads sometimes answer 504 for a
+        # while, so the official image of the same version is the fallback rather than failing the check.
+        run: |
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          if curl -sSfL --retry 4 --retry-delay 5 --retry-all-errors -o gitleaks.tgz "$url" \
+             && echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c - && tar xzf gitleaks.tgz gitleaks; then
+            ./gitleaks git --no-banner --redact --exit-code 1 .
+          else
+            echo "::warning::release download failed; running ghcr.io/gitleaks/gitleaks:v${GITLEAKS_VERSION}"
+            docker run --rm -v "$PWD:/repo" -w /repo -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/repo "ghcr.io/gitleaks/gitleaks:v${GITLEAKS_VERSION}" git --no-banner --redact --exit-code 1 /repo
+          fi
 
   iac:
     runs-on: ubuntu-latest
