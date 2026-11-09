@@ -2,12 +2,12 @@
 # The base is a tag that Dependabot keeps current. To pin it by digest (recommended for production):
 #   docker buildx imagetools inspect node:22-alpine --format '{{json .Manifest.Digest}}'
 # and use FROM node:22-alpine@sha256:<digest> in both stages; Dependabot then bumps the digest too.
-FROM node:22-alpine AS deps
+FROM node:26-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-FROM node:22-alpine
+FROM node:26-alpine
 ENV NODE_ENV=production
 WORKDIR /app
 # OS security updates; npm, npx and corepack are not needed at runtime (and their bundled packages are a common
