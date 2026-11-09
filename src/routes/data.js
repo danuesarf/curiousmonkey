@@ -243,7 +243,7 @@ data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
     SELECT a.*, (SELECT count(*)::int FROM roles WHERE account_id=a.id AND deleted_at IS NULL) AS roles,
       (SELECT count(*)::int FROM data_event_sources WHERE account_id=a.id) AS data_event_sources,
       (SELECT json_build_object('id', id, 'status', status, 'trigger', trigger, 'created_at', created_at, 'finished_at', finished_at, 'error', error)
-         FROM scan_runs WHERE account_id=a.id ORDER BY created_at DESC LIMIT 1) AS last_run,
+         FROM scan_runs WHERE account_id=a.id AND trigger <> 'tail' ORDER BY created_at DESC LIMIT 1) AS last_run,
       (SELECT coalesce(json_agg(json_build_object('region', region, 'first', first_event_time, 'last', last_event_time, 'events', events_read, 'gap', gap_detected)), '[]')
          FROM scan_checkpoints WHERE account_id=a.id) AS checkpoints
     FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', p)} ORDER BY a.name`, p);
@@ -605,8 +605,12 @@ data.get('/status', requirePerm('view'), wrap(async (req, res) => {
   ]);
   const progress = reading.length ? Math.floor(reading.reduce((s, a) => s + hist.get(a.id).progress, 0) / reading.length) : 100;
   const upTo = reading.map((a) => hist.get(a.id).readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null;
+  // how current the data is: the stalest account that has finished its history (planned accounts have nothing to read)
+  const fresh = accounts.filter((a) => a.status === 'connected' && hist.get(a.id).complete).map((a) => ({ a, t: hist.get(a.id).freshAt }));
+  const stalest = fresh.sort((x, y) => (x.t ? +x.t : 0) - (y.t ? +y.t : 0))[0];
   res.json({ progress, complete: !reading.length, reading: reading.map((a) => ({ id: a.id, name: a.name, progress: hist.get(a.id).progress })), readUpTo: upTo,
-    etaSeconds: eta.rows[0]?.eta ?? null, unidentified: unk.rows[0]?.n ?? 0, accounts: accounts.length });
+    etaSeconds: eta.rows[0]?.eta ?? null, unidentified: unk.rows[0]?.n ?? 0, accounts: accounts.length,
+    freshAt: stalest?.t || null, stalest: stalest ? { id: stalest.a.id, name: stalest.a.name } : null, tailEveryMinutes: config.scanner.tailEveryMinutes, deliveryLagMinutes: config.scanner.deliveryLagMinutes });
 }));
 
 data.get('/overview', requirePerm('view'), wrap(async (req, res) => {

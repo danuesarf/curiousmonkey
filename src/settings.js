@@ -18,6 +18,7 @@ const DEFS = {
   'history.defaultLookbackDays': [z.number().int().min(1).max(LOOKBACK_CEILING_DAYS), ['scanner', 'defaultLookbackDays']],
   'history.maxLookbackDays':  [z.number().int().min(EVENT_HISTORY_MAX_DAYS).max(LOOKBACK_CEILING_DAYS), ['scanner', 'maxLookbackDays']],
   'history.sliceHours':       [z.number().refine((v) => SLICE_CHOICES.includes(v), 'Pick one of the slice sizes.'), ['scanner', 'sliceHours']],
+  'history.tailEveryMinutes': [z.number().int().min(0).max(1440), ['scanner', 'tailEveryMinutes']],
 };
 const at = (path) => path.reduce((o, k) => o?.[k], config);
 const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], config); o[path.at(-1)] = v; };
@@ -25,6 +26,7 @@ const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], co
 // Defaults as the process started (environment or built-in), before any saved value.
 if (config.scanner.defaultLookbackDays == null) config.scanner.defaultLookbackDays = Number(process.env.DEFAULT_LOOKBACK_DAYS || 90);
 if (config.scanner.maxLookbackDays == null) config.scanner.maxLookbackDays = Math.min(Number(process.env.MAX_LOOKBACK_DAYS || 365), LOOKBACK_CEILING_DAYS);
+if (config.scanner.tailEveryMinutes == null) config.scanner.tailEveryMinutes = Number(process.env.TAIL_EVERY_MINUTES ?? 30);
 const DEFAULTS = Object.fromEntries(Object.entries(DEFS).map(([k, [, p]]) => [k, at(p)]));
 let saved = {};
 let loadedAt = 0;

@@ -1,4 +1,4 @@
-import { h, svg, clear, get, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM } from './lib.js';
+import { h, svg, clear, get, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR } from './lib.js';
 import * as authPages from './pages/auth.js';
 import { overview } from './pages/overview.js';
 import { rolePage } from './pages/role.js';
@@ -74,13 +74,17 @@ export async function refreshStatus() {
   const C = 2 * Math.PI * 10, frac = Math.max(0, Math.min(1, s.progress / 100));
   const upTo = s.readUpTo ? new Date(s.readUpTo).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : null;
   const eta = s.etaSeconds == null ? null : s.etaSeconds < 3600 ? `about ${Math.max(1, Math.round(s.etaSeconds / 60))} min left` : `about ${Math.round(s.etaSeconds / 1800) / 2} h left`;
-  const meter = h('a', { href: '#/scans', class: `meter${s.complete ? '' : ' reading'}` },
+  // two questions, two answers: is the history all there (the dial), and how current is it (the line under it)
+  const fr = s.complete && s.accounts > 0 ? freshness(s.freshAt, s.tailEveryMinutes, s.deliveryLagMinutes) : null;
+  const meter = h('a', { href: '#/scans', class: `meter${s.complete ? '' : ' reading'}`,
+    title: fr ? `History: every account's lookback is read. Freshness: the least current account${s.stalest ? ` (${s.stalest.name})` : ''} is ${fr.text}.${s.tailEveryMinutes > 0 ? ` New events are read every ${s.tailEveryMinutes} min; CloudTrail itself delivers them ${s.deliveryLagMinutes} min or so late.` : ' Catch-up reads are off, so new events wait for the daily scan.'}` : null },
     svg('svg', { width: 26, height: 26, viewBox: '0 0 26 26', 'aria-hidden': 'true' },
       svg('circle', { cx: 13, cy: 13, r: 10, fill: 'none', stroke: '#1f4a35', 'stroke-width': 3 }),
       svg('circle', { cx: 13, cy: 13, r: 10, fill: 'none', stroke: s.complete ? '#6fe3b0' : '#f6e016', 'stroke-width': 3, 'stroke-dasharray': `${(C * frac).toFixed(1)} ${C.toFixed(1)}`, transform: 'rotate(-90 13 13)' })),
     h('span', null, h('b', { style: null }, s.accounts === 0 ? 'NO ACCOUNTS YET' : s.complete ? 'HISTORY COMPLETE' : `HISTORY ${s.progress}% READ`),
-      h('span', null, s.accounts === 0 ? 'Connect one to start' : s.complete ? 'Results are final' : [upTo && `up to ${upTo}`, eta, 'results are provisional'].filter(Boolean).join(' · '))));
+      h('span', { class: fr ? `fresh-${fr.tone}` : null }, s.accounts === 0 ? 'Connect one to start' : fr ? fr.text : [upTo && `up to ${upTo}`, eta, 'results are provisional'].filter(Boolean).join(' · '))));
   meter.querySelector('b').style.color = s.complete ? '#6fe3b0' : '#f6e016';
+  if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = TONE_COLOR[fr.tone];
   const firstAcct = s.reading?.[0]?.id;
   statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }),
     s.unidentified > 0 && h('a', { class: 'unk-badge', href: firstAcct ? `#/accounts/${firstAcct}/unidentified` : '#/accounts', title: 'Calls under event names not yet identified' },

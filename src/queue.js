@@ -1,5 +1,6 @@
 // Postgres job queue for scans. No external broker: jobs are rows, claimed with SKIP LOCKED,
 // protected by a lease that heartbeats extend. A dead worker's lease expires and the reaper requeues the job.
+import { config } from './config.js';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { query, tx } from './db.js';
@@ -47,7 +48,8 @@ export async function enqueueRun(accountId, { trigger = 'schedule', requestedBy 
     const run = (await c.query(
       `INSERT INTO scan_runs(account_id, trigger, requested_by, status) VALUES ($1,$2,$3,'queued') RETURNING id`,
       [accountId, trigger, requestedBy])).rows[0];
-    for (const s of STAGES) {
+    // a catch-up read only reads the new events and refreshes results; inventory and Access Advisor wait for the daily scan
+    for (const s of trigger === 'tail' ? STAGES.filter((x) => x.kind === 'events' || x.kind === 'analyze') : STAGES) {
       // an S3 trail is read by one job for all its regions; Event History by one job per region
       const regions = s.kind === 'events' ? (acc.event_source === 's3' ? ['*'] : acc.regions) : [''];
       for (const region of regions) {
@@ -223,9 +225,9 @@ async function finishRunIfDone(c, runId) {
   if (open > 0) return;
   const status = bad === 0 ? 'succeeded' : ok > 0 ? 'partial' : 'failed';
   const run = (await c.query(
-    `UPDATE scan_runs SET status=$2, finished_at=now() WHERE id=$1 AND status IN ('queued','running') RETURNING account_id`,
+    `UPDATE scan_runs SET status=$2, finished_at=now() WHERE id=$1 AND status IN ('queued','running') RETURNING account_id, trigger`,
     [runId, status])).rows[0];
-  if (run && status !== 'failed') await c.query(`UPDATE cloud_accounts SET last_scan_at=now() WHERE id=$1`, [run.account_id]);
+  if (run && status !== 'failed' && run.trigger !== 'tail') await c.query(`UPDATE cloud_accounts SET last_scan_at=now() WHERE id=$1`, [run.account_id]);
 }
 
 // ---- operator actions (used by the monitoring UI) ----
@@ -288,7 +290,7 @@ export async function cancelRun(runId) {
 
 // ---- monitoring ----
 export async function queueOverview() {
-  const [counts, workers, runs, oldest, throughput] = await Promise.all([
+  const [counts, workers, runs, tails, oldest, throughput] = await Promise.all([
     query(`SELECT status, count(*)::int AS n FROM scan_jobs GROUP BY status`),
     query(`SELECT id, hostname, version, started_at, heartbeat_at, current_job, jobs_done, jobs_failed, stopped_at,
                   (stopped_at IS NULL AND heartbeat_at > now() - interval '60 seconds') AS alive
@@ -303,7 +305,10 @@ export async function queueOverview() {
                   count(*) FILTER (WHERE j.status='running')::int AS jobs_running
              FROM scan_runs r JOIN cloud_accounts a ON a.id=r.account_id
              LEFT JOIN scan_jobs j ON j.run_id=r.id
+            WHERE r.trigger <> 'tail' OR r.status IN ('failed','partial') OR (r.status IN ('queued','running') AND r.created_at < now() - interval '15 minutes')
             GROUP BY r.id, a.name, a.account_id ORDER BY r.created_at DESC LIMIT 30`),
+    query(`SELECT count(*) FILTER (WHERE status='succeeded')::int AS ok, count(*) FILTER (WHERE status IN ('queued','running'))::int AS open, max(finished_at) AS last
+             FROM scan_runs WHERE trigger='tail' AND created_at > now() - interval '1 hour'`),
     query(`SELECT extract(epoch FROM now() - min(run_after))::int AS secs FROM scan_jobs WHERE status='queued' AND run_after <= now()`),
     query(`SELECT count(*)::int AS n FROM scan_jobs WHERE status='succeeded' AND finished_at > now() - interval '1 hour'`),
   ]);
@@ -312,6 +317,7 @@ export async function queueOverview() {
     jobs: byStatus,
     workers: workers.rows,
     runs: runs.rows,
+    tail: { everyMinutes: config.scanner.tailEveryMinutes, lastHour: tails.rows[0].ok, open: tails.rows[0].open, last: tails.rows[0].last },
     oldestWaitingSeconds: oldest.rows[0].secs ?? 0,
     succeededLastHour: throughput.rows[0].n,
   };

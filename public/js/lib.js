@@ -70,6 +70,20 @@ export const ago = (d) => {
   const s = Math.max(0, (Date.now() - new Date(d)) / 1000);
   if (s < 90) return 'just now'; if (s < 5400) return `${Math.round(s / 60)} min ago`; if (s < 129600) return `${Math.round(s / 3600)} h ago`; return `${Math.round(s / 86400)} days ago`;
 };
+/**
+ * How current the CloudTrail data is. `at` is when the newest read reached the present (minus the delivery lag).
+ * Fine while within two catch-up intervals (or a day when catch-up is off), amber after that, red after a day and a half.
+ */
+export function freshness(at, everyMinutes = 0, lagMinutes = 15) {
+  if (!at) return { tone: 'bad', behind: null, text: 'not read up to the present yet' };
+  const min = Math.max(0, Math.round((Date.now() - new Date(at)) / 60000));
+  const okFor = everyMinutes > 0 ? everyMinutes * 2 + lagMinutes + 10 : 26 * 60;
+  const tone = min > 36 * 60 ? 'bad' : min > okFor ? 'warn' : 'good';
+  const behind = min < 60 ? `${min} min` : min < 6 * 60 ? `${Math.floor(min / 60)} h${min % 60 ? ` ${min % 60} min` : ''}` : min < 48 * 60 ? `${Math.round(min / 60)} h` : `${Math.round(min / 1440)} days`;
+  const time = new Date(at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + (min >= 20 * 60 ? ` ${new Date(at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : '');
+  return { tone, min, behind, time, text: `read up to ${time} · ${behind} behind` };
+}
+export const TONE_COLOR = { good: '#6fe3b0', warn: '#f0b45a', bad: '#ff5a4f' };
 export const num = (n) => Number(n || 0).toLocaleString('en-US');
 export const TEAM = { infrasec: 'Infrastructure Security', infosec: 'Information Security' };
 export const ROLE_LABEL = { owner: 'Owner', admin: 'Admin', reviewer: 'Security reviewer', account_owner: 'Account owner', auditor: 'Auditor' };

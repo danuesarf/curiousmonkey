@@ -68,3 +68,53 @@ test('a provisional refresh runs one at a time per account', async () => {
   const [a, b] = await Promise.all([provisionalAnalyze(A), provisionalAnalyze(A)]);
   assert.deepEqual([a, b].sort(), [false, true]);
 });
+
+test('freshness: how recent the newest read is, the least current region counting', () => {
+  const now = Date.now(), at = (minAgo) => new Date(now - minAgo * 60e3);
+  const s = h.historyState(acct, [{ ...cp('us-east-1', 90, 0, true), caught_up_at: at(5) }, { ...cp('ap-southeast-3', 90, 0, true), caught_up_at: at(50) }], now);
+  assert.equal(s.complete, true);
+  assert.ok(Math.abs(s.freshAt - at(50 + 15)) < 1000, 'the stalest region, less the delivery lag');
+  assert.equal(h.historyState(acct, [cp('us-east-1', 90, 60, false)]).freshAt, null);
+});
+
+test('catch-up reads: accounts with complete history get an events-and-analyze run every N minutes', async () => {
+  const { config } = await import('../src/config.js');
+  const mk = async (aws, caught) => {
+    const id = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status) VALUES ($1,$1,'arn:aws:iam::1:role/x',$2,'connected') RETURNING id`, [aws, ['us-east-1']])).rows[0].id;
+    await db.query(`INSERT INTO scan_checkpoints(account_id, region, source, first_event_time, last_event_time, caught_up_at) VALUES ($1,'us-east-1','event-history',now() - interval '91 days', now() - interval '20 minutes', $2)`,
+      [id, caught ? new Date() : null]);
+    return id;
+  };
+  const done = await mk('444444444441', true), reading = await mk('444444444442', false);
+  const tailsOf = async (id) => (await db.query(`SELECT r.id, array_agg(j.kind ORDER BY j.kind) AS kinds FROM scan_runs r JOIN scan_jobs j ON j.run_id = r.id WHERE r.account_id=$1 AND r.trigger='tail' GROUP BY r.id`, [id])).rows;
+  config.scanner.tailEveryMinutes = 0;
+  await w.tailTick();
+  assert.equal((await tailsOf(done)).length, 0, 'off');
+  config.scanner.tailEveryMinutes = 30;
+  await w.tailTick();
+  const t = await tailsOf(done);
+  assert.equal(t.length, 1);
+  assert.deepEqual(t[0].kinds, ['analyze', 'events']);                       // no inventory, no Access Advisor
+  assert.equal((await tailsOf(reading)).length, 0, 'an account still reading history is left to its own scan');
+  await w.tailTick();
+  assert.equal((await tailsOf(done)).length, 1, 'one in flight: nothing more');
+  await db.query(`UPDATE scan_runs SET status='succeeded', created_at = now() - interval '10 minutes' WHERE id=$1`, [t[0].id]);
+  await w.tailTick();
+  assert.equal((await tailsOf(done)).length, 1, 'within the interval: nothing more');
+  await db.query(`UPDATE scan_runs SET created_at = now() - interval '31 minutes' WHERE id=$1`, [t[0].id]);
+  await w.tailTick();
+  assert.equal((await tailsOf(done)).length, 2);
+  config.scanner.tailEveryMinutes = 30;
+});
+
+test('a catch-up read that found no new events skips the analysis', async () => {
+  const { runAnalyze } = await import('../src/scanner/analyzeJob.js');
+  const id = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status) VALUES ('444444444443','q','arn:aws:iam::1:role/x','{us-east-1}','connected') RETURNING id`)).rows[0].id;
+  const run = await q.enqueueRun(id, { trigger: 'tail' });
+  await db.query(`UPDATE scan_jobs SET progress='{"skipped":"up to date"}' WHERE run_id=$1 AND kind='events'`, [run]);
+  assert.deepEqual(await runAnalyze({ job: { run_id: run, account_id: id }, alive() {}, async progress() {} }), { skipped: 'no new events' });
+  await db.query(`UPDATE scan_jobs SET progress='{"events":3}' WHERE run_id=$1 AND kind='events'`, [run]);
+  const out = await runAnalyze({ job: { run_id: run, account_id: id }, alive() {}, async progress() {} });
+  assert.equal(out.skipped, undefined);
+  assert.equal(out.changes, undefined, 'the daily snapshot is left to the daily scan');
+});

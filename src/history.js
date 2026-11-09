@@ -28,7 +28,9 @@ export function historyState(account, checkpoints, now = Date.now()) {
     const stamp = cp.caught_up_at ? new Date(cp.caught_up_at).getTime() : null;
     const caughtUp = stamp != null && last >= stamp - config.scanner.deliveryLagMinutes * MIN - CATCH_UP_SLACK;
     const complete = backDone && caughtUp;
-    return { region, progress: complete ? 100 : Math.min(99, (covered / span) * 100), complete, first: new Date(first), last: new Date(last), gap: !!cp.gap_detected };
+    // fresh = how recent the newest read is: when it last reached the present, minus the delivery lag it holds back
+    const fresh = stamp != null ? new Date(stamp - config.scanner.deliveryLagMinutes * MIN) : null;
+    return { region, progress: complete ? 100 : Math.min(99, (covered / span) * 100), complete, first: new Date(first), last: new Date(last), fresh, gap: !!cp.gap_detected };
   });
   const complete = regions.length > 0 && regions.every((r) => r.complete);
   const progress = complete ? 100 : Math.floor(regions.reduce((s, r) => s + r.progress, 0) / Math.max(regions.length, 1));
@@ -37,13 +39,14 @@ export function historyState(account, checkpoints, now = Date.now()) {
   return {
     progress, complete,
     readUpTo: lasts.length ? new Date(Math.min(...lasts)) : null,
+    freshAt: regions.length && regions.every((r) => r.fresh) ? new Date(Math.min(...regions.map((r) => r.fresh.getTime()))) : null,
     backTo: firsts.length ? new Date(Math.max(...firsts)) : null,
     regions: regions.map((r) => ({ ...r, progress: Math.floor(r.progress) })),
   };
 }
 
 /** History state for these accounts (rows of cloud_accounts), keyed by id. */
-const PLANNED = Object.freeze({ planned: true, complete: true, progress: 100, regions: [], readUpTo: null });
+const PLANNED = Object.freeze({ planned: true, complete: true, progress: 100, regions: [], readUpTo: null, freshAt: null });
 
 export async function historyFor(accounts) {
   if (!accounts.length) return new Map();

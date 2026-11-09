@@ -1,3 +1,4 @@
+import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
 import { fileURLToPath } from 'node:url';
@@ -108,6 +109,45 @@ export async function scheduleTick(now = new Date()) {
   }
 }
 
+/**
+ * Catch-up reads: every TAIL_EVERY_MINUTES (Configuration > history), read the CloudTrail events that arrived since the
+ * last read, for each connected account whose history is complete. 0 turns it off. Accounts still reading their history
+ * are left to their own scan, and an account with any run in flight is skipped.
+ */
+let lastTailPrune = 0;
+export async function tailTick(now = new Date()) {
+  const every = Number(config.scanner.tailEveryMinutes) || 0;
+  if (every <= 0) return 0;
+  const client = await pool.connect();
+  try {
+    const got = (await client.query('SELECT pg_try_advisory_lock(727003) AS ok')).rows[0].ok;
+    if (!got) return 0;
+    try {
+      // finished catch-up reads are only worth keeping for a while; their effect is in the data
+      if (now - lastTailPrune > 10 * 60e3) {
+        lastTailPrune = +now;
+        await client.query(`DELETE FROM scan_runs WHERE trigger = 'tail' AND status = 'succeeded' AND created_at < now() - interval '2 days'`);
+      }
+      const { rows } = await client.query(
+        `SELECT a.* FROM cloud_accounts a
+          WHERE a.status = 'connected'
+            AND NOT EXISTS (SELECT 1 FROM scan_runs r WHERE r.account_id = a.id
+                             AND (r.status IN ('queued','running') OR r.created_at > $1::timestamptz - make_interval(mins => $2)))`,
+        [now, every]);
+      if (!rows.length) return 0;
+      const hist = await historyFor(rows);
+      let n = 0;
+      for (const a of rows) if (hist.get(a.id)?.complete && await enqueueRun(a.id, { trigger: 'tail' })) n++;
+      if (n) log('info', 'catch-up reads queued', { accounts: n, everyMinutes: every });
+      return n;
+    } finally {
+      await client.query('SELECT pg_advisory_unlock(727003)');
+    }
+  } finally {
+    client.release();
+  }
+}
+
 /** Which AWS identity the default credential chain gives this worker. Shown during onboarding ("system credentials"). */
 async function reportIdentity() {
   let identity;
@@ -150,6 +190,7 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
     setInterval(() => reapExpired().then((n) => n && log('warn', 'reaped expired jobs', { n })).catch(() => {}), 30_000),
   ];
   if (scheduler) timers.push(setInterval(() => scheduleTick().catch((e) => log('error', 'schedule failed', { error: e.message })), 60_000));
+  if (scheduler) timers.push(setInterval(() => tailTick().catch((e) => log('error', 'catch-up scheduling failed', { error: e.message })), 30_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });
   return {

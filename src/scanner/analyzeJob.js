@@ -87,9 +87,13 @@ export async function analyzeAccount(accountId, { alive = () => {}, progress = a
 }
 
 export async function runAnalyze(ctx) {
+  // a catch-up read that found nothing new has nothing to recompute
+  const run = (await query(`SELECT r.trigger, (SELECT coalesce(sum((j.progress->>'events')::int), 0) FROM scan_jobs j WHERE j.run_id = r.id AND j.kind = 'events')::int AS events
+                              FROM scan_runs r WHERE r.id = $1`, [ctx.job.run_id])).rows[0];
+  if (run?.trigger === 'tail' && !run.events) return { skipped: 'no new events' };
   const out = await analyzeAccount(ctx.job.account_id, { alive: ctx.alive, progress: ctx.progress });
   // the final analysis of a fully read account: record what changed since the last one, and where things stand today
-  if (await accountComplete(ctx.job.account_id)) out.changes = await snapshotAndDiff(ctx.job.account_id);
+  if (run?.trigger !== 'tail' && await accountComplete(ctx.job.account_id)) out.changes = await snapshotAndDiff(ctx.job.account_id);
   return out;
 }
 

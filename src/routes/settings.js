@@ -13,11 +13,12 @@ settings.use(requireUser);
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
 const ENV = { 'ai.enabled': 'BEDROCK_ENABLED', 'ai.region': 'BEDROCK_REGION', 'ai.modelId': 'BEDROCK_MODEL_ID', 'ai.maxTokens': 'AI_MAX_TOKENS',
-  'history.defaultLookbackDays': 'DEFAULT_LOOKBACK_DAYS', 'history.maxLookbackDays': 'MAX_LOOKBACK_DAYS', 'history.sliceHours': 'SCAN_SLICE_HOURS' };
+  'history.defaultLookbackDays': 'DEFAULT_LOOKBACK_DAYS', 'history.maxLookbackDays': 'MAX_LOOKBACK_DAYS', 'history.sliceHours': 'SCAN_SLICE_HOURS', 'history.tailEveryMinutes': 'TAIL_EVERY_MINUTES' };
 
 /** What the account form needs: the lookback it may offer. */
 settings.get('/settings/limits', requirePerm('view'), (req, res) => res.json({
   defaultLookbackDays: config.scanner.defaultLookbackDays, maxLookbackDays: config.scanner.maxLookbackDays, eventHistoryMaxDays: EVENT_HISTORY_MAX_DAYS,
+  tailEveryMinutes: config.scanner.tailEveryMinutes, deliveryLagMinutes: config.scanner.deliveryLagMinutes,
 }));
 
 settings.get('/settings', requirePerm('settings'), wrap(async (req, res) => {

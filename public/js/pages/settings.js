@@ -8,6 +8,9 @@ const MODELS = [
 const LOOKBACKS = [90, 180, 365, 540, 730];
 const sliceLabel = (v) => (v >= 1 ? `${v} h` : `${v * 60} min`);
 
+const TAIL_CHOICES = [0, 1, 5, 10, 15, 30, 60, 120, 360];
+const tailLabel = (v) => (!v ? 'Off (daily scan only)' : v < 60 ? `${v} min` : `${v / 60} h`);
+
 export async function settingsPage(ctx) {
   const root = h('div', { class: 'stack-lg settings-page' });
   let d;
@@ -25,7 +28,7 @@ export async function settingsPage(ctx) {
       ? h('span', null, `Changed here ${ago(S[k].updatedAt)}. Default ${fmtVal(k, S[k].default)}${S[k].env ? ` (${S[k].env})` : ''}. `,
         h('a', { href: '#', onClick: async (e) => { e.preventDefault(); await save({ [k]: null }); } }, 'Reset to default'))
       : `Default${S[k].env ? `, from ${S[k].env} or built in` : ''}.`);
-    const fmtVal = (k, v) => (k === 'history.sliceHours' ? sliceLabel(v) : /Days$/.test(k) ? `${v} days` : typeof v === 'boolean' ? (v ? 'on' : 'off') : String(v));
+    const fmtVal = (k, v) => (k === 'history.tailEveryMinutes' ? tailLabel(v) : k === 'history.sliceHours' ? sliceLabel(v) : /Days$/.test(k) ? `${v} days` : typeof v === 'boolean' ? (v ? 'on' : 'off') : String(v));
     const bind = (el, k, cast = (x) => x) => { el.addEventListener('input', () => { draft[k] = cast(el.type === 'checkbox' ? el.checked : el.value); refreshSave(); }); el.addEventListener('change', () => { draft[k] = cast(el.type === 'checkbox' ? el.checked : el.value); refreshSave(); }); return el; };
     const select = (k, opts, cast = Number) => { const s = h('select', null, opts.map(([v, l]) => h('option', { value: v }, l))); s.value = String(draft[k]); return bind(s, k, cast); };
 
@@ -89,6 +92,7 @@ export async function settingsPage(ctx) {
     const maxSel = select('history.maxLookbackDays', [...new Set([...LOOKBACKS, draft['history.maxLookbackDays']])].sort((a, b) => a - b).map((v) => [v, `${v} days`]));
     const defSel = select('history.defaultLookbackDays', [...new Set([30, 60, 90, ...LOOKBACKS, draft['history.defaultLookbackDays']])].sort((a, b) => a - b).map((v) => [v, `${v} days`]));
     const sliceSel = select('history.sliceHours', d.choices.sliceHours.map((v) => [v, sliceLabel(v)]));
+    const tailSel = select('history.tailEveryMinutes', [...new Set([...TAIL_CHOICES, draft['history.tailEveryMinutes']])].sort((a, b) => a - b).map((v) => [v, tailLabel(v)]));
     const capped = d.history.filter((a) => a.cappedBy === 'workspace');
 
     const history = h('section', { class: 'card' },
@@ -101,7 +105,9 @@ export async function settingsPage(ctx) {
             h('span', { class: 'hint' }, `Pre-selected when an account is added. Event History accounts get at most ${d.choices.eventHistoryMaxDays} days.`), origin('history.defaultLookbackDays')),
           h('div', { class: 'field' }, h('label', null, 'Slice size (Event History)', sliceSel),
             h('span', { class: 'hint' }, 'Event History accounts only: their history is read in slices of this length, each saved as it finishes. S3 trails are read file by file and need no slice size.'), origin('history.sliceHours')),
-          saveBar(['history.maxLookbackDays', 'history.defaultLookbackDays', 'history.sliceHours'])),
+          h('div', { class: 'field' }, h('label', null, 'Read new events every', tailSel),
+            h('span', { class: 'hint' }, 'Between daily scans, each account whose history is complete has the CloudTrail events that arrived since its last read read in, and results refreshed. Roles, policies and Access Advisor still update once a day. CloudTrail delivers events about 5 to 15 minutes late, so an interval below that only adds AWS calls. Off: new events wait for the daily scan.'), origin('history.tailEveryMinutes')),
+          saveBar(['history.maxLookbackDays', 'history.defaultLookbackDays', 'history.sliceHours', 'history.tailEveryMinutes'])),
         h('div', { class: 'stack' },
           capped.length > 0 && h('div', { class: 'alert warn' }, `${capped.length} account${capped.length > 1 ? 's ask' : ' asks'} for more than the maximum and ${capped.length > 1 ? 'are' : 'is'} read ${S['history.maxLookbackDays'].value} days back: ${capped.map((a) => a.name).join(', ')}.`),
           h('p', { class: 'small muted' }, 'Raising a limit makes the next scan backfill the extra days; history already read is kept and not read again.'))),

@@ -19,10 +19,13 @@ export async function opsPage(ctx) {
       o.oldestWaitingSeconds > 600 && h('div', { class: 'alert warn' }, `The oldest waiting job has been queued for ${secs(o.oldestWaitingSeconds)}. Add worker replicas or check the worker logs.`),
       h('div', { class: 'tiles' }, ...['queued', 'running', 'succeeded', 'failed', 'dead'].map((k) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, `Jobs ${k}`), h('b', null, num(o.jobs[k] || 0)))),
         h('div', { class: 'tile' }, h('span', { class: 'small muted' }, 'Workers alive'), h('b', null, `${alive.length}`), h('span', { class: 'tiny muted' }, `${o.succeededLastHour} jobs done in the last hour`))),
+      h('p', { class: 'small muted' }, o.tail.everyMinutes > 0
+        ? `Catch-up reads: every ${o.tail.everyMinutes} min each finished account reads only the CloudTrail events that arrived since its last read. ${o.tail.lastHour} done in the last hour${o.tail.open ? `, ${o.tail.open} in progress` : ''}${o.tail.last ? `, last ${ago(o.tail.last)}` : ''}. They are left out of the list below unless one fails.`
+        : 'Catch-up reads are off: new CloudTrail events are read by the daily scan only. Turn them on in Configuration.'),
       workersCard(o.workers, alive, draw),
       h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Recent scans')), h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Account', 'Trigger', 'Status', 'Jobs', 'Started', 'Duration', ''].map((x) => h('th', null, x)))),
         h('tbody', null, o.runs.map((r) => h('tr', { class: 'link', onClick: () => { openRun = openRun === r.id ? null : r.id; draw(); } },
-          h('td', null, h('div', { class: 'name' }, r.account_name), h('div', { class: 'tiny muted' }, r.aws_account_id)), h('td', null, r.trigger), h('td', null, h('span', { class: `badge ${ST[r.status]}` }, r.status)),
+          h('td', null, h('div', { class: 'name' }, r.account_name), h('div', { class: 'tiny muted' }, r.aws_account_id)), h('td', null, r.trigger === 'tail' ? 'catch-up' : r.trigger), h('td', null, h('span', { class: `badge ${ST[r.status]}` }, r.status)),
           h('td', { class: 'small' }, `${r.jobs_ok}/${r.jobs} done${r.jobs_bad ? `, ${r.jobs_bad} failed` : ''}`), h('td', { class: 'small' }, ago(r.started_at || r.created_at)),
           h('td', { class: 'small' }, r.finished_at && r.started_at ? secs(Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) : r.status === 'running' ? (r.eta_seconds != null ? `running, ${etaText(r.eta_seconds)} left` : 'running') : '—'),
           h('td', { class: 'small' }, openRun === r.id ? 'Hide' : 'Details'))))))),

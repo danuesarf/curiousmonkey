@@ -60,6 +60,17 @@ The portal opens on a **radar** with three views:
 
 The radar and role pages show data as soon as the first slices are read. Until an account's history is fully read, its results are marked **provisional**: used counts are "at least", never-called counts are "at most". The status bar shows how much is read and the time left. A provisional analysis runs every `PROVISIONAL_EVERY_SECONDS` (default 300). **Approval is blocked until history is complete.**
 
+## Keeping up between scans
+
+Two separate questions, two separate answers in the status bar:
+
+- **History** (the dial): has each account's whole lookback been read? It fills once, then says *History complete* and stays that way.
+- **Freshness** (the line under it): how current is the data? *read up to 14:05 · 12 min behind*, for the least current account. Green while it is within two catch-up intervals, amber after that, red after a day and a half. Each account's own freshness is on the Accounts page.
+
+The daily scan (`SCAN_AT`, 01:00 `SCAN_TZ`) reads everything: roles, policies, Access Advisor, new CloudTrail events. Between daily scans, **catch-up reads** run every `TAIL_EVERY_MINUTES` (default 30; Configuration › *Read new events every*; 0 turns them off). A catch-up read is an events job per region plus an analysis, for accounts whose history is complete and that have no scan in flight. It reads only what arrived since the last read, so a quiet account costs one CloudTrail call per region, and the analysis is skipped when nothing new arrived. Inventory, Access Advisor and the daily change snapshot wait for the daily scan. Catch-up reads stay out of the Scans list unless one fails; finished ones are deleted after two days.
+
+CloudTrail delivers events 5 to 15 minutes late and reads hold back `SCAN_DELIVERY_LAG_MINUTES` (15), so data is at best about 15 minutes behind. An interval shorter than about 5 minutes only adds AWS calls.
+
 ## Space
 
 `#/space` shows the estate as a tilted plane, replayed hour by hour over the last 24 hours (WIB).

@@ -1,4 +1,4 @@
-import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR } from '../lib.js';
 import { session, go } from '../main.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
@@ -255,7 +255,7 @@ const snippetQuery = (m) => new URLSearchParams(Object.entries({ mode: m.authMod
 
 // ---------- list ----------
 export async function accountsPage(ctx) {
-  const { items } = await get('/accounts');
+  const [{ items }] = await Promise.all([get('/accounts'), loadLimits()]);
   ctx.setCrumbs('Accounts');
   const can = (p) => session.user.permissions.includes(p);
   const live = items.filter((a) => a.status !== 'planned'), planned = items.filter((a) => a.status === 'planned');
@@ -370,6 +370,7 @@ function historyBars(hist) {
   return h('div', { class: 'stack' },
     h('div', { class: 'row' }, h('span', { class: 'eyebrow grow' }, 'CLOUDTRAIL HISTORY READ'),
       h('span', { class: `state ${hist.complete ? '' : 'prov'}` }, hist.complete ? 'Complete · results final' : `${hist.progress}% · results provisional`)),
+    hist.complete && (() => { const fr = freshness(hist.freshAt, LIMITS.tailEveryMinutes, LIMITS.deliveryLagMinutes); const el = h('div', { class: 'small' }, h('b', null, 'Fresh: '), fr.text, h('span', { class: 'muted' }, LIMITS.tailEveryMinutes > 0 ? ` · new events are read every ${LIMITS.tailEveryMinutes} min` : ' · catch-up reads are off; new events wait for the daily scan')); el.firstChild.style.color = TONE_COLOR[fr.tone]; return el; })(),
     hist.regions.map((r) => {
       const bar = h('i', { class: r.complete ? 'done' : null }); bar.style.width = `${Math.max(1, r.progress)}%`;
       return h('div', { class: 'history-row' }, h('span', { class: 'mono' }, r.region), h('span', { class: 'track', role: 'img', 'aria-label': `${r.region}: ${r.progress}% read` }, bar),
