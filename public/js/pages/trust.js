@@ -83,7 +83,8 @@ export async function trustPage(ctx) {
   const leftH = y;
   y = 8;
   const envOf = (a) => (ENV_ORDER.includes(a.env) ? a.env : 'other');
-  const shown = M.accounts.filter((a) => a.inScope || M.links.some((l) => l.from === a.id || l.to === a.id));
+  const touched = (a) => M.links.some((l) => l.from === a.id || l.to === a.id) || a.inbound.roles || a.own || a.services;
+  const shown = M.accounts.filter((a) => (q.trim() ? touched(a) : a.inScope || touched(a)));
   for (const env of [...ENV_ORDER, 'other']) {
     const list = shown.filter((a) => envOf(a) === env).sort((a, b) => (SEV_ORDER[a.inbound.worst] - SEV_ORDER[b.inbound.worst]) || a.name.localeCompare(b.name));
     if (!list.length) continue;
@@ -149,7 +150,7 @@ export async function trustPage(ctx) {
         svg('rect', { x: p.x, y: p.y, width: p.w, height: NODE, fill: isSel ? '#10271d' : '#08170f', stroke: isSel ? '#fff' : worst === 'high' ? LINE.high : '#1f4a35',
           'stroke-width': isSel || worst === 'high' ? 1.5 : 1, 'stroke-dasharray': dashed ? '4 3' : null }),
         svg('rect', { x: p.x, y: p.y, width: 4, height: NODE, fill: color }),
-        svg('text', { x: p.x + 12, y: p.y + 15, class: 'tm-label' }, cut(label, 34)),
+        svg('text', { x: p.x + 12, y: p.y + 15, class: 'tm-label' }, cut(label, planned ? 26 : 34)),
         svg('text', { x: p.x + 12, y: p.y + 29, class: 'tm-sub' }, cut(sub, 44)),
         worst && worst !== 'none' && worst !== 'info' && svg('circle', { cx: p.x + p.w - 12, cy: p.y + NODE / 2, r: 4.5, fill: DOT[worst] }),
         planned && svg('text', { x: p.x + p.w - 22, y: p.y + 15, 'text-anchor': 'end', class: 'tm-sub' }, 'planned'));
@@ -191,7 +192,8 @@ export async function trustPage(ctx) {
     sub && h('div', { class: 'tm-sub-t' }, sub));
   const facts = (rows) => h('dl', { class: 'tm-facts' }, rows.filter(Boolean).flatMap(([k, v, tone]) => [h('dt', null, k), h('dd', { class: tone ? `tm-${tone}` : null }, v)]));
   const actions = (list) => h('div', { class: 'tm-actions' }, list.filter(Boolean).map(([label, fn, primary]) => typeof fn === 'string'
-    ? h('a', { class: `btn sm${primary ? ' primary' : ''}`, href: fn }, label) : h('button', { class: `btn sm${primary ? ' primary' : ''}`, onClick: fn }, label)));
+    ? h('a', { class: `btn sm${primary ? ' primary' : ''}`, href: fn }, label)
+    : h('button', { class: `btn sm${primary ? ' primary' : ''}`, onClick: fn, title: label === 'Show only this' ? 'Search for just this: the map, the counts, the findings, Ways in and the CSV export all narrow to it. Clear the search to see everything again.' : null }, label)));
 
   function drawSide() {
     const l = sel?.includes('>') && M.links.find((x) => x.id === sel);
@@ -205,7 +207,7 @@ export async function trustPage(ctx) {
         ['Findings', l.findings ? plural(l.findings, 'finding') : 'nothing to flag', l.findings ? 'bad' : 'ok'],
         ['Seen coming in', l.sessions ? `${num(l.sessions)} sessions` : l.iamUsed ? 'no sign-in tied to it, but IAM says its roles are used' : 'never: no sign-in, and IAM has no record of use', l.sessions || l.iamUsed ? null : 'warn']]),
       listBox('Roles it can assume', l.roles.map(roleItem)),
-      actions([['Filter to this', () => run(l.query), true], ['Show ways in', () => table.scrollIntoView({ behavior: 'smooth' })]]));
+      actions([['Show only this', () => run(l.query), true], ['Show ways in', () => table.scrollIntoView({ behavior: 'smooth' })]]));
     } else if (s) {
       const out = M.links.filter((x) => x.from === s.id);
       side.replaceChildren(head((GROUPS[s.group]?.[0] || s.group).toUpperCase(), s.label,
@@ -213,7 +215,7 @@ export async function trustPage(ctx) {
       facts([['Reaches', `${plural(s.roles, 'role')} in ${plural(s.accounts, 'account')}`], ['Findings', s.findings ? plural(s.findings, 'finding') : 'nothing to flag', s.findings ? 'bad' : 'ok'],
         ['Seen coming in', s.seen ? `${num(s.seen)} sessions` : 'never, in the stored history', s.seen ? null : 'warn']]),
       listBox('Accounts it can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
-      actions([['Filter to this', () => run(withTerm(s.query)), true]]));
+      actions([['Show only this', () => run(withTerm(s.query)), true]]));
     } else if (a) {
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
       side.replaceChildren(head(`${(a.env || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, `${a.aws}${a.planned ? ' · planned, not scanned' : ''}`, a.inbound.worst),
@@ -221,7 +223,7 @@ export async function trustPage(ctx) {
         ['Trust inside it', `${plural(a.own, 'role')} trust its own account · ${plural(a.services, 'role')} trust AWS services`]]),
       listBox('Who can get in', inn.map((x) => item({ label: nameOf(x.from), worst: x.worst, meta: `${x.kind === 'account' ? 'your account' : SHORT[srcBy.get(x.from)?.group] || ''} · ${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) })), { empty: 'nothing from outside this account' }),
       out.length > 0 && listBox('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
-      actions([['Filter to this', () => run(withTerm(`account:${a.aws}`)), true], ['Open in Space', `#/space?view=account&account=${a.id}`]]));
+      actions([['Show only this', () => run(withTerm(`account:${a.aws}`)), true], ['Open in Space', `#/space?view=account&account=${a.id}`]]));
     } else {
       // nothing picked: where things come from (every group, inside ones too), and how to read the map
       const groups = m.summary.map((g) => listBox(GROUPS[g.group]?.[0] || g.group, g.sources.map((x) => {
@@ -267,7 +269,7 @@ export async function trustPage(ctx) {
         sel ? `Following the selection on the map: ${sel.includes('>') ? `${nameOf(M.links.find((x) => x.id === sel).from)} → ${nameOf(M.links.find((x) => x.id === sel).to)}` : nameOf(sel)}.` : 'Every statement that lets someone in, the worst first.',
         m.truncated ? ` The first ${num(m.rows.length)} of ${num(m.total)} are loaded; narrow the query or export the CSV for all.` : '')),
         h('div', { class: 'row', style: 'gap:8px' }, sel && h('button', { class: 'btn sm', onClick: () => select(null) }, 'Show all'), pager())),
-      !rows.length ? h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, sel && m.truncated ? 'Not among the loaded rows. Use “Filter to this” in the sidebar.' : 'Nothing here.'))
+      !rows.length ? h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, sel && m.truncated ? 'Not among the loaded rows. Use “Show only this” in the sidebar.' : 'Nothing here.'))
         : h('div', { class: 'tm-ways' }, slice.map((e) => h('div', { class: 'tm-way' },
           h('span', { class: 'tm-dot', style: `background:${DOT[e.worst]}`, title: e.worst }),
           h('div', { class: 'tm-way-role' }, h('a', { href: `#/roles/${e.roleId}?tab=policies`, class: 'name' }, e.role),
@@ -306,6 +308,7 @@ export async function trustPage(ctx) {
     filters,
     h('div', { class: 'tm-layout' },
       h('section', { class: 'card tm-mapcard' },
+        q.trim() && h('div', { class: 'tm-q' }, h('span', null, 'Showing only '), h('code', null, q.trim()), h('button', { class: 'btn sm', onClick: () => run('') }, 'Show everything')),
         h('div', { class: 'tm-stats' },
           h('span', null, h('b', null, num(M.sources.length)), ' outside sources'),
           h('span', null, h('b', null, num(outside)), ' lines in from outside'),
