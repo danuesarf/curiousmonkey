@@ -1,10 +1,7 @@
-// Radar v3. Three views, one dish:
-//   Estate      — each contact is an AWS account. Distance = share of permissions never called; size = excess
-//                 permissions; trail = where it was 7 and 30 days ago; the sweep is the last 24 h (contacts echo with
-//                 activity); pings = changes that matter.
-//   Account     — the same for one account's roles, sectored by kind.
-//   Blast radius — one identity at the centre; rings are hops (direct trust, then each role chained); slices are the
-//                 accounts reached.
+// Radar. Two views, one dish:
+//   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
+//             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
+//   Account — the same for one account's roles, sectored by kind.
 import { h, svg, get, post, num, ago } from '../lib.js';
 import { go } from '../main.js';
 
@@ -22,7 +19,6 @@ const kfmt = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.
 const shape = (kind, x, y, s) => kind === 'identity-center' ? `M${r1(x - s)} ${r1(y - s)}h${r1(2 * s)}v${r1(2 * s)}h${r1(-2 * s)}Z`
   : kind === 'service-linked' ? `M${x} ${r1(y - s * 1.3)}L${r1(x + s * 1.3)} ${y}L${x} ${r1(y + s * 1.3)}L${r1(x - s * 1.3)} ${y}Z`
   : `M${r1(x - s)} ${y}a${s} ${s} 0 1 0 ${r1(2 * s)} 0a${s} ${s} 0 1 0 ${r1(-2 * s)} 0Z`;
-const beginAt = (deg) => `${(((deg % 360) + 360) % 360 / 360 * 8).toFixed(2)}s`;      // when the sweep reaches this bearing
 const drift = (now, past) => (now == null || past == null ? null : now - past);
 const headColor = (d) => (d == null ? '#7e978a' : d > 0.04 ? '#f0b45a' : d < -0.04 ? '#6fe3b0' : '#7e978a');
 const headText = (d) => (d == null ? '· no trail yet' : Math.abs(d) < 0.01 ? '· flat' : `${d > 0 ? '▲' : '▼'} ${Math.abs(d * 100).toFixed(1)} pts`);
@@ -32,13 +28,12 @@ const riskClass = (r) => ({ High: 'b-high', Medium: 'b-medium', Low: 'b-low' })[
 export async function radarPage(ctx) {
   const view = ctx.params.get('view') || 'estate';
   const tabs = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Radar view' },
-    [['estate', 'Estate'], ['account', 'Account'], ['blast', 'Blast radius']].map(([k, label]) => h('button', { role: 'tab', 'aria-selected': String(view === k),
-      onClick: () => go(k === 'estate' ? '#/' : k === 'account' ? `#/?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}` : '#/?view=blast') }, label)));
+    [['estate', 'Estate'], ['account', 'Account']].map(([k, label]) => h('button', { role: 'tab', 'aria-selected': String(view === k),
+      onClick: () => go(k === 'estate' ? '#/' : `#/?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}`) }, label)));
   const shell = { left: h('aside', { class: 'left' }), scene: h('div', { class: 'scene' }), right: h('aside', { class: 'right' }) };
   shell.left.append(tabs);
   const page = h('div', { class: 'stack radar-page radar3', style: 'gap:0' }, h('div', { class: 'scene-layout radar-layout' }, shell.left, shell.scene, shell.right));
   if (view === 'account') await accountView(ctx, shell);
-  else if (view === 'blast') await blastView(ctx, shell);
   else await estateView(ctx, shell);
   return page;
 }
@@ -47,20 +42,15 @@ export async function radarPage(ctx) {
 function base(kids, rings, ringLabels) {
   kids.push(svg('defs', null,
     svg('filter', { id: 'g3', x: '-80%', y: '-80%', width: '260%', height: '260%' }, svg('feGaussianBlur', { stdDeviation: 2.6, result: 'b' }),
-      svg('feMerge', null, svg('feMergeNode', { in: 'b' }), svg('feMergeNode', { in: 'SourceGraphic' }))),
-    svg('radialGradient', { id: 'sw3', cx: 0, cy: 0, r: 330, gradientUnits: 'userSpaceOnUse' },
-      svg('stop', { offset: 0, 'stop-color': '#f6e016', 'stop-opacity': 0.18 }), svg('stop', { offset: 1, 'stop-color': '#f6e016', 'stop-opacity': 0.02 }))));
+      svg('feMerge', null, svg('feMergeNode', { in: 'b' }), svg('feMergeNode', { in: 'SourceGraphic' })))));
   kids.push(svg('circle', { cx: CX, cy: CY, r: 324, fill: '#051209', stroke: '#1f4a35' }));
   for (const [r, fill, dash] of rings) kids.push(svg('circle', { cx: CX, cy: CY, r: r1(r), fill, stroke: '#1a4231', 'stroke-dasharray': dash }));
-  return () => {     // call after sectors: labels and sweep go on top of them
+  return () => {     // call after sectors: labels go on top of them
     for (const [t, rr, color] of ringLabels) {
       const y = r1(CY - rr + 4), bw = t.length * 6.6 + 10;
       kids.push(svg('rect', { x: r1(CX - bw / 2), y: r1(y - 11.5), width: r1(bw), height: 16, fill: '#030d08', opacity: 0.85, 'pointer-events': 'none' }),
         svg('text', { x: CX, y, 'text-anchor': 'middle', fill: color, 'font-family': 'Geist Mono, monospace', 'font-size': 10, 'letter-spacing': 1.2, 'pointer-events': 'none' }, t));
     }
-    if (!still()) kids.push(svg('g', { transform: `translate(${CX} ${CY})`, 'pointer-events': 'none' }, svg('g', null,
-      svg('path', { d: 'M0 0 L0 -330 A330 330 0 0 0 -165 -285.8 Z', fill: 'url(#sw3)' }), svg('path', { d: 'M0 0 L0 -330', stroke: '#f6e016', 'stroke-opacity': 0.6, 'stroke-width': 2 }),
-      svg('animateTransform', { attributeName: 'transform', type: 'rotate', from: '0', to: '360', dur: '8s', repeatCount: 'indefinite' }))));
   };
 }
 const ZONE_RINGS = [[RAD(1) + 8, '#130f0b', null], [RAD(0.995), '#0b1c11', null], [RAD(0.75), '#081a10', '3 5'], [RAD(0.25), '#06160e', '3 5']];
@@ -87,20 +77,19 @@ function drawSectors(kids, secs, sub, onClick) {
 function contact(kids, c) {
   // c: { d, x, y, fill, stroke, base, act, ang, title, sel, isNew, onClick }
   const g = svg('g', { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); c.onClick?.(); } }, svg('title', null, c.title));
-  const body = svg('path', { d: c.d, fill: c.fill, stroke: c.stroke || null, 'stroke-width': c.stroke ? 1.4 : null, opacity: c.base });
-  if (!still() && c.act != null) {
-    body.append(svg('animate', { attributeName: 'opacity', values: `${c.base};${r1(Math.min(1, c.base + 0.15 + c.act * 0.85))};${c.base};${c.base}`, keyTimes: '0;0.015;0.3;1', dur: '8s', begin: beginAt(c.ang), repeatCount: 'indefinite' }));
-  }
+  // brighter = busier in the last 24 h
+  const body = svg('path', { d: c.d, fill: c.fill, stroke: c.stroke || null, 'stroke-width': c.stroke ? 1.4 : null, opacity: r1(Math.min(1, c.base + (c.act ?? 0) * 0.6)) });
   g.append(body);
   if (c.isNew) g.append(svg('circle', { cx: c.x, cy: c.y, r: r1(c.s + 4), fill: 'none', stroke: '#8ec5ff', 'stroke-width': 1.2, 'stroke-dasharray': '2 2' }));
   if (c.sel) g.append(svg('circle', { cx: c.x, cy: c.y, r: r1(c.s + 6), fill: 'none', stroke: '#f6e016', 'stroke-width': 1.5 }));
   kids.push(g);
 }
-function ping(kids, x, y, r, color, ang) {
+function ping(kids, x, y, r, color) {
+  // a change that matters: a ring that pulses gently, so it can be found without anything sweeping the screen
   const g = svg('g', { 'pointer-events': 'none' }, svg('circle', { cx: x, cy: y, r: r1(r), fill: 'none', stroke: color, 'stroke-width': 1.4 }));
-  if (!still()) g.append(svg('circle', { cx: x, cy: y, r: 6, fill: 'none', stroke: color, 'stroke-width': 2, opacity: 0 },
-    svg('animate', { attributeName: 'r', values: '6;34;34', keyTimes: '0;0.16;1', dur: '8s', begin: beginAt(ang), repeatCount: 'indefinite' }),
-    svg('animate', { attributeName: 'opacity', values: '1;0;0', keyTimes: '0;0.16;1', dur: '8s', begin: beginAt(ang), repeatCount: 'indefinite' })));
+  if (!still()) g.append(svg('circle', { cx: x, cy: y, r: r1(r), fill: 'none', stroke: color, 'stroke-width': 1.4 },
+    svg('animate', { attributeName: 'r', values: `${r1(r)};${r1(r + 9)}`, dur: '2.4s', repeatCount: 'indefinite' }),
+    svg('animate', { attributeName: 'opacity', values: '0.8;0', dur: '2.4s', repeatCount: 'indefinite' })));
   kids.push(g);
 }
 function trail(kids, ang, from, mid, to, d) {
@@ -252,7 +241,7 @@ async function estateView(ctx, shell) {
   shell.scene.append(svgEl,
     hudEl(`RADAR · ESTATE · ${num(T.accounts)} ACCOUNTS · ${num(T.roles)} ROLES`,
       `${accounts.filter((a) => (a.d30 ?? 0) > 0.04).length} DRIFTING OUT · ${accounts.filter((a) => (a.d30 ?? 0) < -0.04).length} MOVING IN · ${F.items.length} CHANGES IN 7 DAYS`,
-      'CONTACT = ACCOUNT · DISTANCE = NEVER CALLED · SIZE = EXCESS · SWEEP = LAST 24 H'),
+      'CONTACT = ACCOUNT · DISTANCE = NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Account (size = excess)'], ['width:10px;height:10px;border-radius:50%;background:#ff8a7a', '8+ high-risk roles'],
       ['width:16px;border-top:2px solid #f0b45a', 'Drifting out (30 d)'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
       ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff6b5e;box-sizing:border-box', 'Ping: change that matters'],
@@ -330,16 +319,8 @@ async function accountView(ctx, shell) {
         spark([r.never30, r.never7, r.never], headColor(r.d30)) || h('p', { class: 'tiny muted' }, 'No trail yet: snapshots start once the account is fully read.')),
       h('a', { class: 'btn primary', href: `#/roles/${r.id}/scan` }, 'Sector scan'),
       h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/roles/${r.id}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/track?role=${r.id}` }, 'Track a session')),
-      h('div', { class: 'stack', style: 'gap:6px', id: 'callers-blast' }),
       h('section', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, items.length ? 'CHANGES TO THIS ROLE' : `CHANGES IN ${acct.name.toUpperCase()}`),
         feedList(items.length ? items : F.items, F.seenAt, (f) => { const x = roles.find((y) => y.id === f.role_id); if (x) { sel = x; draw(); list(); card(); } })));
-    // the role's callers, each one a way into blast radius
-    const d = await get(`/roles/${r.id}`);
-    if (sel !== r) return;
-    const box = shell.right.querySelector('#callers-blast');
-    const callers = d.principals.filter((p) => p.kind !== 'session').slice(0, 4);
-    if (box && callers.length) box.replaceChildren(h('div', { class: 'eyebrow' }, 'BLAST RADIUS OF ITS CALLERS'),
-      callers.map((p) => h('a', { class: 'btn sm', href: `#/?view=blast&key=${encodeURIComponent(p.key)}`, style: 'justify-content:flex-start;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, p.display)));
   }
 
   shell.left.append(h('div', { class: 'stack', style: 'gap:6px' },
@@ -360,153 +341,3 @@ async function accountView(ctx, shell) {
   draw(); list(); card();
 }
 
-// ---------------------------------------------------------------- blast radius
-async function blastView(ctx, shell) {
-  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), 'Blast radius');
-  const ids = (await get('/blast/identities')).items;
-  const key = ctx.params.get('key') || ids[0]?.key;
-  const listEl = h('div', { class: 'rank-list' });
-  const search = h('input', { type: 'search', placeholder: 'Find an identity', 'aria-label': 'Find an identity' });
-  let timer = 0;
-  search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(async () => { drawList((await get(`/blast/identities?q=${encodeURIComponent(search.value)}`)).items); }, 250); });
-  const drawList = (items) => listEl.replaceChildren(...items.map((x) => h('button', { class: 'rank-row', 'aria-pressed': String(x.key === key), onClick: () => go(`#/?view=blast&key=${encodeURIComponent(x.key)}`) },
-    h('span', { class: 'rbody' }, h('span', { class: 'rname' }, h('span', { class: 'n' }, x.display), x.reaches_admin && pill('ADMIN', '#ff6b5e')),
-      h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${x.kind}${x.via ? ` · ${x.via}` : ''}`))),
-    h('span', { class: 'rval' }, h('span', { class: 'mono tiny' }, `${x.roles} role${x.roles > 1 ? 's' : ''}`), h('span', { class: 'mono tiny faint' }, `${x.accounts} acct${x.accounts > 1 ? 's' : ''}`)))),
-  !items.length ? h('p', { class: 'tiny muted', style: 'padding:8px' }, 'No identities seen entering roles yet.') : null);
-  shell.left.append(h('p', { class: 'tiny muted', style: 'line-height:1.5' }, 'Pick an identity. The radar shows every role it can reach: roles it was seen entering, roles whose trust policy names it, and the same again from each role reached.'),
-    search, h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', { class: 'eyebrow' }, 'IDENTITIES · DIRECT REACH FIRST'), h('span', { class: 'mono tiny muted' }, String(ids.length))), listEl);
-  drawList(ids);
-  if (!key) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'Nobody has been seen entering a role yet.')); return; }
-
-  const B = await get(`/blast?key=${encodeURIComponent(key)}`);
-  const nodes = B.nodes, byId = new Map(nodes.map((n) => [n.id, n]));
-  const reached = [...new Set(nodes.map((n) => n.accountId))].map((aid) => nodes.find((n) => n.accountId === aid))
-    .sort((x, y) => (x.environment === 'production') - (y.environment === 'production') || x.account.localeCompare(y.account)).reverse();
-  const secs = sectors(reached.map((n) => ({ id: n.accountId, name: n.account, env: n.environment, weight: nodes.filter((x) => x.accountId === n.accountId).length, color: n.environment === 'production' ? '#7a3a30' : '#2f6e52' })), nodes.length, nodes.length > 1 ? 3 : 0);
-  const HOP = [0, 120, 200, 270, 312];
-  for (const s of secs) for (let hop = 1; hop <= 4; hop++) {
-    const L = nodes.filter((n) => n.accountId === s.id && n.hop === hop);
-    L.forEach((n, i) => { n.ang = s.a0 + 1 + ((i + 0.5) / L.length) * (s.a1 - s.a0 - 2); n.rad = HOP[hop]; [n.x, n.y] = P(n.ang, n.rad); n.s = r1(3 + Math.log10(Math.max(1, n.perms)) * 1.6); });
-  }
-  const maxHop = Math.max(1, ...nodes.map((n) => n.hop));
-  const svgEl = stage(`Blast radius of ${B.identity.display}: the identity at the centre; rings are hops; slices are the accounts reached.`);
-  const chainOf = (n) => { const c = []; let x = n; while (x) { c.unshift(x); x = x.parent ? byId.get(x.parent) : null; } return c; };
-  let sel = null;                                       // { type: 'node', n } | { type: 'account', s }
-  const bubble = h('div', { class: 'blast-pop', hidden: true, role: 'dialog', 'aria-label': 'Details' });
-
-  // Clicking a node or slice selects it and opens a bubble beside it; the page never navigates on its own.
-  function drawScene() {
-    const kids = [];
-    const onPath = sel?.type === 'node' ? new Set(chainOf(sel.n).map((x) => x.id)) : null;
-    const inAcct = sel?.type === 'account' ? sel.s.id : null;
-    const dim = (n) => (onPath ? !onPath.has(n.id) : inAcct ? n.accountId !== inAcct : false);
-    const rings = [[HOP[Math.min(4, maxHop)] + 18, '#051209', null]].concat([4, 3, 2, 1].filter((h0) => h0 <= maxHop).map((h0) => [HOP[h0] + (h0 === 1 ? -40 : -36), h0 % 2 ? '#081a10' : '#0a1d12', '3 5']));
-    const top = base(kids, rings, [[`HOP 1 · TRUSTS IT OR SEEN ENTERING`, HOP[1] + 14, '#a9bfb2'], ...(maxHop >= 2 ? [['HOP 2 · CHAINED', HOP[2] + 14, '#a9bfb2']] : []), ...(maxHop >= 3 ? [['HOP 3+', HOP[3] + 14, '#a9bfb2']] : [])]);
-    drawSectors(kids, secs, (s) => `${s.weight} role${s.weight > 1 ? 's' : ''}${s.env === 'production' ? ' · prod' : ''}`, (s) => select({ type: 'account', s }));
-    top();
-    for (const n of nodes) {
-      const from = n.parent ? byId.get(n.parent) : null;
-      const color = n.admin ? '#ff6b5e' : n.hop === 1 ? '#6fe3b0' : '#8ec5ff';
-      const d = from ? (() => { const [mx, my] = P((from.ang + n.ang) / 2, (from.rad + n.rad) / 2); return `M${from.x} ${from.y} Q${mx} ${my} ${n.x} ${n.y}`; })() : `M${CX} ${CY} L${n.x} ${n.y}`;
-      const hot = onPath?.has(n.id);
-      kids.push(svg('path', { d, stroke: hot ? '#f6e016' : color, 'stroke-width': hot ? 2.4 : n.admin ? 1.8 : 1.1, fill: 'none', opacity: dim(n) ? 0.12 : hot ? 1 : n.admin ? 0.95 : 0.55, 'stroke-dasharray': n.edge === 'trust' ? '4 3' : null }));
-    }
-    for (const n of nodes) contact(kids, { d: shape(n.kind, n.x, n.y, n.s), x: n.x, y: n.y, s: n.s, fill: n.admin ? '#ff6b5e' : n.perms > 2000 ? '#f0b45a' : '#6fe3b0', base: dim(n) ? 0.2 : 0.95, act: null, ang: n.ang,
-      sel: sel?.type === 'node' && sel.n === n,
-      title: `${n.name} in ${n.account} · hop ${n.hop} · ${n.edge === 'trust' ? 'trust policy names it' : 'seen entering'} · ${num(n.perms)} permissions`, onClick: () => select({ type: 'node', n }) });
-    tags(kids, nodes.filter((n) => n.admin && !dim(n)).sort((x, y) => x.hop - y.hop).map((n) => ({ ...n, text: `${short(n.name, 18)} · ${short(n.account, 16)}`, color: '#ff8a7a' })), 9);
-    dial(kids, 'CAN REACH', kfmt(B.totals.perms), '#ff8a7a', `${B.totals.roles} roles · ${B.totals.accounts} accts`, '#a9bfb2');
-    svgEl.replaceChildren(...kids);
-  }
-
-  function select(next) {
-    sel = next && sel && ((next.type === 'node' && sel.n === next.n) || (next.type === 'account' && sel.s === next.s)) ? null : next;   // a second click closes
-    drawScene();
-    if (!sel) { bubble.hidden = true; return; }
-    bubble.replaceChildren(...(sel.type === 'node' ? nodeBubble(sel.n) : accountBubble(sel.s)));
-    bubble.hidden = false;
-    place(sel.type === 'node' ? [sel.n.x, sel.n.y] : P((sel.s.a0 + sel.s.a1) / 2, 300));
-  }
-  // put the bubble next to the point, inside the scene, on whichever side has room
-  function place([x, y]) {
-    const m = svgEl.getScreenCTM(); if (!m) return;
-    const pt = svgEl.createSVGPoint(); pt.x = x; pt.y = y;
-    const c = pt.matrixTransform(m), box = shell.scene.getBoundingClientRect();
-    const px = c.x - box.left, py = c.y - box.top, bw = bubble.offsetWidth || 300, bh = bubble.offsetHeight || 200;
-    const left = px + 16 + bw > box.width - 8 ? px - 16 - bw : px + 16;
-    bubble.style.left = `${Math.max(8, left)}px`;
-    bubble.style.top = `${Math.min(Math.max(8, py - bh / 2), box.height - bh - 8)}px`;
-  }
-  const closeBtn = () => h('button', { class: 'pop-x', 'aria-label': 'Close', onClick: () => select(null) }, '×');
-  const kv = (k, v) => h('div', { class: 'pop-kv' }, h('span', { class: 'tiny muted' }, k), h('span', { class: 'small' }, v));
-  function nodeBubble(n) {
-    const chain = chainOf(n);
-    const next = nodes.filter((x) => x.parent === n.id);
-    const roleKey = `role:${n.awsAccountId}:${n.name}`;
-    return [
-      h('div', { class: 'row pop-head' }, h('div', { class: 'stack', style: 'gap:2px;min-width:0' },
-        h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'eyebrow' }, `HOP ${n.hop} · ROLE`), n.admin && pill('ADMIN', '#ff6b5e'), n.environment === 'production' && pill('PROD', '#ff8a7a')),
-        h('b', { class: 'pop-name' }, n.name)), closeBtn()),
-      kv('Account', `${n.account} · ${n.awsAccountId}${n.environment ? ` · ${n.environment}` : ''}`),
-      kv('How it is reached', n.edge === 'trust' ? 'Its trust policy names the previous step (not seen used yet)' : 'Seen being entered in CloudTrail'),
-      kv('Permissions', `${num(n.perms)}${n.risk ? ` · risk ${n.risk}` : ''}${n.kind ? ` · ${n.kind}` : ''}`),
-      next.length > 0 && kv('Leads on to', `${next.length} more role${next.length > 1 ? 's' : ''}: ${next.slice(0, 3).map((x) => short(x.name, 28)).join(', ')}${next.length > 3 ? '…' : ''}`),
-      h('div', { class: 'pop-path' }, h('span', { class: 'tiny muted' }, 'Path'),
-        h('div', { class: 'small mono' }, [short(B.identity.display, 34), ...chain.map((x) => `${short(x.name, 34)} (${short(x.account, 16)})`)].join('\n→ '))),
-      h('div', { class: 'row pop-actions' },
-        h('a', { class: 'btn sm primary', href: `#/roles/${n.id}` }, 'Open role'),
-        h('a', { class: 'btn sm', href: `#/?view=blast&key=${encodeURIComponent(roleKey)}` }, 'Blast radius from here'),
-        h('a', { class: 'btn sm', href: `#/?view=account&account=${n.accountId}` }, 'Account radar')),
-    ];
-  }
-  function accountBubble(s) {
-    const L = nodes.filter((n) => n.accountId === s.id);
-    return [
-      h('div', { class: 'row pop-head' }, h('div', { class: 'stack', style: 'gap:2px;min-width:0' },
-        h('div', { class: 'row', style: 'gap:6px' }, h('span', { class: 'eyebrow' }, 'ACCOUNT REACHED'), s.env === 'production' && pill('PROD', '#ff8a7a')), h('b', { class: 'pop-name' }, s.name)), closeBtn()),
-      kv('Roles reachable', `${L.length} · ${L.filter((n) => n.admin).length} admin-level`),
-      kv('Permissions', num(L.reduce((t, n) => t + n.perms, 0))),
-      h('div', { class: 'pop-list' }, L.sort((a, b) => b.perms - a.perms).slice(0, 6).map((n) => h('button', { class: 'pop-row', onClick: () => select({ type: 'node', n }) },
-        h('span', { class: 'small' }, short(n.name, 36)), h('span', { class: 'tiny muted' }, `hop ${n.hop} · ${num(n.perms)}`)))),
-      h('div', { class: 'row pop-actions' }, h('a', { class: 'btn sm primary', href: `#/?view=account&account=${s.id}` }, 'Open account radar')),
-    ];
-  }
-  svgEl.addEventListener('click', () => sel && select(null));       // clicking empty space closes
-  const onKey = (e) => { if (e.key === 'Escape' && sel) select(null); };
-  document.addEventListener('keydown', onKey);
-  const onResize = () => sel && place(sel.type === 'node' ? [sel.n.x, sel.n.y] : P((sel.s.a0 + sel.s.a1) / 2, 300));
-  window.addEventListener('resize', onResize);
-  ctx.onLeave?.(() => { document.removeEventListener('keydown', onKey); window.removeEventListener('resize', onResize); });
-  drawScene();
-
-  const paths = nodes.filter((n) => n.admin).sort((x, y) => x.hop - y.hop).slice(0, 6).map((n) => {
-    const chain = []; let c = n; while (c) { chain.unshift(`${c.name} (${c.account})`); c = c.parent ? byId.get(c.parent) : null; }
-    return { n, text: [B.identity.display, ...chain].join(' → ') };
-  });
-  const id = B.identity;
-  shell.scene.append(svgEl, bubble,
-    hudEl(`RADAR · BLAST RADIUS · ${short(id.display, 40).toUpperCase()}`,
-      `${B.totals.roles} ROLES · ${B.totals.accounts} ACCOUNTS · ${B.totals.admin} ADMIN-LEVEL · ${B.totals.production} IN PRODUCTION${B.hidden ? ` · ${B.hidden} OUTSIDE YOUR SCOPE` : ''}`,
-      'CENTRE = IDENTITY · RING = HOPS · SLICE = ACCOUNT REACHED · SIZE = PERMISSIONS'),
-    legend([['width:16px;border-top:2px solid #6fe3b0', 'Seen entering'], ['width:16px;border-top:2px dashed #6fe3b0', 'Trust policy names it (not seen yet)'], ['width:16px;border-top:2px solid #8ec5ff', 'Role chaining'],
-      ['width:10px;height:10px;border-radius:50%;background:#ff6b5e', 'Admin-level role'], ['width:10px;height:10px;border-radius:50%;background:#f0b45a', '2,000+ permissions'], ['width:16px;border-top:3px solid #7a3a30', 'Production account']]));
-  shell.right.append(
-    h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'IDENTITY'), h('h2', { style: 'overflow-wrap:anywhere' }, id.display),
-      h('div', { class: 'tiny muted' }, `${id.kind}${id.via ? ` · ${id.via}` : ''}`)),
-    h('div', { class: `cond-box${id.conditions && id.conditions.length ? '' : ' warn'}` }, h('div', { class: 'stack', style: 'gap:4px' }, h('div', { class: 'eyebrow' }, 'CONDITIONS ON ITS WAY IN'),
-      h('div', { class: 'mono tiny', style: 'overflow-wrap:anywhere' }, id.conditions == null ? 'Not matched to a trust statement' : id.conditions.length ? id.conditions.join(' · ') : 'No condition in the trust policy'))),
-    statGrid([['permissions reachable', kfmt(B.totals.perms), '#ff8a7a'], ['roles reachable', num(B.totals.roles), '#e3efe8'], ['accounts', num(B.totals.accounts), '#e3efe8'], ['admin-level roles', num(B.totals.admin), '#ff6b5e']]),
-    B.hidden > 0 && h('p', { class: 'tiny muted' }, `${B.hidden} more role${B.hidden > 1 ? 's' : ''} in accounts outside your scope are not shown or followed.`),
-    h('section', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'SHORTEST PATHS TO ADMIN'),
-      paths.length ? paths.map((p) => { const b = h('a', { class: 'feed-item', href: `#/roles/${p.n.id}` }, h('span', { class: 'row mono tiny', style: 'justify-content:space-between' },
-        h('span', { style: 'color:#ff6b5e' }, `HOP ${p.n.hop} · ADMIN`), h('span', { class: 'faint' }, `${num(p.n.perms)} perms`)), h('span', { class: 'small', style: 'overflow-wrap:anywhere;line-height:1.4' }, p.text),
-        h('span', { class: 'tiny faint' }, p.n.environment === 'production' ? 'Reaches production' : p.n.environment)); b.style.borderLeftColor = '#ff6b5e'; return b; })
-        : h('p', { class: 'tiny muted' }, 'No admin-level role within reach.')),
-    h('p', { class: 'tiny faint', style: 'line-height:1.5' }, 'Reach is what the trust policies allow and what was seen. It does not yet check whether each role holds sts:AssumeRole on the next one, so a dashed edge is a possibility, not a proven path.'));
-}
-
-function statGrid(items) {
-  return h('div', { class: 'stat-grid' }, items.map(([k, v, c]) => h('div', null, h('span', { class: 'mono', style: `color:${c};font-size:17px` }, v), h('span', { class: 'tiny muted' }, k))));
-}
-function pill(text, color) { const s = h('span', { class: 'pill' }, text); s.style.color = color; s.style.borderColor = color; return s; }

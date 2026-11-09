@@ -9,6 +9,7 @@
 // The bar under the scene picks the hour (the last 24, in WIB); play steps through them.
 import { h, svg, get, num, ago } from '../lib.js';
 import { go } from '../main.js';
+import { trackView } from './track.js';
 
 const W = 1000, H = 900;
 // one colour per environment, checked together with every pair compared (colour-blind ΔE ≥ 10, normal vision ≥ 17).
@@ -184,7 +185,50 @@ export async function spacePage(ctx) {
   const page = h('div', { class: 'stack space-page', style: 'gap:0' }, h('div', { class: 'scene-layout space-layout' }, left, scene, right));
   const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; } Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
-  ctx.onLeave(stop);
+  ctx.onLeave(() => { stop(); closeTrack(); });
+
+  // ---------- sessions (Track): a role's sessions in the sidebar, replayed over the scene without leaving Space ----------
+  const sessions = new Map();          // role id -> sessions, or 'loading'
+  const sessionsFor = (roleId) => {
+    if (!sessions.has(roleId)) {
+      sessions.set(roleId, 'loading');
+      get(`/sessions?role=${encodeURIComponent(roleId)}`).then((r) => sessions.set(roleId, r.items), () => sessions.set(roleId, []))
+        .then(() => { if (st.sel === roleId) render(); });
+    }
+    return sessions.get(roleId);
+  };
+  let trackOpen = null;
+  async function openTrack(opts, label) {
+    closeTrack();
+    stop(); st.playing = false;
+    const q = new URLSearchParams(Object.entries(opts).filter(([, v]) => v));
+    const body = h('div', { class: 'sp-track-body' }, h('p', { class: 'muted small', style: 'padding:20px' }, 'Loading sessions…'));
+    const close = h('button', { class: 'btn sm', onClick: () => closeTrack() }, 'Close');
+    const dlg = h('div', { class: 'sp-track', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Sessions: ${label}` },
+      h('div', { class: 'sp-track-head' },
+        h('div', { class: 'stack', style: 'gap:2px;min-width:0' }, h('span', { class: 'eyebrow' }, 'TRACK · ONE SESSION, CALL BY CALL'), h('b', { class: 'sp-track-title' }, label)),
+        h('div', { class: 'row', style: 'gap:8px' }, h('a', { class: 'btn sm', href: `#/track?${q}` }, 'Open as a page'), close)),
+      body);
+    const onKey = (e) => { if (e.key === 'Escape') closeTrack(); };
+    document.addEventListener('keydown', onKey);
+    page.append(dlg); close.focus();
+    const mine = { dlg, onKey, v: null };
+    trackOpen = mine;
+    const v = await trackView({ ...opts, empty: h('button', { class: 'btn sm', onClick: () => closeTrack() }, 'Back to Space') });
+    if (trackOpen !== mine) { v.stop(); return; }
+    mine.v = v; body.replaceChildren(v.el);
+  }
+  function closeTrack() {
+    if (!trackOpen) return;
+    trackOpen.v?.stop(); document.removeEventListener('keydown', trackOpen.onKey); trackOpen.dlg.remove(); trackOpen = null;
+  }
+  const sessionItems = (roleId, label) => {
+    const l = sessionsFor(roleId);
+    return Array.isArray(l) ? l.map((x) => ({ label: x.sessionName || x.id.slice(0, 8), tone: x.denied ? 'bad' : null, value: num(x.calls),
+      meta: [x.principal || x.callerArn || 'unknown caller', x.denied ? `⚠ ${num(x.denied)} denied` : null, x.hasJumps ? 'jumped into another role' : null, x.isJump ? 'jumped in' : null,
+        x.startKnown ? ago(x.startedAt) : 'started earlier'].filter(Boolean).join(' · '),
+      onClick: () => openTrack({ role: roleId, session: x.id }, label) })) : [];
+  };
 
   // drag to orbit: the framing is held while dragging, then refitted
   let drag = null;
@@ -520,7 +564,7 @@ export async function spacePage(ctx) {
         tags: l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : [],
         lists: [{ title: 'Who entered what', items: l.roles.map((r) => ({ label: `${pretty(r.caller).label} → ${pretty(r.role).label}`, meta: `last ${ago(r.lastSeen)}`, value: `${num(r.sessions)}`, href: `#/roles/${r.roleId}` })) }],
         rows: [...who, row('Today', l.today ? `${num(l.today)} session${l.today === 1 ? '' : 's'} at ${l.hours.map((x) => hourLabel(x)).join(', ')} WIB` : 'nothing today')],
-        actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ...(top ? [['Role', `#/roles/${top.roleId}`]] : [])] };
+        actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ['Track sessions', () => openTrack(top ? { role: top.roleId } : { account: l.to }, top ? `${top.role} in ${b}` : b)], ...(top ? [['Role', `#/roles/${top.roleId}`]] : [])] };
     }
     if (l.kind === 'denied') return { eyebrow: 'REFUSED CALLS', title: `${a} → ${b}`, sub: '7 days', swatch: RED, round: true, tags: [{ t: `⚠ ${num(l.denied)} DENIED`, c: RED }],
       rows: [row('What it means', `${num(l.denied)} calls from ${a} to ${b} were refused by IAM. A missing permission, or something trying what it should not.`, 'bad')], actions: [['Open role', `#/roles/${l.from}`, true]] };
@@ -560,7 +604,7 @@ export async function spacePage(ctx) {
             ...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [])],
           lists: [{ title: 'Entered from', items: M.links.filter((l) => l.to === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => ({ label: M.by.get(l.from).name, meta: `${l.roles.length} role pair${l.roles.length === 1 ? '' : 's'} · last ${ago(l.lastSeen)}${l.kind === 'new' ? ' · new today' : ''}`, value: num(l.sessions), pick: l.id })), empty: none },
             { title: 'Reaches', items: M.links.filter((l) => l.from === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => ({ label: M.by.get(l.to).name, meta: `${l.roles.length} role pair${l.roles.length === 1 ? '' : 's'} · last ${ago(l.lastSeen)}`, value: num(l.sessions), pick: l.id })), empty: none }],
-          actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Account radar', `#/?view=account&account=${g.id}`]] };
+          actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
     const s = M.sources.find((x) => x.id === id);
@@ -587,8 +631,9 @@ export async function spacePage(ctx) {
         tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/roles/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
         rows: [row('Calls', `${kfmt(r.calls7)} in 7 days`)],
         lists: [{ title: 'Calls into', items: r.services.map((v) => ({ label: v.name, value: kfmt(v.calls), meta: v.denied ? `⚠ ${num(v.denied)} refused` : null, tone: v.denied ? 'bad' : null, pick: `svc:${v.name}` })) },
-          { title: 'Entered by', items: [...callers, ...chained], empty: 'only callers inside this account' }],
-        actions: [['Open role', `#/roles/${r.id}`, true], ['Its calls', `#/events?role=${r.id}&range=7d`], ['Blast radius', `#/?view=blast&key=${encodeURIComponent(`role:${M.account.awsAccountId}:${r.name}`)}`]] };
+          { title: 'Entered by', items: [...callers, ...chained], empty: 'only callers inside this account' },
+          { title: 'Sessions · click to replay', items: sessionItems(r.id, p.label), empty: sessions.get(r.id) === 'loading' ? 'Loading…' : 'No sessions recorded in the last 30 days' }],
+        actions: [['Open role', `#/roles/${r.id}`, true], ['Its calls', `#/events?role=${r.id}&range=7d`], ['Track sessions', () => openTrack({ role: r.id }, p.label)]] };
     }
     const t = M.towers.find((x) => x.id === id);
     if (t) {
@@ -621,7 +666,8 @@ export async function spacePage(ctx) {
       const ul = h('ul', { class: 'sp-items' }), more = h('button', { class: 'btn sm sp-more' });
       const item = (it) => {
         const body = [h('span', { class: 'sp-item-main' }, h('span', { class: 'sp-item-label' }, it.label), it.meta ? h('span', { class: 'sp-item-meta' }, it.meta) : null), it.value != null ? h('span', { class: 'mono sp-item-val' }, it.value) : null];
-        return h('li', { class: it.tone ? `sp-${it.tone}` : null }, it.pick ? h('button', { class: 'sp-item', title: it.label, onClick: () => set({ sel: it.pick }) }, ...body)
+        return h('li', { class: it.tone ? `sp-${it.tone}` : null }, it.onClick ? h('button', { class: 'sp-item', title: it.label, onClick: it.onClick }, ...body)
+          : it.pick ? h('button', { class: 'sp-item', title: it.label, onClick: () => set({ sel: it.pick }) }, ...body)
           : it.href ? h('a', { class: 'sp-item', href: it.href, title: it.label }, ...body) : h('div', { class: 'sp-item' }, ...body));
       };
       const draw = () => {
@@ -645,7 +691,8 @@ export async function spacePage(ctx) {
         h('button', { class: 'sp-x', 'aria-label': 'Close', onClick: () => set({ sel: null }) }, '×')),
       b.rows.length ? h('dl', null, ...b.rows.map((r) => h('div', null, h('dt', null, r.k), h('dd', { class: r.tone ? `sp-${r.tone}` : null }, r.v)))) : null,
       ...(b.lists || []).map(list),
-      b.actions.length ? h('div', { class: 'sp-card-actions' }, ...b.actions.map(([label, href, primary]) => h('a', { class: primary ? 'btn primary small' : 'btn small', href }, label))) : null);
+      b.actions.length ? h('div', { class: 'sp-card-actions' }, ...b.actions.map(([label, href, primary]) => (typeof href === 'function'
+        ? h('button', { class: primary ? 'btn primary small' : 'btn small', onClick: href }, label) : h('a', { class: primary ? 'btn primary small' : 'btn small', href }, label)))) : null);
   }
 
   // ---------- beside the plane ----------

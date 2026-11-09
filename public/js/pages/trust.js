@@ -4,7 +4,7 @@
 // line, a source or an account for the roles behind it in the sidebar; the table below follows the selection.
 // Everything is a query, so a view can be shared as a link: #/trust?q=finding:account-root from:123456789012
 import { h, svg, get, num, ago } from '../lib.js';
-import { go } from '../main.js';
+import { go, session } from '../main.js';
 
 const SEV = { high: 'b-high', medium: 'b-medium', low: 'b-low', info: 'b-neutral' };
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
@@ -220,12 +220,19 @@ export async function trustPage(ctx) {
       actions([['Show only this', () => run(withTerm(s.query)), true]]));
     } else if (a) {
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
-      side.replaceChildren(head(`${(a.env || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, `${a.aws}${a.planned ? ' · planned, not scanned' : ''}`, a.inbound.worst),
-      facts([['Reachable from outside it', a.inbound.roles ? plural(a.inbound.roles, 'role') : 'no role', a.inbound.worst === 'high' ? 'bad' : null],
-        ['Trust inside it', `${plural(a.own, 'role')} trust its own account · ${plural(a.services, 'role')} trust AWS services`]]),
-      listBox('Who can get in', inn.map((x) => item({ label: nameOf(x.from), worst: x.worst, meta: `${x.kind === 'account' ? 'your account' : SHORT[srcBy.get(x.from)?.group] || ''} · ${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) })), { empty: 'nothing from outside this account' }),
+      // a planned account is not scanned: its own roles and trust policies are unknown, only trust from it (read in other accounts) is
+      side.replaceChildren(head(a.planned ? `PLANNED · ${(a.env || 'account').toUpperCase()} · NOT ONBOARDED` : `${(a.env || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`,
+        a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
+      a.planned
+        ? facts([['Who can get in', 'Not known: its roles and trust policies are read once it is onboarded.', 'warn'],
+          ['It can get into', out.length ? `${plural(out.length, 'account')}, read from those accounts' trust policies` : 'nothing seen in the accounts that are scanned']])
+        : facts([['Reachable from outside it', a.inbound.roles ? plural(a.inbound.roles, 'role') : 'no role', a.inbound.worst === 'high' ? 'bad' : null],
+          ['Trust inside it', `${plural(a.own, 'role')} trust its own account · ${plural(a.services, 'role')} trust AWS services`]]),
+      !a.planned && listBox('Who can get in', inn.map((x) => item({ label: nameOf(x.from), worst: x.worst, meta: `${x.kind === 'account' ? 'your account' : SHORT[srcBy.get(x.from)?.group] || ''} · ${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) })), { empty: 'nothing from outside this account' }),
       out.length > 0 && listBox('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
-      actions([['Show only this', () => run(withTerm(`account:${a.aws}`)), true], ['Open in Space', `#/space?view=account&account=${a.id}`]]));
+      actions(a.planned
+        ? [session.user.permissions.includes('accounts') ? ['Onboard this account', `#/accounts/new?from=${a.id}`, true] : null, ['Accounts', '#/accounts']]
+        : [['Show only this', () => run(withTerm(`account:${a.aws}`)), true], ['Open in Space', `#/space?view=account&account=${a.id}`]]));
     } else {
       // nothing picked: where things come from (every group, inside ones too), and how to read the map
       const groups = m.summary.map((g) => listBox(GROUPS[g.group]?.[0] || g.group, g.sources.map((x) => {

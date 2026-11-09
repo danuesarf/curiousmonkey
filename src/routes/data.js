@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { effectiveLookback } from '../settings.js';
-import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
+import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -546,7 +546,8 @@ const EventsQ = z.object({
   before: z.string().regex(/^\d{10,14}\|[\w-]{0,80}$/).optional(),
 });
 const eventsOpts = (req) => { const o = EventsQ.parse(req.query); return { ...o, account: o.account || null, role: o.role || null, session: o.session || null }; };
-data.get('/events', requirePerm('view'), wrap(async (req, res) => res.json(await searchEvents(req.user, { ...eventsOpts(req), limit: 100 }))));
+// a page of calls: the first one small so the page opens fast, then older ones as the list is scrolled
+data.get('/events', requirePerm('view'), wrap(async (req, res) => res.json(await searchEvents(req.user, { ...eventsOpts(req), limit: Math.max(1, Math.min(200, Number(req.query.limit) || 50)) }))));
 data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
   const r = await searchEvents(req.user, { ...eventsOpts(req), limit: 5000 });
   await audit(req, 'events.export', { type: 'events' }, { q: req.query.q || null, rows: r.items.length });
@@ -564,12 +565,6 @@ data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   res.json(await changeFeed(req.user, { accountId, days: req.query.days }));
 }));
 data.post('/changes/seen', requirePerm('view'), wrap(async (req, res) => { await markSeen(req.user); res.json({ ok: true }); }));
-data.get('/blast/identities', requirePerm('view'), wrap(async (req, res) => res.json({ items: await identities(req.user, String(req.query.q || '').slice(0, 80)) })));
-data.get('/blast', requirePerm('view'), wrap(async (req, res) => {
-  const key = z.string().min(3).max(600).parse(req.query.key);
-  res.json(await blastRadius(req.user, key));
-}));
-
 /** Calls per day over the stored history, with how far the read has got. */
 data.get('/signal', requirePerm('view'), wrap(async (req, res) => {
   const p = []; const where = accountFilter(req, p, 'r.account_id');

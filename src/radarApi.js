@@ -1,10 +1,8 @@
-// Data for radar v3: the estate (accounts as contacts), one account (roles as contacts), the change feed, and blast radius.
+// Data for the radar: the estate (accounts as contacts), one account (roles as contacts), and the change feed.
 import { query } from './db.js';
 import { scopeSql, inScope } from './auth/rbac.js';
 import { historyFor } from './history.js';
 
-const ADMIN = 15000;
-const MAX_HOPS = 4;
 const num = (x) => Number(x || 0);
 const share = (unused, granted) => (num(granted) ? num(unused) / num(granted) : null);
 
@@ -107,66 +105,4 @@ export async function changeFeed(user, { accountId = null, days = 7, limit = 60 
 
 export async function markSeen(user) {
   await query('UPDATE users SET radar_seen_at=now() WHERE id=$1', [user.id]);
-}
-
-/** Identities that enter roles, by how much they can reach directly. */
-export async function identities(user, q = '') {
-  // AWS services (ecs-tasks, lambda…) are not identities anyone can steal; their "reach" is every role that trusts them
-  const p = []; const where = [scopeSql(user, 'r.account_id', p), `p.kind NOT IN ('session','service')`];
-  if (q) { p.push(`%${q}%`); where.push(`p.display ILIKE $${p.length}`); }
-  return (await query(
-    `SELECT p.key, max(p.display) AS display, max(p.kind) AS kind, max(p.via) AS via, count(DISTINCT p.role_id)::int AS roles,
-            count(DISTINCT r.account_id)::int AS accounts, sum(r.granted_count)::bigint AS perms, max(p.last_seen) AS last_seen,
-            bool_or(r.granted_count >= ${ADMIN}) AS reaches_admin
-       FROM principals p JOIN roles r ON r.id=p.role_id AND r.deleted_at IS NULL
-      WHERE ${where.join(' AND ')} GROUP BY p.key ORDER BY sum(r.granted_count) DESC, max(p.display) LIMIT 80`, p)).rows
-    .map((x) => ({ ...x, perms: num(x.perms) }));
-}
-
-const arnOfKey = (key) => {
-  if (key.startsWith('user:')) return key.slice(5);
-  const m = key.match(/^role:(\d{12}):(.+)$/); if (m) return `arn:aws:iam::${m[1]}:role/${m[2]}`;
-  return null;
-};
-
-/**
- * Everything one identity can reach: roles it has been seen entering, roles whose trust policy names it,
- * then the same again from each role reached (role chaining), up to MAX_HOPS. Roles outside the viewer's
- * scope are counted, not shown, and not walked through.
- */
-export async function blastRadius(user, key) {
-  const ident = (await query(`SELECT key, max(display) AS display, max(kind) AS kind, max(via) AS via, (array_agg(caller))[1] AS caller FROM principals WHERE key=$1 GROUP BY key`, [key])).rows[0]
-    || { key, display: key.replace(/^\w+:/, ''), kind: 'other', via: null, caller: {} };
-  const nodes = new Map(); let hidden = 0;
-  let frontier = [{ key, arn: arnOfKey(key), parent: null }];
-  for (let hop = 1; hop <= MAX_HOPS && frontier.length; hop++) {
-    const keys = frontier.map((f) => f.key), arns = frontier.map((f) => f.arn).filter(Boolean);
-    const [obs, trust] = await Promise.all([
-      query(`SELECT p.key AS via_key, r.id, r.name, r.arn, r.kind, r.risk, r.granted_count, r.account_id, a.name AS account_name, a.account_id AS aws, a.environment
-               FROM principals p JOIN roles r ON r.id=p.role_id AND r.deleted_at IS NULL JOIN cloud_accounts a ON a.id=r.account_id WHERE p.key = ANY($1)`, [keys]),
-      arns.length ? query(`SELECT t.arn AS via_arn, r.id, r.name, r.arn, r.kind, r.risk, r.granted_count, r.account_id, a.name AS account_name, a.account_id AS aws, a.environment
-               FROM roles r JOIN cloud_accounts a ON a.id=r.account_id, unnest($1::text[]) AS t(arn)
-              WHERE r.deleted_at IS NULL AND r.trust_policy::text LIKE '%"' || t.arn || '"%'`, [arns]) : { rows: [] },
-    ]);
-    const next = [];
-    const add = (r, from, edge) => {
-      if (nodes.has(r.id)) { if (edge === 'observed') nodes.get(r.id).edge = 'observed'; return; }
-      if (!inScope(user, r.account_id)) { hidden++; nodes.set(r.id, null); return; }
-      const n = { id: r.id, name: r.name, kind: r.kind, risk: r.risk, perms: r.granted_count, admin: r.granted_count >= ADMIN, accountId: r.account_id,
-        account: r.account_name, awsAccountId: r.aws, environment: r.environment, hop, parent: from?.parent ?? null, edge };
-      nodes.set(r.id, n);
-      next.push({ key: `role:${r.aws}:${r.name}`, arn: r.arn, parent: r.id });
-    };
-    for (const r of obs.rows) add(r, frontier.find((f) => f.key === r.via_key), 'observed');
-    for (const r of trust.rows) add(r, frontier.find((f) => f.arn === r.via_arn), 'trust');
-    frontier = next;
-  }
-  const list = [...nodes.values()].filter(Boolean);
-  const t = ident.caller?.trust;
-  return {
-    identity: { key: ident.key, display: ident.display, kind: ident.kind, via: ident.via, conditions: t?.matched ? (t.conditions || []) : null },
-    nodes: list, hidden,
-    totals: { roles: list.length, accounts: new Set(list.map((n) => n.accountId)).size, perms: list.reduce((s, n) => s + n.perms, 0),
-      admin: list.filter((n) => n.admin).length, production: list.filter((n) => n.environment === 'production').length },
-  };
 }

@@ -45,16 +45,15 @@ Edit an account at any time. Switching source keeps the stored history. Widening
 
 ## The radar
 
-The portal opens on a **radar** with three views:
+The portal opens on a **radar** with two views:
 
-- **Estate:** each contact is an AWS account. Distance from the centre is its share of permissions never called; size is its excess permissions (granted minus used). A trail shows where it was 7 and 30 days ago: amber when drifting outward (getting worse), green when moving inward. The sweep stands for the last 24 hours: a contact echoes as the sweep passes, brighter with more calls. Pings mark changes that matter. Sectors are environments, or the OU / group you set on each account.
+- **Estate:** each contact is an AWS account. Distance from the centre is its share of permissions never called; size is its excess permissions (granted minus used). A trail shows where it was 7 and 30 days ago: amber when drifting outward (getting worse), green when moving inward. Brightness is activity: the busier the account in the last 24 hours, the brighter its contact. Pings mark changes that matter. Sectors are environments, or the OU / group you set on each account.
 - **Account:** the same for one account's roles, sectored by role kind.
-- **Blast radius:** pick an identity (a user, an SSO or OIDC identity, a role); the radar shows every role it can reach, ring by ring: roles it was seen entering or whose trust policy names it, then the same again from each role reached (role chaining), up to 4 hops, across accounts. It does not yet check that each role holds `sts:AssumeRole` on the next, so a trust-only (dashed) edge is a possibility, not a proven path. AWS service principals are left out: they are not identities anyone can steal.
 
 **What changed** comes from two tables. After each final analysis of a fully read account, every role gets a daily snapshot (`role_snapshots`); trails and trends compare against them, so they appear after 7 and 30 days. The same step records changes (`changes`): permissions grew (or reached admin level), trimmed, first denied calls, went 90 days without calls, new roles, new unidentified event names. A caller seen entering a role for the first time is recorded while events are read. Nothing is recorded during an account's first read, when everything would look new. The feed marks what arrived since you last looked. In demo mode, `node src/cli.js demo-history` invents 35 days of snapshots and a few changes so this can be seen at once.
 
 - **Sector scan** cuts one role into rings (access level) and sectors (service). Lit dots were called, amber dots are unconfirmed, dim dots were never called.
-- **Track** replays one role session call by call. Each session is a lane. When a session assumes another role (role chaining), the call is drawn as a jump into a new lane for the new session, linked by access key. Chains across connected accounts are linked too. Sessions in accounts you can't see are counted, not shown. Session replays are kept for `SESSION_RETENTION_DAYS` (default 30).
+- **Track** replays one role session call by call. Each session is a lane. When a session assumes another role (role chaining), the call is drawn as a jump into a new lane for the new session, linked by access key. Chains across connected accounts are linked too. Sessions in accounts you can't see are counted, not shown. Session replays are kept for `SESSION_RETENTION_DAYS` (default 30). Space opens the same replay over the map: a role's sessions are listed in its sidebar (click one to replay it), and **Track sessions** on a role, an account or an account-to-account path lists theirs.
 
 ### Results while history is still loading
 

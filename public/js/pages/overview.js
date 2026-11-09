@@ -11,7 +11,8 @@ export async function overview(ctx) {
   if (ids('accounts').length || ids('risks').length) Object.assign(f, { ...DEFAULT, accounts: new Set(ids('accounts')), risks: new Set(ids('risks')), kinds: new Set(), teams: new Set() });
   ctx.setCrumbs('Roles');
   const [ov, accts] = await Promise.all([get('/overview'), get('/accounts')]);
-  const accounts = accts.items;
+  const accounts = accts.items.filter((a) => a.status !== 'planned');     // planned accounts have no roles to list
+  for (const id of [...f.accounts]) if (!accounts.some((a) => a.id === id)) f.accounts.delete(id);
   const list = h('div'), tiles = h('div', { class: 'tiles' });
   let timer;
 
@@ -67,20 +68,45 @@ export async function overview(ctx) {
   search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { f.q = search.value; f.page = 1; load(); }, 250); });
   const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: f[key] === v }, l))); s.addEventListener('change', () => { f[key] = s.value; f.page = 1; load(); }); return s; };
 
-  const scopeCard = h('section', { class: 'card', 'aria-labelledby': 'acct-h' },
-    h('div', { class: 'card-h' }, h('h2', { id: 'acct-h' }, 'Accounts in scope'),
-      h('div', { class: 'pill-bar' },
-        h('button', { class: 'btn sm', onClick: () => { f.accounts.clear(); f.page = 1; ctx.reload(); } }, 'All accounts'),
-        h('button', { class: 'btn sm', onClick: () => { f.accounts = new Set(accounts.filter((a) => a.environment === 'production').map((a) => a.id)); f.page = 1; ctx.reload(); } }, 'Production only'))),
-    accounts.length ? h('div', { class: 'scroll' }, h('table', null,
-      h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Account'), h('th', null, 'Roles'), h('th', null, 'Data events found'), h('th', null, 'Last scan'))),
-      h('tbody', null, accounts.map((a) => {
-        const cb = h('input', { type: 'checkbox', checked: f.accounts.has(a.id), 'aria-label': `Include ${a.name}` });
-        cb.addEventListener('change', () => { cb.checked ? f.accounts.add(a.id) : f.accounts.delete(a.id); f.page = 1; load(); });
-        return h('tr', null, h('td', null, cb), h('td', null, h('div', { class: 'name' }, a.name), h('div', { class: 'tiny muted' }, `${a.account_id} · ${a.environment}`)),
-          h('td', null, num(a.roles)), h('td', null, a.data_event_sources ? `${a.data_event_sources} sources` : 'none'),
-          h('td', { class: 'small' }, a.status === 'connected' ? ago(a.last_scan_at) : h('span', { class: 'badge b-medium' }, a.status)));
-      })))) : h('div', { class: 'empty' }, 'No accounts connected yet.', h('div', null, h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account'))));
+  // ---- which accounts: one control in the filter bar, not a table above the roles (works the same for 5 or 500) ----
+  const ENVS = ['production', 'shared', 'staging', 'development', 'sandbox'].filter((e) => accounts.some((a) => a.environment === e));
+  const acctLabel = h('span');
+  const acctChips = h('div', { class: 'pill-bar acct-chips' });
+  const title = h('h1');
+  const drawTitle = () => { title.textContent = f.accounts.size ? `IAM roles in ${f.accounts.size} account${f.accounts.size > 1 ? 's' : ''}` : 'IAM roles across all accounts'; };
+  const acctSearch = h('input', { type: 'search', placeholder: `Find among ${accounts.length} accounts`, 'aria-label': 'Find an account' });
+  const acctList = h('div', { class: 'acct-list', role: 'group', 'aria-label': 'Accounts' });
+  const changed = () => { f.page = 1; drawAccounts(); drawTitle(); scanBtn.textContent = f.accounts.size ? `Scan ${f.accounts.size} selected` : 'Scan all accounts'; load(); };
+  function drawAccounts() {
+    acctLabel.textContent = f.accounts.size === 0 ? `All ${accounts.length} accounts` : f.accounts.size === 1 ? accounts.find((a) => f.accounts.has(a.id))?.name || '1 account' : `${f.accounts.size} of ${accounts.length} accounts`;
+    const picked = accounts.filter((a) => f.accounts.has(a.id));
+    acctChips.replaceChildren(...picked.slice(0, 4).map((a) => h('span', { class: 'chip ev-on' }, a.name,
+      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${a.name}`, onClick: () => { f.accounts.delete(a.id); changed(); } }, '×'))),
+      picked.length > 4 ? h('span', { class: 'small muted' }, `+${picked.length - 4} more`) : null,
+      picked.length ? h('button', { type: 'button', class: 'btn sm', onClick: () => { f.accounts.clear(); changed(); } }, 'Clear') : null);
+    const needle = acctSearch.value.trim().toLowerCase();
+    const shown = accounts.filter((a) => !needle || `${a.name} ${a.account_id} ${a.environment} ${a.ou || ''}`.toLowerCase().includes(needle))
+      .sort((a, b) => (f.accounts.has(b.id) - f.accounts.has(a.id)) || a.name.localeCompare(b.name));
+    acctList.replaceChildren(...(shown.length ? shown.map((a) => {
+      const cb = h('input', { type: 'checkbox', checked: f.accounts.has(a.id) });
+      cb.addEventListener('change', () => { cb.checked ? f.accounts.add(a.id) : f.accounts.delete(a.id); changed(); });
+      return h('label', { class: 'acct-opt' }, cb, h('span', { class: 'acct-opt-b' }, h('span', { class: 'name' }, a.name), h('span', { class: 'tiny muted' }, `${a.account_id} · ${a.environment}${a.ou ? ` · ${a.ou}` : ''}`)),
+        h('span', { class: 'mono tiny muted' }, `${num(a.roles)} roles`));
+    }) : [h('p', { class: 'small muted', style: 'margin:8px' }, 'No account matches.')]));
+  }
+  acctSearch.addEventListener('input', drawAccounts);
+  const onlyEnv = (env) => { f.accounts = new Set(accounts.filter((a) => a.environment === env).map((a) => a.id)); changed(); };
+  const acctPicker = h('details', { class: 'acct-picker' },
+    h('summary', { class: 'btn', 'aria-label': 'Choose accounts' }, h('span', { class: 'muted' }, 'Accounts: '), acctLabel, ' ▾'),
+    h('div', { class: 'acct-pop' }, acctSearch,
+      h('div', { class: 'pill-bar' }, h('button', { type: 'button', class: 'chip', onClick: () => { f.accounts.clear(); changed(); } }, 'All'),
+        ...ENVS.map((e) => h('button', { type: 'button', class: 'chip', onClick: () => onlyEnv(e) }, `${e[0].toUpperCase()}${e.slice(1)} only`))),
+      acctList));
+  // close when clicking elsewhere or pressing Escape
+  const outside = (e) => { if (acctPicker.open && !acctPicker.contains(e.target)) acctPicker.open = false; };
+  const esc = (e) => { if (e.key === 'Escape' && acctPicker.open) { acctPicker.open = false; acctPicker.querySelector('summary').focus(); } };
+  document.addEventListener('click', outside); document.addEventListener('keydown', esc);
+  acctPicker.addEventListener('toggle', () => { if (acctPicker.open) acctSearch.focus(); });
 
   const scanBtn = h('button', { class: 'btn primary', type: 'button', onClick: async (e) => {
     const ids = (f.accounts.size ? accounts.filter((a) => f.accounts.has(a.id)) : accounts).map((a) => a.id);
@@ -93,19 +119,20 @@ export async function overview(ctx) {
 
   const body = h('div', { class: 'stack-lg' },
     h('header', { class: 'head' },
-      h('div', null, h('div', { class: 'eyebrow' }, 'ROLES'), h('h1', null, f.accounts.size ? `IAM roles in ${f.accounts.size} account${f.accounts.size > 1 ? 's' : ''}` : 'IAM roles across all accounts'),
+      h('div', null, h('div', { class: 'eyebrow' }, 'ROLES'), title,
         h('p', { class: 'muted' }, 'Results stay provisional until each account’s CloudTrail history is fully read. History is stored, so it grows past the first read over time.')),
       h('div', { class: 'actions' }, session.user.permissions.includes('accounts') && h('a', { class: 'btn', href: '#/accounts/new' }, 'Connect account'), session.user.permissions.includes('scan') && scanBtn)),
-    tiles, scopeCard,
+    tiles,
     h('section', { class: 'card' },
-      h('div', { class: 'filters' }, search,
+      h('div', { class: 'filters' }, h('div', { class: 'row acct-row' }, acctPicker, acctChips), search,
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Role kind' }, ...Object.entries(KIND).map(([k, l]) => chip(f.kinds, k, l))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Risk' }, ...['High', 'Medium', 'Low'].map((r) => chip(f.risks, r, r))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Reviewer' }, ...Object.entries(TEAM).map(([k, l]) => chip(f.teams, k, l))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Findings' }, flag('unconfirmed', 'Has unverifiable'), flag('idle', 'Idle role'), flag('openFlags', 'Needs a decision'), flag('unidentified', 'Has unidentified calls')),
         sel('policy', [['', 'Any policy type'], ['inline', 'Has inline policy'], ['managed', 'Has attached policy']], 'Policy type'), count),
       list));
+  drawAccounts(); drawTitle();
   load();
-  ctx.onLeave(() => clearTimeout(timer));
+  ctx.onLeave(() => { clearTimeout(timer); document.removeEventListener('click', outside); document.removeEventListener('keydown', esc); });
   return body;
 }

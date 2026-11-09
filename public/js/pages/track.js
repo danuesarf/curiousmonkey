@@ -14,15 +14,28 @@ const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export async function trackPage(ctx) {
   const roleId = ctx.params.get('role'), account = ctx.params.get('account');
+  const v = await trackView({ role: roleId, account, session: ctx.params.get('session'),
+    onSelect: (id) => history.replaceState(null, '', `#/track?${new URLSearchParams({ ...(roleId ? { role: roleId } : {}), ...(account ? { account } : {}), session: id })}`),
+    empty: h('a', { class: 'btn sm', href: '#/' }, 'Back to radar') });
+  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), 'Track', v.title);
+  ctx.onLeave(() => v.stop());
+  return v.el;
+}
+
+/**
+ * The track view on its own: a list of sessions (for a role, an account, or all), the chosen one call by call, and
+ * its replay. Mounted by the Track page and by Space. `onSelect(sessionId)` is told when another session is chosen.
+ * Returns { el, stop, title }; call stop() when the view goes away.
+ */
+export async function trackView({ role: roleId = null, account = null, session: wanted = null, onSelect = () => {}, empty = null } = {}) {
   const qs = new URLSearchParams(); if (roleId) qs.set('role', roleId); if (account) qs.set('account', account);
   const list = await get(`/sessions?${qs}`);
-  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), 'Track', roleId && list.items[0] ? list.items[0].role : 'All roles');
+  const title = roleId && list.items[0] ? list.items[0].role : 'All roles';
   if (!list.items.length) {
-    return h('div', { class: 'stack-lg' }, h('div', { class: 'card card-b stack' }, h('h2', null, 'No sessions to replay yet'),
+    return { title, stop: () => {}, el: h('div', { class: 'stack-lg' }, h('div', { class: 'card card-b stack' }, h('h2', null, 'No sessions to replay yet'),
       h('p', { class: 'muted' }, `Sessions are recorded from AssumeRole events as history is read, and kept for ${list.retentionDays} days. A session that started before the stored history still shows, marked as started earlier.`),
-      h('a', { class: 'btn sm', href: '#/' }, 'Back to radar')));
+      empty)) };
   }
-  const wanted = ctx.params.get('session');
   let current = list.items.find((s) => s.id === wanted) || list.items[0];
 
   const left = h('aside', { class: 'left' });
@@ -31,12 +44,11 @@ export async function trackPage(ctx) {
   const controls = h('div', { class: 'track-controls' });
   const log = h('div', { class: 'track-log', role: 'log', 'aria-label': 'Calls in this track' });
   let stop = () => {};
-  ctx.onLeave(() => stop());
 
   function drawList() {
     left.replaceChildren(h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'TRACK · ONE SESSION, CALL BY CALL'),
       h('p', { class: 'tiny muted' }, `Sessions kept for ${list.retentionDays} days. Ones that jumped into another role are marked.`)),
-    h('div', { class: 'stack' }, list.items.map((s) => h('button', { class: 'session-btn', 'aria-pressed': String(s.id === current.id), onClick: () => { current = s; history.replaceState(null, '', `#/track?${new URLSearchParams({ ...(roleId ? { role: roleId } : {}), session: s.id })}`); drawList(); load(); } },
+    h('div', { class: 'stack' }, list.items.map((s) => h('button', { class: 'session-btn', 'aria-pressed': String(s.id === current.id), onClick: () => { current = s; onSelect(s.id); drawList(); load(); } },
       h('span', { class: 'row', style: 'justify-content:space-between' }, h('b', { class: 'mono tiny' }, s.sessionName || s.id.slice(0, 8)),
         h('span', { class: 'row', style: 'gap:4px' }, s.isJump && h('span', { class: 'tag', style: 'border-color:#2e4f6b;color:#8ec5ff' }, 'JUMPED IN'), s.hasJumps && h('span', { class: 'tag', style: 'border-color:#2e4f6b;color:#8ec5ff' }, 'JUMPS ⇢'),
           s.denied > 0 && h('span', { class: 'tag bad' }, `${s.denied} denied`))),
@@ -261,7 +273,7 @@ export async function trackPage(ctx) {
   }
 
   drawList(); load();
-  return h('div', { class: 'stack track-page', style: 'gap:0' }, h('div', { class: 'scene-layout' }, left, scene, right), controls, log);
+  return { title, stop: () => stop(), el: h('div', { class: 'stack track-page', style: 'gap:0' }, h('div', { class: 'scene-layout' }, left, scene, right), controls, log) };
 }
 
 function dot(c, cls) { const e = h('span', { class: cls || null, 'aria-hidden': 'true' }); Object.assign(e.style, { display: 'inline-block', width: '8px', height: '8px', borderRadius: '50%', background: c, marginRight: '6px' }); return e; }

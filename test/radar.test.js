@@ -1,4 +1,4 @@
-// Radar v3: snapshots and the changes they reveal, the estate's trails, and blast radius through role chaining.
+// Radar v3: snapshots and the changes they reveal, and the estate's trails.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startPg } from './helpers/pg.js';
@@ -62,20 +62,6 @@ test('the estate shows where each account was 30 days ago, and the trend compare
   assert.equal(b.never30, null);                                       // no history yet: no trail
   assert.equal(e.totals.trendAccounts, 1);
   assert.equal(a.pings, 4);
-});
-
-test('blast radius walks observed entries and trust policies, hop by hop, and hides what the viewer cannot see', async () => {
-  // ci-bot enters deployer (observed); ops-admin trusts deployer by ARN (trust); deployer was seen entering data-reader in the other account
-  await principal(roleId.reader, 'role:111111111111:deployer', 'role', 'role/deployer (111111111111)');
-  const r = await api.blastRadius(owner, 'user:arn:aws:iam::111111111111:user/ci-bot');
-  const by = Object.fromEntries(r.nodes.map((n) => [n.name, n]));
-  assert.deepEqual([by.deployer.hop, by['ops-admin'].hop, by['data-reader'].hop], [1, 2, 2]);
-  assert.equal(by['ops-admin'].edge, 'trust'); assert.equal(by['data-reader'].edge, 'observed');
-  assert.equal(by['ops-admin'].parent, by.deployer.id);
-  assert.equal(r.totals.accounts, 2);
-  const scoped = await api.blastRadius({ scope_accounts: [A] }, 'user:arn:aws:iam::111111111111:user/ci-bot');
-  assert.equal(scoped.nodes.some((n) => n.name === 'data-reader'), false);
-  assert.equal(scoped.hidden, 1);
 });
 
 test('a new caller after the first full read is a ping; the same caller again is not', async () => {
