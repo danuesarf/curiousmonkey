@@ -117,6 +117,24 @@ test('regions with log files in the trail are read even when not configured', as
   assert.equal(run.length, 1);
 });
 
+test('a region someone removed stays out, even though the trail has files for it', async () => {
+  await reset();
+  const a = await account(['ap-southeast-1']);
+  await db.query(`UPDATE cloud_accounts SET excluded_regions='{eu-west-1}' WHERE id=$1`, [a.id]);
+  const acc = (await db.query('SELECT * FROM cloud_accounts WHERE id=$1', [a.id])).rows[0];
+  const t = NOW - DAY;
+  const gw = bucket([
+    { region: 'ap-southeast-1', time: t + 5 * MIN, records: [assume(t, 'K5'), call(t + MIN, 'K5', 'ap-southeast-1')] },
+    { region: 'eu-west-1', time: t + 9 * MIN, records: [call(t + 4 * MIN, 'K5', 'eu-west-1', 'RunInstances')] },
+  ]);
+  const c = ctx();
+  await tr.readTrail({ ctx: c, account: acc, gw, now: NOW, limits: small });
+  assert.deepEqual((await db.query(`SELECT regions FROM cloud_accounts WHERE id=$1`, [a.id])).rows[0].regions, ['ap-southeast-1']);
+  assert.ok(c.logs.some((m) => /skipping eu-west-1/.test(m)));
+  assert.equal((await db.query(`SELECT count(*)::int n FROM scan_checkpoints WHERE account_id=$1 AND region='eu-west-1'`, [a.id])).rows[0].n, 0);
+  assert.ok(!gw.gets.some((k) => k.includes('/eu-west-1/')), 'its files are not downloaded');
+});
+
 test('moving over from the per-slice reader counts nothing twice', async () => {
   await reset();
   const a = await account(['ap-southeast-1']);

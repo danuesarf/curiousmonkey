@@ -55,7 +55,11 @@ export async function readTrail({ ctx, account, gw, decode = decodeTrailFile, no
   // ---- regions: every region the trail has files for ----
   let found = [];
   try { found = await gw.listTrailRegions(); } catch (e) { await log(`could not list the trail's regions (${e.name || e.message}); reading the configured ones`, null, 'warn'); }
-  const regions = [...new Set([...account.regions, ...found])].sort();
+  // regions someone removed on purpose stay out, even when the trail has files for them
+  const excluded = new Set(account.excluded_regions || []);
+  const skipped = found.filter((r) => excluded.has(r) && !account.regions.includes(r));
+  if (skipped.length) await log(`skipping ${skipped.join(', ')}: removed from this account's regions`);
+  const regions = [...new Set([...account.regions, ...found.filter((r) => !excluded.has(r))])].sort();
   const added = regions.filter((r) => !account.regions.includes(r));
   if (added.length) {
     await query('UPDATE cloud_accounts SET regions=$2 WHERE id=$1', [account.id, regions]);

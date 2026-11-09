@@ -20,7 +20,9 @@ export const FINDINGS = {
   'iam-user': 'Trusts an IAM user directly (long-lived keys)',
   'deleted-principal': 'Points at a deleted identity (unique ID instead of ARN)',
   'broad-action': 'Allows sts:* or * in a trust policy',
-  'never-used': 'Never seen used in the stored history',
+  'never-used': 'Not used in the CloudTrail history read',
+  'used-unnamed': 'Used from that account, but which identity is not known yet',
+  'used-unattributed': 'Something from another account came in before callers were recorded by account',
 };
 const ORG_KEYS = /^aws:(principalorgid|principalorgpaths|principalaccount|principalarn|sourceaccount|sourcearn|sourceorgid|principaltag\/)/i;
 
@@ -133,7 +135,29 @@ export function edgesOf(role, ctx) {
       // what has been seen coming in through this edge
       const seen = ctx.seen.get(role.id) || [];
       e.seen = seen.filter((s) => matchesSeen(e, s)).map((s) => ({ display: s.display, kind: s.kind, lastSeen: s.last_seen, sessions: s.sessions_count }));
-      if (!e.seen.length && e.type !== 'service' && ctx.complete.has(role.account_id)) f('never-used', 'info', 'Nothing came in through this statement in the stored history. If nobody needs it, remove it.');
+      // Usage is read from THIS account's CloudTrail: an AssumeRole into it is logged here whoever calls, so the caller's
+      // account does not need to be onboarded to know a statement was used. Two cases can't be pinned to the statement:
+      const fromElsewhere = e.principalAccount && e.principalAccount !== own;
+      if (!e.seen.length && fromElsewhere) {
+        // 1. the caller's account is known but CloudTrail gave only a unique ID (AROA.../AIDA...), not the role or user name
+        const unnamed = seen.filter((s) => (s.key || '').startsWith(`acct:${e.principalAccount}:`));
+        // 2. calls recorded before callers were kept by account: one merged "other:AWSAccount" entry, account unknown
+        const merged = seen.filter((s) => s.key === 'other:AWSAccount');
+        const srcName = e.principalAccountName, srcState = ctx.accountState?.get(e.principalAccount);
+        if (unnamed.length) {
+          e.seen = unnamed.map((s) => ({ display: `an identity in ${e.principalAccount} (not named yet)`, kind: 'account', lastSeen: s.last_seen, sessions: s.sessions_count, unnamed: true }));
+          f('used-unnamed', 'info', srcState === 'connected'
+            ? `CloudTrail here names the caller only by its unique ID. Rescan ${srcName || e.principalAccount} so its role IDs are stored, and the next sign-ins are matched to ${e.principal.split('/').pop()}.`
+            : `CloudTrail here names the caller only by its unique ID. ${e.principalAccount}${srcState === 'planned' ? ` (${srcName}, planned)` : ''} is not scanned, so the ID cannot be turned into a role name. Onboard it to tell which identity it was.`);
+        } else if (merged.length) {
+          e.seen = merged.map((s) => ({ display: 'another AWS account (before callers were recorded by account)', kind: 'other', lastSeen: s.last_seen, sessions: s.sessions_count, merged: true }));
+          f('used-unattributed', 'info', 'Older scans kept no caller account for cross-account calls, so this may or may not be the statement they came through. New sign-ins are attributed by account; check again after the next scans.');
+        }
+      }
+      if (!e.seen.length && e.type !== 'service' && ctx.complete.has(role.account_id)) {
+        const days = ctx.windowDays?.get(role.account_id);
+        f('never-used', 'info', `Nothing came in through this statement in ${days ? `the ${days} days of CloudTrail read for ${role.account_name}` : 'the stored history'}. This is read from ${role.account_name}'s own trail, so it holds whether or not the caller's account is onboarded. If nobody needs it, remove it.`);
+      }
       e.worst = e.findings.reduce((w, x) => (SEV_ORDER[x.severity] < SEV_ORDER[w] ? x.severity : w), 'none');
       edges.push(e);
     }
@@ -202,7 +226,9 @@ export async function trustMap(user, q = '', { limit = 500 } = {}) {
   const accts = (await query('SELECT * FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(roles.map((r) => r.account_id))]])).rows;
   const hist = await historyFor(accts);
   const complete = new Set([...hist].filter(([, v]) => v.complete).map(([k]) => k));
-  const ctx = { connected, seen, complete };
+  const states = (await query('SELECT account_id, status FROM cloud_accounts')).rows;
+  const windowDays = new Map([...hist].filter(([, v]) => v.backTo).map(([k, v]) => [k, Math.max(1, Math.round((Date.now() - new Date(v.backTo)) / 864e5))]));
+  const ctx = { connected, seen, complete, windowDays, accountState: new Map(states.map((a) => [a.account_id, a.status])) };
   const all = roles.flatMap((r) => edgesOf(r, ctx));
   const terms = parseQuery(q);
   const rows = all.filter((e) => matchesQuery(e, terms))

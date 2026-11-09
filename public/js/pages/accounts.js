@@ -64,7 +64,7 @@ const blankModel = () => ({
   keys: { accessKeyId: '', secretAccessKey: '', sessionToken: '' }, rebuildHistory: false,
 });
 function modelFrom(a) {
-  return { ...blankModel(), name: a.name, accountId: a.account_id, environment: a.environment, ou: a.ou || '', regions: new Set(a.regions),
+  return { ...blankModel(), name: a.name, accountId: a.account_id, environment: a.environment, ou: a.ou || '', regions: new Set(a.regions), excludedRegions: a.excluded_regions || [],
     eventSource: a.event_source, lookbackDays: a.lookback_days,
     s3: { bucket: a.s3_bucket || '', prefix: a.s3_prefix || '', orgId: a.s3_org_id || '', region: a.s3_region || '' },
     authMode: a.auth_mode, baseIdentity: a.base_identity, roleName: a.role_name || 'CuriousMonkeyScanner', trustPrincipal: a.trust_principal || '' };
@@ -120,7 +120,8 @@ function checkAccess(root, m, { hasStored = false, keysInThisStep = true } = {})
 function detailsSection(m, { lockId = false } = {}) {
   const env = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((e) => h('option', { value: e, selected: e === m.environment }, e)));
   env.addEventListener('change', () => { m.environment = env.value; });
-  const regions = h('div', { class: 'pill-bar', 'data-f': 'regions', tabindex: '-1' }, REGIONS.map((r) => {
+  // every region the account has, not only the common ones, so any of them can be taken out
+  const regions = h('div', { class: 'pill-bar', 'data-f': 'regions', tabindex: '-1' }, [...new Set([...REGIONS, ...m.regions, ...(m.excludedRegions || [])])].sort().map((r) => {
     const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': m.regions.has(r) }, r);
     b.addEventListener('click', () => { m.regions.has(r) ? m.regions.delete(r) : m.regions.add(r); b.setAttribute('aria-pressed', String(m.regions.has(r))); });
     return b;
@@ -132,7 +133,7 @@ function detailsSection(m, { lockId = false } = {}) {
     field('Environment', env),
     field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', placeholder: 'e.g. Workloads/Prod', maxlength: '120' }), 'The radar can group accounts by this instead of by environment. Use your AWS Organizations OU path, or any grouping your team uses.'),
     h('fieldset', null, h('legend', null, 'Regions to read CloudTrail from'), regions,
-      h('span', { class: 'hint' }, 'CloudTrail keeps events per region. Keep us-east-1: IAM and sign-in events are recorded there. Add every region where this account runs workloads. With an S3 trail, every region that has log files in the trail is read and added here, whatever is ticked.')));
+      h('span', { class: 'hint' }, 'CloudTrail keeps events per region. Keep us-east-1: IAM and sign-in events are recorded there. Add every region where this account runs workloads. With an S3 trail, a region that has log files in the trail is added here when found, unless you untick it: an unticked region stays out and its history bar goes. Activity there is then not seen, so prefer blocking unused regions with an SCP.')));
 }
 
 function sourceSection(m, rerender, { editing = false, original = null } = {}) {
@@ -371,11 +372,20 @@ function historyBars(hist) {
     h('div', { class: 'row' }, h('span', { class: 'eyebrow grow' }, 'CLOUDTRAIL HISTORY READ'),
       h('span', { class: `state ${hist.complete ? '' : 'prov'}` }, hist.complete ? 'Complete · results final' : `${hist.progress}% · results provisional`)),
     hist.complete && (() => { const fr = freshness(hist.freshAt, LIMITS.tailEveryMinutes, LIMITS.deliveryLagMinutes); const el = h('div', { class: 'small' }, h('b', null, 'Fresh: '), fr.text, h('span', { class: 'muted' }, LIMITS.tailEveryMinutes > 0 ? ` · new events are read every ${LIMITS.tailEveryMinutes} min` : ' · catch-up reads are off; new events wait for the daily scan')); el.firstChild.style.color = TONE_COLOR[fr.tone]; return el; })(),
-    hist.regions.map((r) => {
-      const bar = h('i', { class: r.complete ? 'done' : null }); bar.style.width = `${Math.max(1, r.progress)}%`;
-      return h('div', { class: 'history-row' }, h('span', { class: 'mono' }, r.region), h('span', { class: 'track', role: 'img', 'aria-label': `${r.region}: ${r.progress}% read` }, bar),
-        h('span', { class: 'tiny muted' }, r.complete ? 'complete' : r.first ? `${r.progress}% · back to ${new Date(r.first).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : 'not started'));
-    }));
+    // a bar per region still reading; the finished ones fold into one line once there are more than a few
+    (() => {
+      const bar = (r) => {
+        const i = h('i', { class: r.complete ? 'done' : null }); i.style.width = `${Math.max(1, r.progress)}%`;
+        return h('div', { class: 'history-row' }, h('span', { class: 'mono' }, r.region), h('span', { class: 'track', role: 'img', 'aria-label': `${r.region}: ${r.progress}% read` }, i),
+          h('span', { class: 'tiny muted' }, r.complete ? 'complete' : r.first ? `${r.progress}% · back to ${new Date(r.first).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : 'not started'));
+      };
+      const done = hist.regions.filter((r) => r.complete), open = hist.regions.filter((r) => !r.complete);
+      if (hist.regions.length <= 4 || done.length < 2) return hist.regions.map(bar);
+      return [...open.map(bar), h('details', { class: 'history-fold' },
+        h('summary', { class: 'history-row history-sum', title: 'Show each region' }, h('span', { class: 'mono' }, `${done.length} region${done.length > 1 ? 's' : ''}`), h('span', { class: 'track' }, h('i', { class: 'done', style: 'width:100%' })),
+          h('span', { class: 'tiny muted' }, 'all complete ▾')),
+        done.map(bar))];
+    })());
 }
 
 // ---------- wizard: nothing is saved until the last step ----------

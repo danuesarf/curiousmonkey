@@ -125,6 +125,13 @@ test('accounts: access modes, S3 source and edits; stored keys never come back',
   const r1 = await owner.patch(`/api/accounts/${u.json.id}`, { name: 'renamed' });
   assert.equal(r1.json.name, 'renamed'); assert.equal(r1.json.has_credentials, true); assert.equal(r1.json.status, 'connected'); assert.equal(r1.json.accessChanged, false);
   assert.equal((await owner.patch(`/api/accounts/${u.json.id}`, { eventSource: 'event-history' })).json.field, 'lookbackDays');
+  // taking regions out: remembered, so an S3 trail reader does not add them back, and their read state is dropped
+  await db.query(`UPDATE cloud_accounts SET regions='{ap-southeast-3,eu-north-1,us-east-1}' WHERE id=$1`, [u.json.id]);
+  await db.query(`INSERT INTO scan_checkpoints(account_id, region, source, last_event_time) VALUES ($1,'eu-north-1','s3',now()), ($1,'us-east-1','s3',now())`, [u.json.id]);
+  const rr = await owner.patch(`/api/accounts/${u.json.id}`, { regions: ['ap-southeast-3', 'us-east-1'] });
+  assert.deepEqual([rr.json.regions, rr.json.excluded_regions], [['ap-southeast-3', 'us-east-1'], ['eu-north-1']]);
+  assert.deepEqual((await db.query('SELECT region FROM scan_checkpoints WHERE account_id=$1', [u.json.id])).rows.map((x) => x.region), ['us-east-1']);
+  assert.deepEqual((await owner.patch(`/api/accounts/${u.json.id}`, { regions: ['ap-southeast-3', 'eu-north-1', 'us-east-1'] })).json.excluded_regions, [], 'ticking it again lets it back in');
   const r2 = await owner.patch(`/api/accounts/${u.json.id}`, { authMode: 'assume_role', baseIdentity: 'system', roleName: 'CmScanner' });
   assert.equal(r2.json.has_credentials, false); assert.equal(r2.json.status, 'pending'); assert.equal(r2.json.role_arn, 'arn:aws:iam::555555555555:role/CmScanner');
   // snippets follow the mode and the bucket

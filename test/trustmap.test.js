@@ -129,3 +129,24 @@ test('the map: one line per source and account, account to account between your 
   const a = m.accounts.find((x) => x.id === 'acct');
   assert.equal(a.own, 1); assert.equal(a.services, 1); assert.equal(a.inbound.roles, 3); assert.equal(a.inbound.worst, 'high');
 });
+
+test('cross-account use: named, unnamed (only a unique ID), merged from older scans, or not used in the window read', () => {
+  const st = (p) => [{ Effect: 'Allow', Principal: { AWS: p }, Action: 'sts:AssumeRole' }];
+  const r = role('x', st(`arn:aws:iam::${THIRD}:role/vendor-app`));
+  const at = (seen) => ({ ...ctx, complete: new Set(['acct']), windowDays: new Map([['acct', 30]]), accountState: new Map([[CONNECTED, 'connected']]), seen: new Map([['r-x', seen]]) });
+  const row = (key, n = 3) => ({ key, kind: 'account', display: key, last_seen: new Date(), sessions_count: n });
+  // the target's trail had only the caller's unique ID: used, but which identity is not known
+  let [e] = edgesOf(r, at([row(`acct:${THIRD}:AROAVENDORAPP000001`)]));
+  assert.equal(e.seen.length, 1); assert.ok(e.seen[0].unnamed);
+  assert.deepEqual(ids(e).filter((x) => /used/.test(x)), ['info:used-unnamed']);
+  assert.match(e.findings.find((f) => f.id === 'used-unnamed').detail, /not scanned.*Onboard it/);
+  // a whole-account trust is matched by the account alone: named enough
+  [e] = edgesOf(role('x', st(`arn:aws:iam::${THIRD}:root`)), at([row(`acct:${THIRD}:AIDASOMEUSER0000001`)]));
+  assert.equal(e.seen.length, 1); assert.ok(!e.findings.some((f) => /used/.test(f.id)));
+  // older scans: one merged entry with no account
+  [e] = edgesOf(r, at([row('other:AWSAccount', 162)]));
+  assert.ok(e.seen[0].merged); assert.ok(e.findings.some((f) => f.id === 'used-unattributed')); assert.ok(!e.findings.some((f) => f.id === 'never-used'));
+  // nothing at all: not used in the 30 days read, which holds without onboarding the caller
+  [e] = edgesOf(r, at([]));
+  assert.match(e.findings.find((f) => f.id === 'never-used').detail, /30 days of CloudTrail read for payments-prod.*whether or not the caller's account is onboarded/);
+});

@@ -218,8 +218,14 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
     cols.onboarded_at = new Date();
   }
   cols.updated_at = new Date();
+  // Regions taken out: remember them so an S3 trail reader does not add them back, and drop what was read for them
+  // (their read position and history bar). Their events already stored stay; they are just no longer read.
+  const removed = (a.regions || []).filter((r) => !next.regions.includes(r));
+  if (removed.length || (a.excluded_regions || []).some((r) => next.regions.includes(r)))
+    cols.excluded_regions = [...new Set([...(a.excluded_regions || []), ...removed])].filter((r) => !next.regions.includes(r)).sort();
   const keys = Object.keys(cols);
   const row = await tx(async (c) => {
+    if (removed.length) for (const t of ['scan_checkpoints', 'trail_cursors']) await c.query(`DELETE FROM ${t} WHERE account_id=$1 AND region = ANY($2)`, [a.id, removed]);
     if (p.rebuildHistory) {
       // Start the stored history over. Analysis results are recomputed by the next scan.
       await c.query('DELETE FROM scan_checkpoints WHERE account_id=$1', [a.id]);

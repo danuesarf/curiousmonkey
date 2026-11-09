@@ -552,3 +552,4 @@ button.sp-item:hover,a.sp-item:hover{background:#0b1c14}
 .tm-way-f{display:flex;flex-direction:column;gap:4px}.tm-way-f summary{display:flex;gap:7px;align-items:baseline;overflow-wrap:anywhere}.tm-way-f summary .badge{flex:none}.tm-way-f details{min-width:0}.tm-ftext{flex:1 1 0;min-width:0}.tm-way-seen{min-width:0}
 @media (max-width:900px){.tm-way{grid-template-columns:10px 1fr;}.tm-way>*:nth-child(n+3){grid-column:2}}
 .tm-find{display:flex;gap:7px;align-items:baseline;font-size:12.5px;min-width:0;cursor:help}.tm-find .badge{flex:none}
+.history-fold>summary{cursor:pointer;list-style:none}.history-fold{display:flex;flex-direction:column;gap:6px}.history-fold>summary::-webkit-details-marker{display:none}
