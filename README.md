@@ -226,3 +226,7 @@ npm ci
 npm test                        # needs the postgres binaries from embedded-postgres; run as a non-root user
 npm start & npm run worker
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

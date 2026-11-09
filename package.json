@@ -40,5 +40,6 @@
     "embedded-postgres": "18.0.0-beta.15",
     "eslint": "9.39.5",
     "globals": "15.15.0"
-  }
+  },
+  "license": "MIT"
 }

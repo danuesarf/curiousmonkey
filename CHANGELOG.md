@@ -38,6 +38,7 @@ Every push is checked by tests, npm audit, Trivy (dependencies, configuration an
 
 ### Known limits
 
+- MIT licensed.
 - This is a 0.x release: the database schema may still change (migrations run automatically on start).
 - Calls are kept one by one for `SESSION_RETENTION_DAYS` (default 30); counts per day are kept for the whole lookback.
 - Event History reaches back 90 days; read from an S3 trail for longer.
