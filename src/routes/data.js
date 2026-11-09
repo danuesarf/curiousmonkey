@@ -11,6 +11,7 @@ import { sealCredentials } from '../aws/credentials.js';
 import { suggestMappings, decideMapping, markUnresolved } from '../recommender/eventMap.js';
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
+import { setClause, insertParts } from '../sqlColumns.js';
 import { effectiveLookback } from '../settings.js';
 import { estate, accountRadar, changeFeed, markSeen, identities, blastRadius } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
@@ -137,8 +138,9 @@ data.post('/accounts', requirePerm('accounts'), wrap(async (req, res) => {
   if (dup?.status === 'planned') return res.status(409).json({ error: 'planned', message: 'That account is already planned. Onboard it from the Accounts page instead.', field: 'accountId', id: dup.id });
   if (dup) return res.status(409).json({ error: 'exists', message: 'That AWS account is already connected.', field: 'accountId' });
   const cols = { account_id: b.accountId, ...accountColumns(b, b.accountId), created_by: req.user.id };
-  const keys = Object.keys(cols);
-  const row = (await query(`INSERT INTO cloud_accounts(${keys.join(',')}) VALUES (${keys.map((_, i) => `$${i + 1}`).join(',')}) RETURNING *`, Object.values(cols))).rows[0];
+  const ins = insertParts(cols);
+  // nosemgrep: tainted-sql-string -- column names are checked against an allowlist in insertParts; values are $n parameters
+  const row = (await query(`INSERT INTO cloud_accounts${ins.sql} RETURNING *`, ins.values)).rows[0];
   await audit(req, 'account.create', { type: 'account', id: row.id }, { accountId: b.accountId, authMode: b.authMode, eventSource: b.eventSource });
   res.status(201).json(publicAccount(row));
 }));
@@ -193,9 +195,10 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
     const q = PlannedIn.partial().omit({ accountId: true }).parse(req.body);
     const cols = Object.fromEntries(Object.entries({ name: q.name, environment: q.environment, ou: q.ou === '' ? null : q.ou, note: q.note === '' ? null : q.note }).filter(([, v]) => v !== undefined));
     if (!Object.keys(cols).length) return res.json(publicAccount(a));
-    const keys = Object.keys(cols);
-    const row = (await query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')}, updated_at=now() WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
-    await audit(req, 'account.update', { type: 'account', id: a.id }, { changed: keys, planned: true });
+    const set = setClause(cols);
+    // nosemgrep: tainted-sql-string -- column names are checked against an allowlist in setClause; values are $n parameters
+    const row = (await query(`UPDATE cloud_accounts SET ${set.sql}, updated_at=now() WHERE id=$1 RETURNING *`, [a.id, ...set.values])).rows[0];
+    await audit(req, 'account.update', { type: 'account', id: a.id }, { changed: Object.keys(cols), planned: true });
     return res.json(publicAccount(row));
   }
   const onboarding = a.status === 'planned';
@@ -223,7 +226,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
   const removed = (a.regions || []).filter((r) => !next.regions.includes(r));
   if (removed.length || (a.excluded_regions || []).some((r) => next.regions.includes(r)))
     cols.excluded_regions = [...new Set([...(a.excluded_regions || []), ...removed])].filter((r) => !next.regions.includes(r)).sort();
-  const keys = Object.keys(cols);
+  const set = setClause(cols);
   const row = await tx(async (c) => {
     if (removed.length) for (const t of ['scan_checkpoints', 'trail_cursors']) await c.query(`DELETE FROM ${t} WHERE account_id=$1 AND region = ANY($2)`, [a.id, removed]);
     if (p.rebuildHistory) {
@@ -237,7 +240,8 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
       // counts that would otherwise be added to again by the re-read
       for (const t of ['event_coverage', 'unmapped_events', 'track_sessions']) await c.query(`DELETE FROM ${t} WHERE account_id=$1`, [a.id]);
     }
-    return (await c.query(`UPDATE cloud_accounts SET ${keys.map((k, i) => `${k}=$${i + 2}`).join(', ')} WHERE id=$1 RETURNING *`, [a.id, ...Object.values(cols)])).rows[0];
+    // nosemgrep: tainted-sql-string -- column names are checked against an allowlist in setClause; values are $n parameters
+    return (await c.query(`UPDATE cloud_accounts SET ${set.sql} WHERE id=$1 RETURNING *`, [a.id, ...set.values])).rows[0];
   });
   await audit(req, onboarding ? 'account.onboard' : 'account.update', { type: 'account', id: a.id }, { changed: Object.keys(p).filter((k) => k !== 'credentials'), credentialsReplaced: !!p.credentials, rebuildHistory: !!p.rebuildHistory });
   res.json({ ...publicAccount(row), accessChanged });

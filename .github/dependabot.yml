@@ -10,10 +10,18 @@ updates:
     groups:
       aws-sdk: { patterns: ['@aws-sdk/*'] }
       fonts: { patterns: ['@fontsource-variable/*'] }
+    ignore:
+      # openid-client 6 is a rewritten API: the sign-in code has to be ported, not bumped
+      - dependency-name: openid-client
+        update-types: [version-update:semver-major]
   - package-ecosystem: docker
     directory: /
     schedule: { interval: weekly, day: monday }
     target-branch: initial-build
+    ignore:
+      # stay on the Node 22 LTS line (package.json engines); patch and minor updates and new digests still come
+      - dependency-name: node
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly, day: monday }

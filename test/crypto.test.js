@@ -25,3 +25,11 @@ test('database TLS verifies the server certificate unless explicitly told not to
   assert.deepEqual(sslOptionsFor({ ssl: true, env: {} }), { rejectUnauthorized: true });
   assert.deepEqual(sslOptionsFor({ ssl: true, env: { DATABASE_SSL_INSECURE: 'true' }, warn: () => {} }), { rejectUnauthorized: false });
 });
+
+test('SQL column lists: only allowlisted column names, values always as parameters', async () => {
+  const { setClause, insertParts } = await import('../src/sqlColumns.js');
+  assert.deepEqual(setClause({ name: 'x', s3_bucket: 'b' }), { sql: '"name"=$2, "s3_bucket"=$3', values: ['x', 'b'] });
+  assert.deepEqual(insertParts({ account_id: '1', name: 'x' }), { sql: '("account_id","name") VALUES ($1,$2)', values: ['1', 'x'] });
+  assert.throws(() => setClause({ 'name"=1; DROP TABLE roles; --': 'x' }), /not an allowed column/);
+  assert.throws(() => insertParts({ password_hash: 'x' }), /not an allowed column/);
+});
