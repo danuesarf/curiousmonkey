@@ -13,10 +13,11 @@ spec:
     metadata: { labels: { app: curious-monkey, role: api } }
     spec:
       serviceAccountName: curious-monkey-api
-      securityContext: { runAsNonRoot: true, runAsUser: 100, seccompProfile: { type: RuntimeDefault } }
+      automountServiceAccountToken: false   # it never calls the Kubernetes API
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: api
-          image: curious-monkey:latest        # set your registry path in kustomization.yaml
+          image: curious-monkey:latest        # set your registry path and a version (or digest) in kustomization.yaml
           command: [node, src/server.js]
           ports: [{ name: http, containerPort: 8080 }]
           envFrom:
@@ -26,7 +27,7 @@ spec:
           readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, initialDelaySeconds: 20, periodSeconds: 20 }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
-          resources: { requests: { cpu: 100m, memory: 192Mi }, limits: { memory: 512Mi } }
+          resources: { requests: { cpu: 100m, memory: 192Mi }, limits: { cpu: "1", memory: 512Mi } }
 ---
 apiVersion: v1
 kind: Service
@@ -34,6 +35,15 @@ metadata: { name: curious-monkey, namespace: curious-monkey }
 spec:
   selector: { app: curious-monkey, role: api }
   ports: [{ name: http, port: 80, targetPort: http }]
+---
+# The portal takes traffic on 8080 only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api-http-only, namespace: curious-monkey }
+spec:
+  podSelector: { matchLabels: { role: api } }
+  policyTypes: [Ingress]
+  ingress: [{ ports: [{ port: 8080 }] }]
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress

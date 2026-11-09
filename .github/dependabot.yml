@@ -1,0 +1,20 @@
+# Keeps pinned versions current: npm packages (exact versions in package.json), the Docker base image, and the
+# GitHub Actions (pinned to commit SHAs). Security updates are raised as soon as an advisory is published.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    open-pull-requests-limit: 10
+    target-branch: initial-build
+    groups:
+      aws-sdk: { patterns: ['@aws-sdk/*'] }
+      fonts: { patterns: ['@fontsource-variable/*'] }
+  - package-ecosystem: docker
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    target-branch: initial-build
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: monday }
+    target-branch: initial-build

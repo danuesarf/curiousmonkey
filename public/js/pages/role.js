@@ -15,7 +15,8 @@ export async function rolePage(ctx, id) {
   const show = (t) => {
     tab = t;
     tabs.replaceChildren(...TABS.map(([k, l]) => h('button', { role: 'tab', 'aria-selected': k === tab, onClick: () => show(k) }, l)));
-    panel.replaceChildren({ who: () => whoTab(d), findings: () => findingsTab(d, ctx, openIdentify), perms: () => permsTab(d), policies: () => policiesTab(d) }[t]());
+    const render = { who: () => whoTab(d), findings: () => findingsTab(d, ctx, openIdentify), perms: () => permsTab(d), policies: () => policiesTab(d) };
+    panel.replaceChildren((Object.hasOwn(render, t) ? render[t] : render.who)());
   };
   const openIdentify = (raw) => identifyPanel(r, raw, ctx);
   show(ctx.params.get('tab') === 'findings' ? 'findings' : 'who');

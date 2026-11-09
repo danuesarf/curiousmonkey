@@ -24,7 +24,7 @@ export class LeaseLost extends Error {
 
 /** Run one claimed job with a heartbeat. The handler gets a ctx it must use to report progress. */
 export async function runJob(job) {
-  const handler = handlers[job.kind];
+  const handler = Object.hasOwn(handlers, job.kind) ? handlers[job.kind] : null;
   if (!handler) throw Object.assign(new Error(`no handler for ${job.kind}`), { retryable: false });
   let lost = false;
   let latest = job.progress || {};

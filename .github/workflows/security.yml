@@ -1,0 +1,174 @@
+# Tests and security checks on every push and pull request, and weekly (new CVEs appear in code that did not change).
+# Each job fails the run on what it finds; findings also go to the Security tab (code scanning) where available.
+#
+#   test      npm test (unit + API tests against a throwaway Postgres)
+#   deps      npm audit + Trivy filesystem scan: vulnerable dependencies, secrets, misconfiguration
+#   sast      Semgrep: security rules for JavaScript/Node/Express, Dockerfile, Kubernetes, GitHub Actions, secrets
+#   secrets   Gitleaks over the whole git history
+#   iac       Checkov: Dockerfile, Kubernetes manifests, workflows (reviewed exceptions in .checkov.yaml)
+#   image     build the container image and scan it with Trivy (OS packages and node_modules)
+#
+# Run the same locally: npm run security  (uses whichever of the tools are installed)
+# Actions are pinned to commit SHAs; Dependabot (.github/dependabot.yml) keeps them current.
+name: security
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  schedule:
+    - cron: '17 1 * * 1'       # Mondays 01:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_VERSION: v0.76.2
+  SEMGREP_VERSION: 1.184.0
+  CHECKOV_VERSION: 3.4.3
+  GITLEAKS_VERSION: 8.28.0
+  GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm test
+
+  deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with: { node-version: 22 }
+      - name: npm audit (production and dev dependencies)
+        run: npm audit --audit-level=moderate
+      - name: Trivy filesystem scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: node_modules,bench
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'
+      - name: Upload to code scanning
+        if: always()
+        continue-on-error: true        # code scanning needs GitHub Advanced Security on private repositories
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: { sarif_file: trivy-fs.sarif, category: trivy-fs }
+      - name: Trivy filesystem scan (gate on HIGH and CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          skip-dirs: node_modules,bench
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+          skip-setup-trivy: true
+
+  sast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with: { python-version: '3.12' }
+      - run: pip install "semgrep==${SEMGREP_VERSION}"
+      - name: Semgrep (security rules; WARNING and ERROR fail the build)
+        run: |
+          semgrep scan --metrics=off --disable-version-check \
+            --config p/javascript --config p/nodejs --config p/expressjs --config p/xss \
+            --config p/secrets --config p/dockerfile --config p/kubernetes --config p/github-actions \
+            --config p/insecure-transport \
+            --exclude node_modules --exclude bench \
+            --severity ERROR --severity WARNING \
+            --sarif-output semgrep.sarif --error
+      - name: Upload to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: { sarif_file: semgrep.sarif, category: semgrep }
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { fetch-depth: 0, persist-credentials: false }     # the whole history, not just the last commit
+      - name: Install gitleaks (checksum verified)
+        run: |
+          curl -sSfL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+      - name: Gitleaks over all commits (reviewed false positives in .gitleaksignore)
+        run: ./gitleaks git --no-banner --redact --exit-code 1 .
+
+  iac:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with: { python-version: '3.12' }
+      - run: pip install "checkov==${CHECKOV_VERSION}"
+      - name: Checkov (exceptions and reasons in .checkov.yaml)
+        run: checkov -d . --config-file .checkov.yaml
+
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: { contents: read, security-events: write }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Build the image
+        run: docker build --pull -t curious-monkey:ci .
+      - name: Trivy image scan (report)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: curious-monkey:ci
+          scanners: vuln,secret
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: '0'
+      - name: Upload to code scanning
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with: { sarif_file: trivy-image.sarif, category: trivy-image }
+      - name: Trivy image scan (gate on fixable HIGH and CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          image-ref: curious-monkey:ci
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: '1'
+          skip-setup-trivy: true

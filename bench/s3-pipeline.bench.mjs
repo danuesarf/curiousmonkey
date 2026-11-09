@@ -39,7 +39,7 @@ function record(i) {
     return { ...base, eventSource: 'sts.amazonaws.com', eventName: 'AssumeRole', readOnly: true,
       userIdentity: { type: 'AWSService', invokedBy: 'ec2.amazonaws.com' },
       requestParameters: { roleArn: `arn:aws:iam::${ACCT}:role/${s.role}`, roleSessionName: `i-${crypto.randomBytes(8).toString('hex')}`, durationSeconds: 3600 },
-      responseElements: { credentials: { accessKeyId: s.key, sessionToken: 'IQoJb3JpZ2luX2VjE' + 'x'.repeat(600), expiration: 'Aug 13, 2026, 2:00:00 AM' },
+      responseElements: { credentials: { accessKeyId: s.key, sessionToken: 'IQoJb3JpZ2luX2VjE' + 'x'.repeat(600) /* synthetic, not a real token: gitleaks:allow */, expiration: 'Aug 13, 2026, 2:00:00 AM' },
         assumedRoleUser: { assumedRoleId: `AROA${i}:i-0`, arn: `arn:aws:sts::${ACCT}:assumed-role/${s.role}/i-0` } } };
   }
   const s = pick(sessions, rnd);

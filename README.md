@@ -149,6 +149,23 @@ Only event names and request parameter *names* are kept, never parameter values.
 
 Roles: owner, admin, reviewer, account owner, auditor. Reviewers belong to Infrastructure Security or Information Security. Identity Center roles go to Information Security, service-linked roles to Infrastructure Security. High-risk roles need both teams. Everything can be limited to some accounts. Sign-in uses scrypt passwords, TOTP two-factor (required for privileged roles) and an audit log.
 
+## Security checks
+
+Every push, pull request and Monday morning, `.github/workflows/security.yml` runs:
+
+| Job | Tool | Fails on |
+|---|---|---|
+| test | `npm test` | any failing test |
+| deps | `npm audit`, Trivy filesystem scan (vulnerabilities, secrets, misconfiguration) | moderate+ npm advisories; fixable HIGH/CRITICAL |
+| sast | Semgrep security packs (JavaScript, Node, Express, XSS, secrets, Dockerfile, Kubernetes, GitHub Actions, insecure transport) | WARNING or ERROR |
+| secrets | Gitleaks over the whole git history | any leak |
+| iac | Checkov (Dockerfile, `deploy/k8s`, workflows) | any failed check |
+| image | Trivy on the built image (Alpine packages and `node_modules`) | fixable HIGH/CRITICAL |
+
+Findings also go to the Security tab (code scanning) where the repository has it. Run the same locally with `npm run security` (each tool is skipped if not installed; `npm run security -- semgrep` runs one). Dependabot keeps npm packages (pinned to exact versions), the base image and the Actions (pinned to commit SHAs) current.
+
+Reviewed exceptions live next to the tool, each with its reason: `.checkov.yaml`, `.gitleaksignore`, and `nosemgrep:` comments in the code.
+
 ## What it does not do (be aware)
 
 - It never changes your AWS accounts. Approved policies are exported as JSON or Terraform for you to apply.

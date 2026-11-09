@@ -38,6 +38,8 @@ export async function trustPage(ctx) {
   const q = ctx.params.get('q') || '';
   const [m, accts] = await Promise.all([get(`/trust?q=${encodeURIComponent(q)}`), get('/accounts')]);
   ctx.setCrumbs('Trust map', q || 'All roles');
+  // is this account already the account: term of the query (plain or quoted)?
+  const hasAccountTerm = (name) => { const t = ` ${q.toLowerCase()} `, n = name.toLowerCase(); return t.includes(` account:${n} `) || t.includes(` account:"${n}" `); };
   const run = (next) => go(`#/trust${next.trim() ? `?q=${encodeURIComponent(next.trim())}` : ''}`);
   const withTerm = (term) => { const parts = q.split(/\s+/).filter((t) => t && !t.startsWith(term.split(':')[0] + ':')); return [...parts, term].join(' '); };
   const M = m.map;
@@ -51,7 +53,7 @@ export async function trustPage(ctx) {
   const input = h('input', { type: 'search', value: q, 'aria-label': 'Query', placeholder: 'e.g. finding:account-root from:123456789012 provider:github role:deploy', spellcheck: 'false', class: 'mono' });
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') run(input.value); });
   const acctSel = h('select', { 'aria-label': 'Account the roles live in' }, h('option', { value: '' }, 'Roles in all accounts'),
-    accts.items.filter((a) => a.status !== 'planned').map((a) => h('option', { value: a.name, selected: new RegExp(`(^|\\s)account:"?${a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"?(\\s|$)`, 'i').test(q) }, `Roles in ${a.name}`)));
+    accts.items.filter((a) => a.status !== 'planned').map((a) => h('option', { value: a.name, selected: hasAccountTerm(a.name) }, `Roles in ${a.name}`)));
   acctSel.addEventListener('change', () => { const rest = q.split(/\s+/).filter((t) => t && !t.startsWith('account:')).join(' '); run(acctSel.value ? `account:${acctSel.value} ${rest}` : rest); });
   const filters = h('section', { class: 'card' }, h('div', { class: 'card-b stack' },
     h('div', { class: 'row' }, acctSel, h('div', { class: 'grow', style: 'min-width:280px' }, input), h('button', { class: 'btn primary', onClick: () => run(input.value) }, 'Search'),

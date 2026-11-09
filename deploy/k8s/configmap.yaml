@@ -5,6 +5,9 @@ metadata:
   namespace: curious-monkey
 data:
   NODE_ENV: production
+  DB_HOST: postgres
+  DB_USER: cm
+  DB_NAME: cm
   PUBLIC_URL: https://curious-monkey.example.com
   TRUST_PROXY: "true"
   COOKIE_SECURE: "true"

@@ -1,0 +1,23 @@
+# Checkov (IaC: Dockerfile, Kubernetes manifests, GitHub Actions, secrets). Reviewed exceptions, with why:
+#   CKV_K8S_14, CKV_K8S_43  deploy/k8s is a template: the image registry, version and digest are set at deploy time
+#                           in kustomization.yaml (images:), not in the manifests.
+#   CKV_K8S_35              the app reads its secrets (DB password, session secret, encryption key) from environment
+#                           variables by design; they come from a Kubernetes Secret, never from the ConfigMap.
+#   CKV_K8S_40              only the bundled postgres:17-alpine runs as its image's own UID 70; the app and worker run
+#                           as 10001. Production should use RDS and drop postgres.yaml.
+#   CKV_DOCKER_2 is satisfied (HEALTHCHECK); CKV_DOCKER_7 is satisfied (a version tag, not latest).
+skip-check:
+  - CKV_K8S_14
+  - CKV_K8S_43
+  - CKV_K8S_35
+  - CKV_K8S_40
+skip-path:
+  - node_modules
+  - bench
+framework:
+  - dockerfile
+  - kubernetes
+  - github_actions
+  - secrets
+compact: true
+quiet: true

@@ -1,0 +1,4 @@
+# Reviewed false positives. Each line is a gitleaks fingerprint: commit:file:rule:line (or file:rule:line).
+# bench/s3-pipeline.bench.mjs: a synthetic STS session token ('IQoJb3JpZ2luX2VjE' + 'x'.repeat(600)) for the benchmark.
+c5156df88a2196fd48a57168e639586f1a818a72:bench/s3-pipeline.bench.mjs:generic-api-key:42
+bench/s3-pipeline.bench.mjs:generic-api-key:42
