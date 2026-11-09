@@ -14,7 +14,7 @@
     "scan": "node src/cli.js scan",
     "demo": "node src/cli.js demo",
     "catalog": "node scripts/build-catalog.mjs",
-    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test": "node --test --test-concurrency=1 --test-timeout=120000 --test-force-exit test/*.test.js",
     "security": "bash scripts/security-scan.sh"
   },
   "dependencies": {

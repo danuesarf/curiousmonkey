@@ -1,3 +1,6 @@
+// Tests never reach real AWS: no instance-metadata credential lookups (on CI runners those can hang the process).
+process.env.AWS_EC2_METADATA_DISABLED = 'true';
+
 // Throwaway real Postgres for tests, using the binaries bundled by embedded-postgres.
 // Postgres refuses to run as root, so in this sandbox run the tests as the `postgres` user:
 //   su postgres -s /bin/bash -c "cd <repo> && node --test --test-concurrency=1 test/"

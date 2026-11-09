@@ -37,7 +37,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -45,6 +45,8 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm test
+        env:
+          AWS_EC2_METADATA_DISABLED: 'true'   # tests never use real AWS; the runner's metadata endpoint can hang them
 
   deps:
     runs-on: ubuntu-latest
