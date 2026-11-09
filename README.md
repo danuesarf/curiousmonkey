@@ -105,7 +105,15 @@ An account can be added before anyone deploys the scanner role in it: **Accounts
 
 ## Trust map
 
-**Trust** in the rail lists every way into every role, read from the trust policies. Each (statement × principal) is one row, with:
+**Trust** in the rail shows who can get into your AWS, read from the trust policies, as a 2D map:
+
+- **Left:** where it comes from, grouped: anyone, outside AWS accounts (vendors and other tenants, marked *vendor · ExternalId* when every statement requires `sts:ExternalId`, otherwise *no ExternalId*), OIDC providers, SAML, deleted identities.
+- **Middle:** your accounts, grouped by environment. One line per source → account however many roles are behind it: red when the worst trust behind it is high risk, amber when medium, green otherwise; dashed when never seen used; thicker with more roles.
+- **Right:** arcs between your own accounts (A trusts into B), one per direction, coloured the same way.
+- Click a line for the roles it can assume (worst first, with findings, conditions and whether it was used), a source for the accounts it can get into, or an account for who can get in and what it can get into. The selection is kept in the URL (`sel=`), **Filter to this** turns it into a query, and the **Ways in** list below follows it, 20 rows a page.
+- Trust from inside the account itself and from AWS services is not drawn: it is counted on each account and listed in the sidebar under *Reachable from*.
+
+Each way in (statement × principal) is one row of **Ways in**, with:
 
 - where it comes from: the same account, your other connected accounts, AWS accounts outside your estate, OIDC (GitHub Actions, Bitbucket Pipelines, GitLab, EKS service accounts, Terraform Cloud…), SAML, Google, AWS services, or anyone;
 - the conditions on the way in, and what was actually seen coming in through it;

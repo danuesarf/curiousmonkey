@@ -228,8 +228,70 @@ export async function trustMap(user, q = '', { limit = 500 } = {}) {
     .map((s) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size })).sort((a, b) => (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || b.roles - a.roles) }));
   const findingCounts = {};
   for (const e of rows) for (const f of e.findings) findingCounts[f.id] = (findingCounts[f.id] || 0) + 1;
+  const ap = [];
+  const scoped = (await query(`SELECT id, name, account_id, environment, status FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', ap)}`, ap)).rows;
+  const allAccts = (await query('SELECT id, name, account_id, environment, status FROM cloud_accounts')).rows;
   return { total: rows.length, totalEdges: all.length, roles: new Set(rows.map((e) => e.roleId)).size, rows: rows.slice(0, limit), truncated: rows.length > limit, summary, findingCounts,
-    findings: FINDINGS, terms };
+    findings: FINDINGS, terms, map: mapOf(rows, scoped, allAccts) };
+}
+
+/**
+ * The map: who can get into which account. One line per (where it comes from -> account), however many roles and
+ * statements are behind it, coloured by the worst finding. Your own connected accounts are nodes, so trust between
+ * them is account -> account. Trust from inside the account itself and from AWS services is counted on the account.
+ */
+const worse = (a, b) => ((SEV_ORDER[a] ?? 9) <= (SEV_ORDER[b] ?? 9) ? a : b);
+export function mapOf(rows, scoped, allAccts) {
+  const byAws = new Map(allAccts.map((a) => [a.account_id, a]));
+  const accounts = new Map(scoped.filter((a) => a.status !== 'planned').map((a) => [a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, planned: false, inScope: true }]));
+  const node = (a, inScope) => { if (!accounts.has(a.id)) accounts.set(a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, planned: a.status === 'planned', inScope }); return accounts.get(a.id); };
+  for (const a of accounts.values()) Object.assign(a, { inbound: { roles: new Set(), worst: 'none', findings: 0 }, own: new Set(), services: new Set() });
+  const ensureCounts = (a) => { if (!a.inbound) Object.assign(a, { inbound: { roles: new Set(), worst: 'none', findings: 0 }, own: new Set(), services: new Set() }); return a; };
+  const sources = new Map(), links = new Map();
+  for (const e of rows) {
+    const to = ensureCounts(accounts.get(e.accountId) || node({ id: e.accountId, name: e.account, account_id: e.awsAccountId, environment: e.environment, status: 'connected' }, true));
+    if (e.group === 'same-account') { to.own.add(e.roleId); continue; }
+    if (e.group === 'service') { to.services.add(e.roleId); continue; }
+    let from;
+    const src = e.group === 'connected-account' && byAws.get(e.principalAccount);
+    if (src) from = ensureCounts(node(src, false)).id;
+    else {
+      const key = e.group === 'external-account' ? `acct:${e.principalAccount}` : e.group === 'unknown' ? 'deleted' : `${e.group}:${e.source}`;
+      if (!sources.has(key)) sources.set(key, { id: `src:${key}`, group: e.group,
+        label: e.group === 'external-account' ? e.principalAccount : e.group === 'unknown' ? 'Deleted identities' : e.source,
+        query: queryFor(e), roles: new Set(), accounts: new Set(), worst: 'none', findings: 0, vendor: true, seen: 0 });
+      const s = sources.get(key);
+      s.roles.add(e.roleId); s.accounts.add(e.accountId); s.worst = worse(s.worst, e.worst);
+      s.findings += e.findings.filter((f) => f.severity !== 'info').length;
+      if (e.group === 'external-account' && !e.conditions.some((c) => /^sts:ExternalId /i.test(c))) s.vendor = false;
+      s.seen += e.seen.reduce((n, x) => n + Number(x.sessions || 0), 0);
+      from = s.id;
+    }
+    const id = `${from}>${e.accountId}`;
+    if (!links.has(id)) links.set(id, { id, from, to: e.accountId, kind: from.startsWith('src:') ? 'outside' : 'account', worst: 'none', ways: 0, findings: 0, sessions: 0, roles: new Map(),
+      query: `${src ? `from:${e.principalAccount}` : queryFor(e)} account:${e.awsAccountId}` });
+    const l = links.get(id);
+    l.ways++; l.worst = worse(l.worst, e.worst);
+    const nf = e.findings.filter((f) => f.severity !== 'info');
+    l.findings += nf.length;
+    const sess = e.seen.reduce((n, x) => n + Number(x.sessions || 0), 0);
+    l.sessions += sess;
+    const r = l.roles.get(e.roleId) || { roleId: e.roleId, role: e.role, worst: 'none', findings: new Map(), conditions: 0, sessions: 0, lastSeen: null, principals: new Set() };
+    r.worst = worse(r.worst, e.worst); r.conditions += e.conditions.length; r.sessions += sess; r.principals.add(e.principal);
+    for (const f of e.findings) r.findings.set(f.id, { id: f.id, severity: f.severity, title: f.title });
+    for (const x of e.seen) if (x.lastSeen && (!r.lastSeen || new Date(x.lastSeen) > new Date(r.lastSeen))) r.lastSeen = x.lastSeen;
+    l.roles.set(e.roleId, r);
+    to.inbound.roles.add(e.roleId); to.inbound.worst = worse(to.inbound.worst, e.worst); to.inbound.findings += nf.length;
+  }
+  const ORDER = ['public', 'external-account', 'oidc', 'saml', 'unknown'];
+  return {
+    accounts: [...accounts.values()].map((a) => ensureCounts(a)).map((a) => ({ ...a, inbound: { roles: a.inbound.roles.size, worst: a.inbound.worst, findings: a.inbound.findings }, own: a.own.size, services: a.services.size })),
+    sources: [...sources.values()].map((s) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size, vendor: s.group === 'external-account' && s.vendor }))
+      .sort((a, b) => ORDER.indexOf(a.group) - ORDER.indexOf(b.group) || (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || b.roles - a.roles),
+    links: [...links.values()].map((l) => ({ ...l, roles: [...l.roles.values()]
+      .map((r) => ({ ...r, findings: [...r.findings.values()].sort((a, b) => (SEV_ORDER[a.severity] ?? 9) - (SEV_ORDER[b.severity] ?? 9)), principals: [...r.principals].slice(0, 5) }))
+      .sort((a, b) => (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || a.role.localeCompare(b.role)) })),
+  };
 }
 
 function queryFor(e) {

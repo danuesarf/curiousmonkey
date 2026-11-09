@@ -104,3 +104,28 @@ test('an edge reports its worst finding, not none', async () => {
   assert.ok(e.findings.length);
   assert.equal(e.worst, 'high');
 });
+
+test('the map: one line per source and account, account to account between your own, inside trust counted', async () => {
+  const { mapOf } = await import('../src/trustmap.js');
+  const accts = [{ id: 'acct', name: 'payments-prod', account_id: OWN, environment: 'production', status: 'connected' },
+    { id: 'stg', name: 'data-stg', account_id: CONNECTED, environment: 'staging', status: 'connected' }];
+  const st = (Principal, Condition) => ({ Effect: 'Allow', Principal, Action: 'sts:AssumeRole', ...(Condition ? { Condition } : {}) });
+  const rows = [
+    ...edgesOf(role('vendor-a', [st({ AWS: `arn:aws:iam::${THIRD}:root` })]), ctx),                                       // high
+    ...edgesOf(role('vendor-b', [st({ AWS: `arn:aws:iam::${THIRD}:root` }, { StringEquals: { 'sts:ExternalId': 'x' } })]), ctx),  // low
+    ...edgesOf(role('from-stg', [st({ AWS: `arn:aws:iam::${CONNECTED}:role/release` })]), ctx),
+    ...edgesOf(role('own', [st({ AWS: `arn:aws:iam::${OWN}:root` })]), ctx),
+    ...edgesOf(role('svc', [st({ Service: 'ecs.amazonaws.com' })]), ctx),
+  ];
+  const m = mapOf(rows, accts, accts);
+  const vendor = m.links.find((l) => l.from === `src:acct:${THIRD}`);
+  assert.equal(m.links.filter((l) => l.from === `src:acct:${THIRD}`).length, 1, 'two roles, one line');
+  assert.equal(vendor.roles.length, 2); assert.equal(vendor.worst, 'high'); assert.equal(vendor.kind, 'outside');
+  assert.equal(vendor.roles[0].role, 'vendor-a', 'the worst role first');
+  const s = m.sources.find((x) => x.id === `src:acct:${THIRD}`);
+  assert.equal(s.vendor, false, 'one statement lacks ExternalId');
+  const between = m.links.find((l) => l.kind === 'account');
+  assert.deepEqual([between.from, between.to, between.roles.map((r) => r.role)], ['stg', 'acct', ['from-stg']]);
+  const a = m.accounts.find((x) => x.id === 'acct');
+  assert.equal(a.own, 1); assert.equal(a.services, 1); assert.equal(a.inbound.roles, 3); assert.equal(a.inbound.worst, 'high');
+});
