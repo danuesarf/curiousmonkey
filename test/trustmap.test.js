@@ -150,3 +150,15 @@ test('cross-account use: named, unnamed (only a unique ID), merged from older sc
   [e] = edgesOf(r, at([]));
   assert.match(e.findings.find((f) => f.id === 'never-used').detail, /30 days of CloudTrail read for payments-prod.*whether or not the caller's account is onboarded/);
 });
+
+test('IAM last used beats "never used": the role is used even when no sign-in was tied to the statement', () => {
+  const r = { ...role('ssm-exec', [{ Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${CONNECTED}:root` }, Action: 'sts:AssumeRole' }]), last_used_at: new Date(Date.now() - 3 * 864e5), last_used_region: 'ap-southeast-3' };
+  const c = { ...ctx, complete: new Set(['acct']), windowDays: new Map([['acct', 30]]) };
+  let [e] = edgesOf(r, c);
+  assert.ok(e.lastUsed);
+  assert.deepEqual(ids(e).filter((x) => /used/.test(x)), ['info:used-per-iam']);
+  [e] = edgesOf({ ...r, last_used_at: new Date(Date.now() - 200 * 864e5) }, c);
+  assert.match(e.findings.find((f) => f.id === 'used-per-iam').detail, /before the 30 days of CloudTrail read/);
+  [e] = edgesOf({ ...r, last_used_at: null }, c);
+  assert.match(e.findings.find((f) => f.id === 'never-used').detail, /IAM has no record/);
+});

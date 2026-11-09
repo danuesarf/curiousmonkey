@@ -134,10 +134,10 @@ export async function trustPage(ctx) {
       const isSel = sel === l.id, c = isSel ? '#fff' : LINE[l.worst];
       const mk = isSel ? 'sel' : l.worst === 'high' ? 'high' : l.worst === 'medium' ? 'medium' : 'ok';
       lines.push(svg('path', { d, fill: 'none', stroke: c, 'stroke-width': isSel ? w + 1 : w, opacity: dim(l.id) * (l.worst === 'high' || l.worst === 'medium' || isSel ? 0.95 : 0.6),
-        'stroke-dasharray': l.sessions ? null : '5 4', 'marker-end': `url(#tm-arrow-${mk})` }));
+        'stroke-dasharray': l.sessions || l.iamUsed ? null : '5 4', 'marker-end': `url(#tm-arrow-${mk})` }));
       hits.push(svg('path', { d, fill: 'none', stroke: 'transparent', 'stroke-width': 14, class: 'tm-hit', tabindex: 0, role: 'button',
         'aria-label': `${nameOf(l.from)} to ${nameOf(l.to)}: ${plural(l.roles.length, 'role')}, worst ${l.worst}`, onClick: pick(l.id), onKeydown: key(l.id) },
-        svg('title', null, `${nameOf(l.from)} → ${nameOf(l.to)} · ${plural(l.roles.length, 'role')}${l.worst !== 'none' ? ` · worst ${l.worst}` : ''}${l.sessions ? ` · ${num(l.sessions)} sessions seen` : ' · never seen used'}`)));
+        svg('title', null, `${nameOf(l.from)} → ${nameOf(l.to)} · ${plural(l.roles.length, 'role')}${l.worst !== 'none' ? ` · worst ${l.worst}` : ''}${l.sessions ? ` · ${num(l.sessions)} sessions seen` : l.iamUsed ? ' · IAM says used, no sign-in tied to it' : ' · never seen used'}`)));
     };
     // quiet lines first, so the risky ones sit on top
     [...M.links].sort((a, b) => SEV_ORDER[b.worst] - SEV_ORDER[a.worst]).forEach(lineFor);
@@ -183,7 +183,7 @@ export async function trustPage(ctx) {
   };
   const roleItem = (r) => item({ label: r.role, worst: r.worst, href: `#/roles/${r.roleId}?tab=policies`,
     meta: [r.findings.filter((f) => f.severity !== 'info').map((f) => f.title).slice(0, 2).join(' · ') || (r.conditions ? `${plural(r.conditions, 'condition')}` : 'no conditions'),
-      r.sessions ? `${num(r.sessions)} sessions · last ${ago(r.lastSeen)}` : 'never used'].join(' · '), badge: sevBadge(r.worst) });
+      r.sessions ? `${num(r.sessions)} sessions · last ${ago(r.lastSeen)}` : r.iamLastUsed ? `IAM last used ${ago(r.iamLastUsed)}` : 'never used'].join(' · '), badge: sevBadge(r.worst) });
   const head = (eyebrow, title, sub, worst) => h('div', { class: 'tm-side-h' },
     h('div', { class: 'tm-eyebrow' }, eyebrow, worst === 'high' && h('span', { class: 'tm-tag' }, '⚠ HIGH RISK'), worst === 'medium' && h('span', { class: 'tm-tag warn' }, 'LOOSE TRUST')),
     h('div', { class: 'row', style: 'justify-content:space-between;gap:8px;align-items:flex-start' }, h('b', { class: 'tm-title' }, title),
@@ -203,7 +203,7 @@ export async function trustPage(ctx) {
         `${l.kind === 'account' ? `${from.aws} trusts into ${to.aws}` : `into ${to.aws}`} · ${plural(l.roles.length, 'role')} · ${plural(l.ways, 'statement')}`, l.worst),
       facts([['High risk', highs ? `${plural(highs, 'role')} of ${l.roles.length}` : 'none', highs ? 'bad' : 'ok'],
         ['Findings', l.findings ? plural(l.findings, 'finding') : 'nothing to flag', l.findings ? 'bad' : 'ok'],
-        ['Seen coming in', l.sessions ? `${num(l.sessions)} sessions` : 'never, in the stored history', l.sessions ? null : 'warn']]),
+        ['Seen coming in', l.sessions ? `${num(l.sessions)} sessions` : l.iamUsed ? 'no sign-in tied to it, but IAM says its roles are used' : 'never: no sign-in, and IAM has no record of use', l.sessions || l.iamUsed ? null : 'warn']]),
       listBox('Roles it can assume', l.roles.map(roleItem)),
       actions([['Filter to this', () => run(l.query), true], ['Show ways in', () => table.scrollIntoView({ behavior: 'smooth' })]]));
     } else if (s) {
@@ -212,15 +212,15 @@ export async function trustPage(ctx) {
         s.group === 'external-account' ? `AWS account not connected here · ${s.vendor ? 'vendor pattern: every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : GROUPS[s.group]?.[1], s.worst),
       facts([['Reaches', `${plural(s.roles, 'role')} in ${plural(s.accounts, 'account')}`], ['Findings', s.findings ? plural(s.findings, 'finding') : 'nothing to flag', s.findings ? 'bad' : 'ok'],
         ['Seen coming in', s.seen ? `${num(s.seen)} sessions` : 'never, in the stored history', s.seen ? null : 'warn']]),
-      listBox('Accounts it can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
+      listBox('Accounts it can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
       actions([['Filter to this', () => run(withTerm(s.query)), true]]));
     } else if (a) {
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
       side.replaceChildren(head(`${(a.env || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, `${a.aws}${a.planned ? ' · planned, not scanned' : ''}`, a.inbound.worst),
       facts([['Reachable from outside it', a.inbound.roles ? plural(a.inbound.roles, 'role') : 'no role', a.inbound.worst === 'high' ? 'bad' : null],
         ['Trust inside it', `${plural(a.own, 'role')} trust its own account · ${plural(a.services, 'role')} trust AWS services`]]),
-      listBox('Who can get in', inn.map((x) => item({ label: nameOf(x.from), worst: x.worst, meta: `${x.kind === 'account' ? 'your account' : SHORT[srcBy.get(x.from)?.group] || ''} · ${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) })), { empty: 'nothing from outside this account' }),
-      out.length > 0 && listBox('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
+      listBox('Who can get in', inn.map((x) => item({ label: nameOf(x.from), worst: x.worst, meta: `${x.kind === 'account' ? 'your account' : SHORT[srcBy.get(x.from)?.group] || ''} · ${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) })), { empty: 'nothing from outside this account' }),
+      out.length > 0 && listBox('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles.length, 'role')}${x.sessions ? ` · ${num(x.sessions)} sessions` : x.iamUsed ? ' · IAM says used' : ' · never used'}`, badge: sevBadge(x.worst), onClick: () => select(x.id) }))),
       actions([['Filter to this', () => run(withTerm(`account:${a.aws}`)), true], ['Open in Space', `#/space?view=account&account=${a.id}`]]));
     } else {
       // nothing picked: where things come from (every group, inside ones too), and how to read the map
@@ -236,7 +236,7 @@ export async function trustPage(ctx) {
         h('div', null, h('i', { style: `border-top:3px solid ${LINE.high}` }), 'High-risk trust behind the line'),
         h('div', null, h('i', { style: `border-top:3px solid ${LINE.medium}` }), 'Loose trust (medium)'),
         h('div', null, h('i', { style: `border-top:2px solid ${LINE.none}` }), 'Nothing serious to flag'),
-        h('div', null, h('i', { style: `border-top:2px dashed ${LINE.none}` }), 'Dashed: never seen used'),
+        h('div', null, h('i', { style: `border-top:2px dashed ${LINE.none}` }), 'Dashed: never used (no sign-in, and IAM has no record of use)'),
         h('div', null, h('i', { style: 'border-top:2px solid #5f9c80;width:18px;height:10px;border-right:2px solid #5f9c80;border-radius:0 8px 8px 0' }), 'Arcs on the right: your accounts trusting each other'),
         h('div', null, h('i', { style: 'border:1px dashed #5f9c80;height:10px' }), 'Dashed box: an account outside your scope'),
         h('div', null, h('i', { style: 'border:none' }), 'Thicker line: more roles behind it')));
@@ -281,6 +281,7 @@ export async function trustPage(ctx) {
             ? e.findings.filter((f) => f.severity !== 'info').map((f) => h('div', { class: 'tm-find', title: f.detail }, h('span', { class: `badge ${SEV[f.severity]}` }, f.severity), h('span', { class: 'tm-ftext' }, f.title)))
             : h('span', { class: 'tiny muted' }, e.findings.length ? e.findings.map((f) => f.title).join(' · ') : 'nothing to flag')),
           h('div', { class: 'tm-way-seen tiny' }, e.seen.length ? [h('b', null, num(e.seen.reduce((n, s) => n + Number(s.sessions || 0), 0))), ` sessions · ${ago(e.seen.map((s) => s.lastSeen).filter(Boolean).sort().at(-1))}`]
+            : e.lastUsed ? h('span', { title: 'IAM RoleLastUsed. No sign-in in the CloudTrail read was tied to this statement.' }, `IAM: used ${ago(e.lastUsed.at)}`)
             : h('span', { class: 'muted' }, e.type === 'service' ? '—' : 'never used'))))),
       rows.length > PAGE && h('div', { class: 'card-b row', style: 'justify-content:flex-end' }, pager()));
   }

@@ -110,3 +110,11 @@ test('a cross-account caller logged as AWSAccount keeps its account, and is name
   assert.match(stranger.display, /IAM user .* in 333333333333/);
   assert.ok(!p.some((x) => x.key.startsWith('other:')));
 });
+
+test('a service acting for another account (SSM Automation) is recorded as that account, not as the service', async () => {
+  const { principalFrom } = await import('../src/scanner/applyEvents.js');
+  const p = principalFrom({ caller: { type: 'AWSAccount', accountId: '637423637300', principalId: 'AROAINFOSECAUTOMATE1:automation', invokedBy: 'ssm.amazonaws.com' }, sessionName: 'automation' });
+  assert.equal(p.key, 'acct:637423637300:AROAINFOSECAUTOMATE1');
+  assert.match(p.display, /via ssm\.amazonaws\.com/);
+  assert.equal(principalFrom({ caller: { type: 'AWSService', invokedBy: 'ssm.amazonaws.com' } }).key, 'svc:ssm.amazonaws.com');
+});

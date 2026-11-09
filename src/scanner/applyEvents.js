@@ -17,18 +17,19 @@ const chunks = (a, n = CHUNK) => { const out = []; for (let i = 0; i < a.length;
 
 export function principalFrom(e) {
   const c = e.caller;
+  // a service acting for another account (SSM Automation, StackSets...) is that account coming in: keep the account
+  if (c.type === 'AWSAccount' && c.accountId) {
+    // the target account's copy of a cross-account call: no ARN, only the caller's account and unique ID
+    const id = (c.principalId || '').split(':')[0];
+    const what = /^AROA/.test(id) ? 'role' : /^AIDA/.test(id) ? 'IAM user' : 'identity';
+    return { key: `acct:${c.accountId}:${id || 'unknown'}`, kind: 'account', display: `${what} ${id || '?'} in ${c.accountId}${c.invokedBy ? ` via ${c.invokedBy}` : ''}${e.sessionName ? ` (session ${e.sessionName})` : ''}` };
+  }
   if (c.type === 'AWSService' || c.invokedBy) return { key: `svc:${c.invokedBy}`, kind: 'service', display: c.invokedBy };
   if (c.type === 'IAMUser') return { key: `user:${c.arn}`, kind: 'user', display: `${c.arn?.split(':').pop()} (${c.accountId})` };
   if (c.type === 'AssumedRole') { const m = c.arn?.match(/assumed-role\/([^/]+)\//); return { key: `role:${c.accountId}:${m?.[1]}`, kind: 'role', display: `role/${m?.[1]} (${c.accountId})` }; }
   if (c.type === 'SAMLUser' || c.type === 'WebIdentityUser') {
     const who = c.principalId?.split(':').slice(1).join(':') || e.sessionName;
     return { key: `fed:${c.principalId || e.sessionName}`, kind: 'federated', display: who };
-  }
-  if (c.type === 'AWSAccount' && c.accountId) {
-    // the target account's copy of a cross-account call: no ARN, only the caller's account and unique ID
-    const id = (c.principalId || '').split(':')[0];
-    const what = /^AROA/.test(id) ? 'role' : /^AIDA/.test(id) ? 'IAM user' : 'identity';
-    return { key: `acct:${c.accountId}:${id || 'unknown'}`, kind: 'account', display: `${what} ${id || '?'} in ${c.accountId}${e.sessionName ? ` (session ${e.sessionName})` : ''}` };
   }
   return { key: `other:${c.arn || c.type}`, kind: 'other', display: c.arn || String(c.type) };
 }

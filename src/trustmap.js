@@ -23,6 +23,7 @@ export const FINDINGS = {
   'never-used': 'Not used in the CloudTrail history read',
   'used-unnamed': 'Used from that account, but which identity is not known yet',
   'used-unattributed': 'Something from another account came in before callers were recorded by account',
+  'used-per-iam': 'IAM says the role is used, but no sign-in was tied to this statement',
 };
 const ORG_KEYS = /^aws:(principalorgid|principalorgpaths|principalaccount|principalarn|sourceaccount|sourcearn|sourceorgid|principaltag\/)/i;
 
@@ -154,9 +155,20 @@ export function edgesOf(role, ctx) {
           f('used-unattributed', 'info', 'Older scans kept no caller account for cross-account calls, so this may or may not be the statement they came through. New sign-ins are attributed by account; check again after the next scans.');
         }
       }
-      if (!e.seen.length && e.type !== 'service' && ctx.complete.has(role.account_id)) {
+      // IAM's own record (RoleLastUsed, kept ~400 days) is the ground truth for "is this role used at all". When it says
+      // yes but CloudTrail tied no sign-in to this statement, say exactly that instead of "never used".
+      const lastUsed = role.last_used_at ? new Date(role.last_used_at) : null;
+      if (!e.seen.length && e.type !== 'service' && lastUsed) {
         const days = ctx.windowDays?.get(role.account_id);
-        f('never-used', 'info', `Nothing came in through this statement in ${days ? `the ${days} days of CloudTrail read for ${role.account_name}` : 'the stored history'}. This is read from ${role.account_name}'s own trail, so it holds whether or not the caller's account is onboarded. If nobody needs it, remove it.`);
+        const inWindow = !days || Date.now() - lastUsed < days * 864e5;
+        e.lastUsed = { at: lastUsed, region: role.last_used_region || null };
+        f('used-per-iam', 'info', `IAM last used ${lastUsed.toISOString().slice(0, 10)}${role.last_used_region ? ` in ${role.last_used_region}` : ''}. `
+          + (inWindow ? 'No sign-in in the CloudTrail read matched this statement: it may have come through another statement of this role, or been recorded before callers were kept by account. The next scans attribute new sign-ins.'
+            : `That is before the ${days} days of CloudTrail read for ${role.account_name}, so which statement it came through is not known. Read further back to find out.`));
+      }
+      if (!e.seen.length && !e.lastUsed && e.type !== 'service' && ctx.complete.has(role.account_id)) {
+        const days = ctx.windowDays?.get(role.account_id);
+        f('never-used', 'info', `Nothing came in through this statement in ${days ? `the ${days} days of CloudTrail read for ${role.account_name}` : 'the stored history'}, and IAM has no record of the role being used. This is read from ${role.account_name} itself, so it holds whether or not the caller's account is onboarded. If nobody needs it, remove it.`);
       }
       e.worst = e.findings.reduce((w, x) => (SEV_ORDER[x.severity] < SEV_ORDER[w] ? x.severity : w), 'none');
       edges.push(e);
@@ -215,7 +227,7 @@ export const matchesQuery = (e, terms) => terms.every((t) => termMatches(e, t) !
 export async function trustMap(user, q = '', { limit = 500 } = {}) {
   const p = [];
   const roles = (await query(
-    `SELECT r.id, r.name, r.arn, r.account_id, r.trust_policy, r.risk, r.granted_count, a.name AS account_name, a.account_id AS aws_account_id, a.environment
+    `SELECT r.id, r.name, r.arn, r.account_id, r.trust_policy, r.risk, r.granted_count, r.last_used_at, r.last_used_region, a.name AS account_name, a.account_id AS aws_account_id, a.environment
        FROM roles r JOIN cloud_accounts a ON a.id=r.account_id
       WHERE r.deleted_at IS NULL AND ${scopeSql(user, 'r.account_id', p)}`, p)).rows;
   const connected = new Map((await query('SELECT account_id, name FROM cloud_accounts')).rows.map((a) => [a.account_id, a.name]));
@@ -302,7 +314,8 @@ export function mapOf(rows, scoped, allAccts) {
     l.findings += nf.length;
     const sess = e.seen.reduce((n, x) => n + Number(x.sessions || 0), 0);
     l.sessions += sess;
-    const r = l.roles.get(e.roleId) || { roleId: e.roleId, role: e.role, worst: 'none', findings: new Map(), conditions: 0, sessions: 0, lastSeen: null, principals: new Set() };
+    const r = l.roles.get(e.roleId) || { roleId: e.roleId, role: e.role, worst: 'none', findings: new Map(), conditions: 0, sessions: 0, lastSeen: null, principals: new Set(), iamLastUsed: null };
+    if (e.lastUsed && !sess) { r.iamLastUsed = e.lastUsed.at; l.iamUsed = true; }
     r.worst = worse(r.worst, e.worst); r.conditions += e.conditions.length; r.sessions += sess; r.principals.add(e.principal);
     for (const f of e.findings) r.findings.set(f.id, { id: f.id, severity: f.severity, title: f.title });
     for (const x of e.seen) if (x.lastSeen && (!r.lastSeen || new Date(x.lastSeen) > new Date(r.lastSeen))) r.lastSeen = x.lastSeen;
