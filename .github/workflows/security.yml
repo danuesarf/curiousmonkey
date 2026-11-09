@@ -1,7 +1,7 @@
 # Tests and security checks on every push and pull request, and weekly (new CVEs appear in code that did not change).
 # Each job fails the run on what it finds; findings also go to the Security tab (code scanning) where available.
 #
-#   test      npm test (unit + API tests against a throwaway Postgres)
+#   test      npm run lint (undefined names) and npm test (unit + API tests against a throwaway Postgres)
 #   deps      npm audit + Trivy filesystem scan: vulnerable dependencies, secrets, misconfiguration
 #   sast      Semgrep: security rules for JavaScript/Node/Express, Dockerfile, Kubernetes, GitHub Actions, secrets
 #   secrets   Gitleaks over the whole git history
@@ -44,6 +44,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with: { node-version: 22, cache: npm }
       - run: npm ci
+      - name: Lint (names used but never defined)
+        run: npm run lint
       - run: npm test
         env:
           AWS_EC2_METADATA_DISABLED: 'true'   # tests never use real AWS; the runner's metadata endpoint can hang them

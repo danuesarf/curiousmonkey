@@ -341,3 +341,8 @@ async function accountView(ctx, shell) {
   draw(); list(); card();
 }
 
+
+function statGrid(items) {
+  return h('div', { class: 'stat-grid' }, items.map(([k, v, c]) => h('div', null, h('span', { class: 'mono', style: `color:${c};font-size:17px` }, v), h('span', { class: 'tiny muted' }, k))));
+}
+function pill(text, color) { const s = h('span', { class: 'pill' }, text); s.style.color = color; s.style.borderColor = color; return s; }
