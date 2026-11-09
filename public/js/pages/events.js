@@ -5,7 +5,7 @@ import { go } from '../main.js';
 const RANGES = [['1h', 'Last hour'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
 const OUTCOMES = [['all', 'Allowed and denied'], ['denied', 'Denied only'], ['allowed', 'Allowed only']];
 const time = (t) => new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Jakarta' });
-const SYNTAX = [['role:deploy', 'role name'], ['user:dhimas', 'session name or caller'], ['ip:10.0.', 'source IP'], ['action:s3:Get', 'IAM action or event'], ['resource:kbi-reports', 'resource ARN'],
+const SYNTAX = [['role:deploy', 'role name'], ['user:alice', 'session name or caller'], ['ip:10.0.', 'source IP'], ['action:s3:Get', 'IAM action or event'], ['resource:acme-reports', 'resource ARN'],
   ['error:AccessDenied', 'error code'], ['id:…', 'CloudTrail event ID'], ['-action:Describe', 'leave out']];
 
 export async function eventsPage(ctx) {

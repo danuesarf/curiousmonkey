@@ -35,7 +35,7 @@ test('rules draft keeps what was used, drops what was not, keeps unverifiable ac
 test('a draft never widens resources or drops conditions', async () => {
   const r = await rec.recommend(await roleId('payments-api-prod'), { llm: null });
   const s3 = r.statements.find((s) => [].concat(s.Action).includes('s3:GetObject'));
-  assert.equal(s3.Resource, 'arn:aws:s3:::kbi-payments-docs/*');
+  assert.equal(s3.Resource, 'arn:aws:s3:::acme-payments-docs/*');
 });
 
 test('wildcard "*" resources narrow to the resources actually seen, when the action supports it', async () => {

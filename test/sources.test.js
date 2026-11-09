@@ -51,9 +51,9 @@ test('session ARNs become the role ARN a trust policy can name', () => {
 });
 
 test('the S3 policy reads only the trail’s log files and keeps every other data Deny', () => {
-  const p = scannerPolicy({ s3: { bucket: 'kbi-org-cloudtrail', prefix: 'org' } });
+  const p = scannerPolicy({ s3: { bucket: 'acme-org-cloudtrail', prefix: 'org' } });
   const deny = p.Statement.find((s) => s.Sid === 'NeverReadOtherObjects');
-  assert.equal(deny.NotResource, 'arn:aws:s3:::kbi-org-cloudtrail/org/AWSLogs/*');
+  assert.equal(deny.NotResource, 'arn:aws:s3:::acme-org-cloudtrail/org/AWSLogs/*');
   assert.ok(p.Statement.find((s) => s.Sid === 'NeverDecryptOutsideCloudTrail').Condition.Null);
   assert.ok(p.Statement.find((s) => s.Sid === 'NeverReadCustomerData').Action.includes('secretsmanager:GetSecretValue'));
   const plain = scannerPolicy({});
@@ -65,7 +65,7 @@ test('the S3 policy reads only the trail’s log files and keeps every other dat
 let A;
 test('an account reading its trail from S3 scans fully and marks that trail’s data events readable', async () => {
   A = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status, event_source, s3_bucket, lookback_days)
-    VALUES ('333333333333','s3acct','arn:aws:iam::333333333333:role/CuriousMonkeyScanner','{ap-southeast-3}','connected','s3','kbi-org-cloudtrail',90) RETURNING id`)).rows[0].id;
+    VALUES ('333333333333','s3acct','arn:aws:iam::333333333333:role/CuriousMonkeyScanner','{ap-southeast-3}','connected','s3','acme-org-cloudtrail',90) RETURNING id`)).rows[0].id;
   const run = await q.enqueueRun(A, { trigger: 'manual' });
   await drain();
   assert.equal((await q.runDetail(run)).run.status, 'succeeded');

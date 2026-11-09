@@ -2,7 +2,54 @@
 
 > The monkey only needs a banana. Don't give it a bazooka.
 
-Curious Monkey works like AWS IAM Access Analyzer, across many AWS accounts. For every IAM role it shows who used it (and which trust-policy conditions they met on the way in), what they did (CloudTrail event history, stored incrementally), and a least-privilege policy drafted from that evidence. Permissions it cannot verify from event history are flagged instead of silently dropped.
+**See what every IAM role in every AWS account really uses, who can get into it, and cut it down to least privilege with evidence.** Self-hosted, read-only, and explicitly denied access to your data.
+
+![Space: the whole AWS estate on one plane, replayed hour by hour](docs/screenshots/space.webp)
+
+- **Who used each role, and how they got in.** Every session from CloudTrail: SSO users, CI pipelines, other accounts, AWS services, with the trust-policy conditions they met on the way in.
+- **What was really used.** Permissions granted vs. permissions called, per role, over up to 90 days of history (longer from an S3 trail). Anything event history cannot prove is flagged, not silently dropped.
+- **Who can get in from outside.** A trust map of every vendor, tenant, CI provider and SAML/OIDC identity that can assume your roles, with the risky ones in red.
+- **A least-privilege policy you can trust.** Drafted from the evidence, checked, and approved by your security teams before anyone applies it.
+- **Watch it happen.** Replay any session call by call, follow role chaining across accounts, search every call in Event history, and get pinged when something changes.
+
+**Try it in a minute, no AWS account needed:**
+
+```sh
+git clone https://github.com/danuesarf/curiousmonkey && cd curiousmonkey
+cp .env.example .env
+# demo mode, and fresh random secrets for the database, sessions and stored keys
+perl -pi -e 's/^AWS_MODE=.*/AWS_MODE=demo/; s/^(POSTGRES_PASSWORD|SESSION_SECRET|DATA_ENCRYPTION_KEY)=$/$1 . "=" . `openssl rand -hex 32`/e' .env
+docker compose up -d --build
+docker compose exec app node src/cli.js demo     # adds fake accounts and scans them
+```
+
+Open http://localhost:8080 and sign up: the first person becomes the owner, and is asked to set up an authenticator app (two-factor is required for anyone who can approve changes).
+
+## A look around
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/radar.webp"><img src="docs/screenshots/radar.webp" alt="Radar"></a><br><b>Radar.</b> Every account at a glance: distance is how much of its permissions is never used, size is excess, trails show whether it is getting better or worse, pings flag changes that matter.</td>
+<td width="50%"><a href="docs/screenshots/trust-map.webp"><img src="docs/screenshots/trust-map.webp" alt="Trust map"></a><br><b>Trust map.</b> Who can get into your AWS: outside accounts, vendors, GitHub Actions, Bitbucket, SAML, anyone, and your accounts trusting each other. Red when the trust behind a line is high risk.</td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/space-account.webp"><img src="docs/screenshots/space-account.webp" alt="Space, one account"></a><br><b>Space.</b> One account in 3D: roles grouped by the service they call, towers for the services, outside identities at the edge. Click anything for its sessions and replay them.</td>
+<td><a href="docs/screenshots/track.webp"><img src="docs/screenshots/track.webp" alt="Track"></a><br><b>Track.</b> One session, call by call, with every role it jumped into on its own lane, and the conditions it met on entry.</td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/role.webp"><img src="docs/screenshots/role.webp" alt="Role"></a><br><b>Every role.</b> Granted vs. used vs. unverifiable, why it is high risk, who assumed it with MFA or not, and a one-click least-privilege recommendation.</td>
+<td><a href="docs/screenshots/sector-scan.webp"><img src="docs/screenshots/sector-scan.webp" alt="Sector scan"></a><br><b>Sector scan.</b> One role cut into services and access levels: lit dots were called, amber ones cannot be proven, dim ones were never used.</td>
+</tr>
+<tr>
+<td><a href="docs/screenshots/events.webp"><img src="docs/screenshots/events.webp" alt="Event history"></a><br><b>Event history.</b> Search every call your roles made by role, user, IP, action, resource or error, and export it.</td>
+<td><a href="docs/screenshots/roles.webp"><img src="docs/screenshots/roles.webp" alt="Roles"></a><br><b>Roles.</b> All roles across all accounts, filtered by risk, kind, reviewer team and findings, with a picker that works for hundreds of accounts.</td>
+</tr>
+<tr>
+<td colspan="2"><a href="docs/screenshots/health.webp"><img src="docs/screenshots/health.webp" alt="Health" width="50%"></a><br><b>Health.</b> The database and the scanner workers: disk left, growth, memory and what to change.</td>
+</tr>
+</table>
+
+<sub>Screenshots are of the built-in demo mode: the accounts and identities are made up.</sub>
 
 ## Run it
 

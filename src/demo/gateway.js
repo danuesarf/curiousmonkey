@@ -141,8 +141,8 @@ export function demoGateway(account) {
       return gzipSync(Buffer.from(JSON.stringify({ Records: f.records })));
     },
     async discoverDataEvents() {
-      return [{ name: 'org-trail', bucket: 'kbi-org-cloudtrail', type: 'trail', resourceType: 'AWS::S3::Object', readWrite: 'All', arnPatterns: ['arn:aws:s3:::kbi-payments-docs/'] },
-              { name: 'org-trail', bucket: 'kbi-org-cloudtrail', type: 'trail', resourceType: 'AWS::Lambda::Function', readWrite: 'WriteOnly', arnPatterns: ['arn:aws:lambda'] }];
+      return [{ name: 'org-trail', bucket: 'acme-org-cloudtrail', type: 'trail', resourceType: 'AWS::S3::Object', readWrite: 'All', arnPatterns: ['arn:aws:s3:::acme-payments-docs/'] },
+              { name: 'org-trail', bucket: 'acme-org-cloudtrail', type: 'trail', resourceType: 'AWS::Lambda::Function', readWrite: 'WriteOnly', arnPatterns: ['arn:aws:lambda'] }];
     },
   };
 }

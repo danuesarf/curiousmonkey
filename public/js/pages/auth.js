@@ -54,7 +54,7 @@ export function signUp(params, st) {
   const err = h('div', { class: 'err', role: 'alert' });
   const name = h('input', { autocomplete: 'name', required: true });
   const email = h('input', { type: 'email', autocomplete: 'email', required: true });
-  const ws = h('input', { required: true, placeholder: 'e.g. KBI Security' });
+  const ws = h('input', { required: true, placeholder: 'e.g. Acme Security' });
   const pw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: '12' });
   if (invite) get(`/auth/invite/${invite}`).then((i) => { email.value = i.email; email.readOnly = true; }).catch((e) => { err.textContent = e.message; });
   const btn = h('button', { class: 'btn primary', type: 'submit' }, first ? 'Create workspace' : 'Create account');

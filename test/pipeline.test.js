@@ -80,7 +80,7 @@ test('callers are shown with the conditions they met on entry', async () => {
   const p = (await db.query(`SELECT * FROM principals WHERE role_id=$1`, [r.id])).rows[0];
   assert.equal(p.via, 'sts:AssumeRoleWithWebIdentity');
   assert.ok(p.caller.trust.matched);
-  assert.ok(p.caller.trust.conditions.some((c) => c.includes('repo:krombank/platform:ref:refs/heads/main')));
+  assert.ok(p.caller.trust.conditions.some((c) => c.includes('repo:acme-corp/platform:ref:refs/heads/main')));
 });
 
 test('an outside account user is flagged as an unexpected principal; denied calls do not count as use', async () => {
@@ -103,7 +103,7 @@ test('unused role is flagged idle; SSO goes to InfoSec, service-linked to InfraS
 test('buckets with data events are discovered', async () => {
   const d = (await db.query(`SELECT resource_type, arn_patterns FROM data_event_sources WHERE account_id=$1 ORDER BY resource_type`, [A])).rows;
   assert.equal(d.length, 2);
-  assert.deepEqual(d.find((x) => x.resource_type === 'AWS::S3::Object').arn_patterns, ['arn:aws:s3:::kbi-payments-docs/']);
+  assert.deepEqual(d.find((x) => x.resource_type === 'AWS::S3::Object').arn_patterns, ['arn:aws:s3:::acme-payments-docs/']);
 });
 
 test('the next scan is incremental: it continues from the checkpoint and never double counts', async () => {

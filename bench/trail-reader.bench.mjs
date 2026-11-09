@@ -7,7 +7,7 @@ import { gzipSync } from 'node:zlib';
 import { startPg } from '../test/helpers/pg.js';
 
 const FILES = Number(process.argv[2] || 120), PER = Number(process.argv[3] || 1000), AGE_DAYS = Number(process.argv[4] || 20);   // 20: within session replay; 60: older history
-const ACCT = '970488353522', DAY = 864e5, MIN = 60e3;
+const ACCT = '210987654321', DAY = 864e5, MIN = 60e3;
 const NOW = Date.now(), START = NOW - AGE_DAYS * DAY;
 let seed = 11; const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
 const roles = Array.from({ length: 60 }, (_, i) => `role-${i}`);

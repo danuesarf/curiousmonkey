@@ -94,7 +94,7 @@ function checkDetails(root, m, taken) {
 function checkSource(root, m) {
   clearErrs(root);
   if (m.eventSource !== 's3') return true;
-  if (!RE.bucket.test(m.s3.bucket)) return fail(root, 's3.bucket', 'Enter the bucket name only, e.g. kbi-org-cloudtrail (no s3:// and no path).');
+  if (!RE.bucket.test(m.s3.bucket)) return fail(root, 's3.bucket', 'Enter the bucket name only, e.g. acme-org-cloudtrail (no s3:// and no path).');
   if (m.s3.orgId && !RE.org.test(m.s3.orgId)) return fail(root, 's3.orgId', 'Organization IDs look like o-abc123def4.');
   return true;
 }
@@ -146,7 +146,7 @@ function sourceSection(m, rerender, { editing = false, original = null } = {}) {
   const eh = capped ? estimate({ perDay: m.perDay, lookback: 90 }).history : e.history;
   const waves = Math.ceil(m.regions.size / WORKER_CONCURRENCY) || 1;
   const s3Fields = m.eventSource === 's3' && h('div', { class: 'stack form sub' },
-    field('S3 bucket the trail writes to', input(m.s3, 'bucket', { 'data-f': 's3.bucket', placeholder: 'kbi-org-cloudtrail' })),
+    field('S3 bucket the trail writes to', input(m.s3, 'bucket', { 'data-f': 's3.bucket', placeholder: 'acme-org-cloudtrail' })),
     field('Key prefix (optional)', input(m.s3, 'prefix', { 'data-f': 's3.prefix', placeholder: 'leave empty if the trail has none' }), 'Only if the trail was set up with a prefix. Files then live under <prefix>/AWSLogs/…'),
     field('Organization ID (organization trails only)', input(m.s3, 'orgId', { 'data-f': 's3.orgId', placeholder: 'o-abc123def4' }), 'An organization trail writes to AWSLogs/<org-id>/<account-id>/…'),
     field('Bucket region (optional)', input(m.s3, 'region', { 'data-f': 's3.region', placeholder: 'e.g. ap-southeast-3' }), 'Defaults to the region being read. Set it when the bucket is somewhere else.'));

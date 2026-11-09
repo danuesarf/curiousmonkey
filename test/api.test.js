@@ -113,7 +113,7 @@ test('accounts: access modes, S3 source and edits; stored keys never come back',
   assert.equal((await owner.post('/api/accounts', { name: 'u', accountId: '555555555555', lookbackDays: 120 })).json.field, 'lookbackDays');
   assert.equal((await owner.post('/api/accounts', { name: 'u', accountId: '555555555555', eventSource: 's3' })).json.field, 's3.bucket');
   const u = await owner.post('/api/accounts', { name: 'user-mode', accountId: '555555555555', authMode: 'access_key', credentials: KEY,
-    eventSource: 's3', lookbackDays: 365, s3: { bucket: 'kbi-org-cloudtrail', prefix: 'org', orgId: 'o-abc123def4' } });
+    eventSource: 's3', lookbackDays: 365, s3: { bucket: 'acme-org-cloudtrail', prefix: 'org', orgId: 'o-abc123def4' } });
   assert.equal(u.status, 201);
   assert.equal(u.json.credentials_enc, undefined); assert.equal(u.json.has_credentials, true); assert.equal(u.json.credentials_hint, 'AKIA…MNOP');
   assert.equal(u.json.role_arn, null); assert.equal(u.json.lookback_days, 365);
@@ -135,7 +135,7 @@ test('accounts: access modes, S3 source and edits; stored keys never come back',
   const r2 = await owner.patch(`/api/accounts/${u.json.id}`, { authMode: 'assume_role', baseIdentity: 'system', roleName: 'CmScanner' });
   assert.equal(r2.json.has_credentials, false); assert.equal(r2.json.status, 'pending'); assert.equal(r2.json.role_arn, 'arn:aws:iam::555555555555:role/CmScanner');
   // snippets follow the mode and the bucket
-  const sn = await owner.get('/api/onboarding/snippets?mode=assume_role&bucket=kbi-org-cloudtrail&prefix=org&principal=arn:aws:iam::999999999999:role/cm-worker');
+  const sn = await owner.get('/api/onboarding/snippets?mode=assume_role&bucket=acme-org-cloudtrail&prefix=org&principal=arn:aws:iam::999999999999:role/cm-worker');
   assert.match(sn.json.terraform, /NotResource/); assert.match(sn.json.terraform, /cm-worker/); assert.ok(sn.json.basePolicy);
   assert.match((await owner.get('/api/onboarding/snippets?mode=access_key')).json.terraform, /aws_iam_user/);
   assert.equal((await owner.get('/api/onboarding/identity')).status, 200);
@@ -215,7 +215,7 @@ test('decisions: only valid choices per finding type; recorded with the reviewer
   const d = (await owner.get(`/api/roles/${id}`)).json;
   const dataFlag = d.flags.find((f) => f.category === 'data-event');
   assert.equal((await owner.post(`/api/flags/${dataFlag.id}/decision`, { decision: 'accept' })).status, 400);
-  assert.equal((await owner.post(`/api/flags/${dataFlag.id}/decision`, { decision: 'keep_scoped', resources: ['arn:aws:s3:::kbi-payments-docs/*'], note: 'ok' })).status, 200);
+  assert.equal((await owner.post(`/api/flags/${dataFlag.id}/decision`, { decision: 'keep_scoped', resources: ['arn:aws:s3:::acme-payments-docs/*'], note: 'ok' })).status, 200);
   const after = (await owner.get(`/api/roles/${id}`)).json.flags.find((f) => f.id === dataFlag.id);
   assert.equal(after.decision, 'keep_scoped'); assert.equal(after.decided_by, 'Dhimas');
   const log = (await owner.get('/api/audit?action=flag.decide')).json;
@@ -345,19 +345,19 @@ test('advice flags a heap too small for the container and a stalled read', async
 });
 
 test('planned accounts: placeholders with no access, never scanned, onboarded later', async () => {
-  const p = await owner.post('/api/accounts/planned', { name: 'management', accountId: '473951143579', environment: 'production', ou: 'Root', note: 'after the CAB' });
+  const p = await owner.post('/api/accounts/planned', { name: 'management', accountId: '424242424242', environment: 'production', ou: 'Root', note: 'after the CAB' });
   assert.equal(p.status, 201); assert.equal(p.json.status, 'planned'); assert.equal(p.json.role_arn, null);
   // never scanned, and the normal connect form points at onboarding instead of duplicating it
   assert.equal((await owner.post(`/api/accounts/${p.json.id}/scan`)).json.error, 'planned');
-  assert.equal((await owner.post('/api/accounts', { name: 'm', accountId: '473951143579' })).json.error, 'planned');
+  assert.equal((await owner.post('/api/accounts', { name: 'm', accountId: '424242424242' })).json.error, 'planned');
   // a planned account never holds the history bar back
   const st = await owner.get('/api/status');
   assert.ok(!st.json.reading.some((r) => r.id === p.json.id));
   // many at once: bad lines are reported, existing IDs are skipped
   assert.match((await owner.post('/api/accounts/planned/bulk', { text: '12345, x' })).json.message, /Line 1/);
-  const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n601553210983, network-hub, shared, Infra\n473951143579, management\n889900112233' });
-  assert.equal(bulk.json.added, 2); assert.equal(bulk.json.updated, 0); assert.deepEqual(bulk.json.skipped, ['473951143579']);   // same details: unchanged
-  const moved = await owner.post('/api/accounts/planned/bulk', { text: '473951143579, management, shared, Root' });
+  const bulk = await owner.post('/api/accounts/planned/bulk', { text: '# id, name, env, ou\n515151515151, network-hub, shared, Infra\n424242424242, management\n889900112233' });
+  assert.equal(bulk.json.added, 2); assert.equal(bulk.json.updated, 0); assert.deepEqual(bulk.json.skipped, ['424242424242']);   // same details: unchanged
+  const moved = await owner.post('/api/accounts/planned/bulk', { text: '424242424242, management, shared, Root' });
   assert.equal(moved.json.updated, 1);
   assert.equal((await owner.get(`/api/accounts/${p.json.id}`)).json.environment, 'shared');
   // static page code is revalidated on every load, so a deploy is picked up at once
@@ -367,6 +367,6 @@ test('planned accounts: placeholders with no access, never scanned, onboarded la
   assert.equal(e.json.name, 'org-management'); assert.equal(e.json.status, 'planned'); assert.equal(e.json.auth_mode, 'assume_role');
   // onboarding sets up access and makes it scannable
   const o = await owner.patch(`/api/accounts/${p.json.id}`, { onboard: true, eventSource: 'event-history', authMode: 'assume_role', roleName: 'CuriousMonkeyScanner', regions: ['us-east-1'] });
-  assert.equal(o.json.status, 'pending'); assert.equal(o.json.role_arn, 'arn:aws:iam::473951143579:role/CuriousMonkeyScanner'); assert.ok(o.json.onboarded_at);
+  assert.equal(o.json.status, 'pending'); assert.equal(o.json.role_arn, 'arn:aws:iam::424242424242:role/CuriousMonkeyScanner'); assert.ok(o.json.onboarded_at);
   assert.equal((await owner.post(`/api/accounts/${p.json.id}/scan`)).status, 202);
 });
