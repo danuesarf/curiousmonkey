@@ -644,8 +644,8 @@ export async function spacePage(ctx) {
         actions: [['Its calls', `#/events?account=${M.account.id}&q=${encodeURIComponent(`action:${t.name}:`)}&range=7d`, true]] };
     }
     const n = M.fars.find((x) => `far:${x.id}` === id);
-    if (n) return { eyebrow: 'NEIGHBOURING ACCOUNT', title: n.name, sub: `${n.links.reduce((a, l) => a + l.sessions, 0)} chained sessions in 7 days`, swatch: ENV[n.env].base, tags: [], rows: [],
-      lists: [{ title: 'Role chaining', items: n.links.map((l) => ({ label: `${l.otherRole} ${l.dir === 'in' ? '→' : '←'} ${pretty(M.byRole.get(l.roleId)?.name || 'a role here').label}`, meta: l.dir === 'in' ? 'comes in' : 'goes out', value: String(l.sessions), pick: l.roleId })) }],
+    if (n) return { eyebrow: 'NEIGHBOURING ACCOUNT', title: n.name, sub: `${n.sessions ?? n.links.reduce((a, l) => a + l.sessions, 0)} chained sessions in 7 days`, swatch: ENV[n.env].base, tags: [], rows: [],
+      lists: [{ title: n.moreLinks ? `Role chaining · busiest ${n.links.length}, ${n.moreLinks} more not shown` : 'Role chaining', items: n.links.map((l) => ({ label: `${l.otherRole} ${l.dir === 'in' ? '→' : '←'} ${pretty(M.byRole.get(l.roleId)?.name || 'a role here').label}`, meta: l.dir === 'in' ? 'comes in' : 'goes out', value: String(l.sessions), pick: l.roleId })) }],
       actions: [['Open in Space', `#/space?view=account&account=${n.id}`, true]] };
     return null;
   }

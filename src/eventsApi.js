@@ -5,6 +5,10 @@
 // track_calls has no index on time alone (it would slow every trail read), so a search walks back from the newest
 // end in growing slices: sessions overlapping the slice come from the per-account session index, and each
 // session's calls from its own (session_id, at) key. It stops as soon as a page is full.
+//
+// A session's calls all fall within the life of its temporary credentials, which STS caps at 36 hours (12 for
+// AssumeRole), and started_at is never later than its first call. So the sessions that can have calls in a slice
+// started at most 36 hours before it: a bounded range on (account_id, started_at), instead of every session kept.
 import { query } from './db.js';
 import { scopeSql } from './auth/rbac.js';
 import { config } from './config.js';
@@ -12,6 +16,7 @@ import { config } from './config.js';
 const H = 36e5;
 const SLICES = [1, 6, 24, 72, 168, 336, 720, 2160].map((h) => h * H);   // cumulative look-back per step
 const RANGES = { '1h': 1, '24h': 24, '7d': 168, '30d': 720 };
+export const MAX_SESSION_MS = 36 * H;    // the longest STS temporary credentials live
 
 // what each search key looks at. Plain words look at all of them.
 const FIELDS = {
@@ -82,6 +87,7 @@ export async function searchEvents(user, opts = {}) {
     p.push(new Date(lo).toISOString()); const pLo = p.length;
     p.push(new Date(hi).toISOString()); const pHi = p.length;
     p.push(limit - items.length); const pLim = p.length;
+    p.push(new Date(lo - MAX_SESSION_MS).toISOString()); const pBorn = p.length;
     if (cursor) { p.push(cursor.at, cursor.id); call.push(`(c.at, c.event_id) < ($${p.length - 1}::timestamptz, $${p.length})`); }
     const rows = (await query(
       `SELECT c.event_id, c.at, c.action, c.event_source, c.event_name, c.resources, c.denied, c.error_code, c.child_key_id,
@@ -90,7 +96,7 @@ export async function searchEvents(user, opts = {}) {
          FROM track_sessions s JOIN roles r ON r.id = s.role_id JOIN cloud_accounts a ON a.id = s.account_id
          JOIN LATERAL (SELECT * FROM track_calls c WHERE c.session_id = s.id AND c.at >= $${pLo} AND c.at < $${pHi}
                          ${call.length ? `AND ${call.join(' AND ')}` : ''} ORDER BY c.at DESC, c.event_id DESC LIMIT $${pLim}) c ON true
-        WHERE ${sess.join(' AND ')} AND s.started_at < $${pHi} AND COALESCE(s.last_call_at, s.started_at) >= $${pLo}
+        WHERE ${sess.join(' AND ')} AND s.started_at >= $${pBorn} AND s.started_at < $${pHi} AND COALESCE(s.last_call_at, s.started_at) >= $${pLo}
         ORDER BY c.at DESC, c.event_id DESC LIMIT $${pLim}`, p)).rows;
     items.push(...rows);
     scannedTo = lo;

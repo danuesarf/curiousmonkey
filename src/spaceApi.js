@@ -108,10 +108,12 @@ export async function spaceEstate(user) {
   if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, scanner: null, events: [], hourStart: new Date(start).toISOString() };
 
   const [roles, hourly, entries, ev] = await Promise.all([
-    query(`SELECT r.id, r.account_id, r.name, r.kind, r.risk, coalesce(t.c7,0)::bigint AS calls7, coalesce(t.c1,0)::bigint AS calls24h, coalesce(t.all_calls,0)::bigint AS calls_all
+    // last 7 days from the day index; "ever used" is one probe per role instead of a sum over all history
+    query(`SELECT r.id, r.account_id, r.name, r.kind, r.risk, r.last_activity_at, coalesce(t.c7,0)::bigint AS calls7, coalesce(t.c1,0)::bigint AS calls24h,
+                  EXISTS (SELECT 1 FROM activity_daily d WHERE d.role_id = r.id AND d.count > 0) AS used
              FROM roles r
-             LEFT JOIN (SELECT role_id, sum(count) all_calls, sum(count) FILTER (WHERE day >= current_date - 6) c7, sum(count) FILTER (WHERE day >= current_date - 1) c1
-                          FROM activity_daily GROUP BY role_id) t ON t.role_id=r.id
+             LEFT JOIN (SELECT role_id, sum(count) c7, sum(count) FILTER (WHERE day >= current_date - 1) c1
+                          FROM activity_daily WHERE day >= current_date - 6 GROUP BY role_id) t ON t.role_id=r.id
             WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL`, [ids]),
     query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
              FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [ids]),
@@ -157,7 +159,7 @@ export async function spaceEstate(user) {
     hourStart: new Date(start).toISOString(),
     accounts: accts.map((a) => {
       const x = byAcct.get(a.id);
-      const active = x.roles.filter((r) => num(r.calls_all) > 0).sort((m, n) => num(n.calls7) - num(m.calls7) || num(n.calls_all) - num(m.calls_all));
+      const active = x.roles.filter((r) => r.used).sort((m, n) => num(n.calls7) - num(m.calls7) || (n.last_activity_at ? +new Date(n.last_activity_at) : 0) - (m.last_activity_at ? +new Date(m.last_activity_at) : 0));
       const cold = x.roles.length - active.length;
       return {
         id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null,
@@ -186,19 +188,28 @@ export async function spaceAccount(user, accountId) {
   if (!a) return null;
   const start = await hourStart();
   const [roles, acts, hourly, chains, ev] = await Promise.all([
-    query(`SELECT r.id, r.name, r.kind, r.risk, coalesce(t.calls_all,0)::bigint AS calls_all FROM roles r
-             LEFT JOIN (SELECT role_id, sum(count) calls_all FROM activity_daily GROUP BY role_id) t ON t.role_id=r.id
-            WHERE r.account_id=$1 AND r.deleted_at IS NULL`, [accountId]),
+    // cold: no allowed call stored, ever. One index probe per role, not a sum over every role's history.
+    query(`SELECT r.id, r.name, r.kind, r.risk, EXISTS (SELECT 1 FROM activity_daily d WHERE d.role_id = r.id AND d.count > 0) AS used
+             FROM roles r WHERE r.account_id=$1 AND r.deleted_at IS NULL`, [accountId]),
     // calls per role per action over 7 days, so each role has its services
     query(`SELECT d.role_id, d.action, sum(d.count)::bigint AS n, sum(d.error_count)::bigint AS denied FROM activity_daily d JOIN roles r ON r.id=d.role_id
             WHERE r.account_id=$1 AND d.day >= current_date - 6 GROUP BY 1, 2`, [accountId]),
     query(`SELECT role_id, date_trunc('hour', started_at) AS h, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
              FROM track_sessions WHERE account_id=$1 AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [accountId]),
-    query(`SELECT p.account_id AS src, s.account_id AS dst, pr.name AS src_role, sr.name AS dst_role, s.role_id AS dst_role_id, p.role_id AS src_role_id, count(*)::int AS n
-             FROM track_sessions s JOIN track_sessions p ON p.access_key_id = s.parent_key_id
-             JOIN roles pr ON pr.id=p.role_id JOIN roles sr ON sr.id=s.role_id
-            WHERE (s.account_id=$1 OR p.account_id=$1) AND p.account_id <> s.account_id AND s.started_at >= now() - interval '7 days'
-            GROUP BY 1, 2, 3, 4, 5, 6`, [accountId]),
+    // role chaining in and out over 7 days. Two halves so each uses an index: sessions here and their parents (by key),
+    // and this account's sessions and their children (by parent key). A parent lives at most 36 h before its child.
+    query(`WITH pairs AS (
+             SELECT p.account_id AS src, s.account_id AS dst, p.role_id AS src_role_id, s.role_id AS dst_role_id
+               FROM track_sessions s JOIN track_sessions p ON p.access_key_id = s.parent_key_id
+              WHERE s.account_id = $1 AND s.started_at >= now() - interval '7 days' AND s.parent_key_id IS NOT NULL AND p.account_id <> $1
+             UNION ALL
+             SELECT p.account_id, s.account_id, p.role_id, s.role_id
+               FROM track_sessions p JOIN track_sessions s ON s.parent_key_id = p.access_key_id
+              WHERE p.account_id = $1 AND p.started_at >= now() - interval '7 days' - interval '36 hours'
+                AND s.started_at >= now() - interval '7 days' AND s.account_id <> $1)
+           SELECT x.src, x.dst, pr.name AS src_role, sr.name AS dst_role, x.dst_role_id, x.src_role_id, x.n
+             FROM (SELECT src, dst, src_role_id, dst_role_id, count(*)::int AS n FROM pairs GROUP BY 1, 2, 3, 4) x
+             JOIN roles pr ON pr.id = x.src_role_id JOIN roles sr ON sr.id = x.dst_role_id`, [accountId]),
     events('c.account_id = $1', [accountId], start),
   ]);
 
@@ -216,7 +227,7 @@ export async function spaceAccount(user, accountId) {
   }
   const out = roles.rows.map((r) => {
     const s = [...(svc.get(r.id) || new Map())].map(([name, v]) => ({ name, calls: v.calls, denied: v.denied })).sort((m, n) => n.calls - m.calls);
-    return { id: r.id, name: r.name, kind: r.kind, risk: r.risk, cold: num(r.calls_all) === 0, calls7: s.reduce((t, x) => t + x.calls, 0), denied7: s.reduce((t, x) => t + x.denied, 0),
+    return { id: r.id, name: r.name, kind: r.kind, risk: r.risk, cold: !r.used, calls7: s.reduce((t, x) => t + x.calls, 0), denied7: s.reduce((t, x) => t + x.denied, 0),
       services: s.slice(0, 6), hourly: roleHours.get(r.id) || Array(24).fill(0) };
   });
   // services: the account's busiest eight. Clusters: roles grouped by the service they call most
@@ -229,19 +240,33 @@ export async function spaceAccount(user, accountId) {
   if (clusters.length > 6) clusters = [...clusters.slice(0, 5), { key: 'other', roles: clusters.slice(5).flatMap((c) => c.roles) }];
 
   const ids = new Set([a.id]);
-  const outside = await outsiders(user, ids, null, { edgeCap: 500 });   // one account: every role an identity can enter, for the list
+  // one account: every role an identity can enter, for the list. The trust map only needs this account's roles.
+  const outside = await outsiders({ ...user, scope_accounts: [a.id] }, ids, null, { edgeCap: 500 });
   const names = new Map((await query('SELECT id, name, environment FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(chains.rows.flatMap((c) => [c.src, c.dst]))]])).rows.map((x) => [x.id, x]));
+  // one line per role here and direction, however many roles it pairs with on the other side; the busiest are drawn
   const neighbours = new Map();
   for (const c of chains.rows) {
     const other = c.src === a.id ? c.dst : c.src, o = names.get(other); if (!o || !inScope(user, other)) continue;
-    if (!neighbours.has(other)) neighbours.set(other, { id: other, name: o.name, environment: o.environment, links: [] });
-    neighbours.get(other).links.push({ dir: c.src === a.id ? 'out' : 'in', roleId: c.src === a.id ? c.src_role_id : c.dst_role_id, otherRole: c.src === a.id ? c.dst_role : c.src_role, sessions: c.n });
+    if (!neighbours.has(other)) neighbours.set(other, { id: other, name: o.name, environment: o.environment, sessions: 0, byLink: new Map() });
+    const n = neighbours.get(other), dir = c.src === a.id ? 'out' : 'in', roleId = dir === 'out' ? c.src_role_id : c.dst_role_id;
+    const k = `${dir}:${roleId}`, l = n.byLink.get(k) || { dir, roleId, sessions: 0, others: new Map() };
+    l.sessions += c.n; n.sessions += c.n;
+    const otherRole = dir === 'out' ? c.dst_role : c.src_role; l.others.set(otherRole, (l.others.get(otherRole) || 0) + c.n);
+    n.byLink.set(k, l);
   }
+  const LINKS_PER_NEIGHBOUR = 40;
+  const nearest = [...neighbours.values()].sort((m, n) => n.sessions - m.sessions).slice(0, 6).map(({ byLink, ...n }) => {
+    const links = [...byLink.values()].sort((m, k) => k.sessions - m.sessions);
+    return { ...n, moreLinks: Math.max(0, links.length - LINKS_PER_NEIGHBOUR), links: links.slice(0, LINKS_PER_NEIGHBOUR).map((l) => {
+      const others = [...l.others].sort((m, k) => k[1] - m[1]);
+      return { dir: l.dir, roleId: l.roleId, sessions: l.sessions, otherRole: others.length > 1 ? `${others[0][0]} +${others.length - 1} more` : others[0][0] };
+    }) };
+  });
   return {
     hourStart: new Date(start).toISOString(),
     account: { id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort((m, n) => n.calls7 - m.calls7).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
-    neighbours: [...neighbours.values()].slice(0, 6), outside, scanner: (await scannerOf([a.id], start)).item, events: ev,
+    neighbours: nearest, outside, scanner: (await scannerOf([a.id], start)).item, events: ev,
   };
 }

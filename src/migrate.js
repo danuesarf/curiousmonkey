@@ -18,6 +18,15 @@ export async function migrate(log = console.log) {
     for (const f of files) {
       if (done.has(f)) continue;
       const sql = fs.readFileSync(path.join(dir, f), 'utf8');
+      // "-- no-transaction" on the first line: for CREATE INDEX CONCURRENTLY, which builds without blocking writes to a
+      // big table but cannot run in a transaction. Each statement runs on its own and must be safe to repeat.
+      if (/^--\s*no-transaction\b/.test(sql)) {
+        for (const stmt of sql.split(/;\s*$/m).map((x) => x.replace(/^\s*--.*$/gm, '').trim()).filter(Boolean)) await client.query(stmt);
+        await client.query('INSERT INTO schema_migrations(name) VALUES ($1)', [f]);
+        log(`migrated ${f}`);
+        applied++;
+        continue;
+      }
       try {
         await client.query('BEGIN');
         await client.query(sql);

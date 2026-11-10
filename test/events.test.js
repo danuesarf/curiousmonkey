@@ -22,13 +22,15 @@ before(async () => {
   const sess = async (acc, r, key, name, ip, startMins) => (await db.query(
     `INSERT INTO track_sessions(account_id, role_id, access_key_id, session_name, caller_arn, source_ip, started_at, last_call_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now()) RETURNING id`,
     [acc, r, key, name, `arn:aws:sts::x:assumed-role/x/${name}`, ip, minsAgo(startMins)])).rows[0].id;
-  const s1 = await sess(A, deploy, 'ASIA1', 'github-actions', '10.0.1.5', 3000);
+  // STS credentials live at most 36 hours, so two days of a pipeline's calls come from two sessions of the same role
+  const s1old = await sess(A, deploy, 'ASIA0', 'github-actions', '10.0.1.5', 3000);
+  const s1 = await sess(A, deploy, 'ASIA1', 'github-actions', '10.0.1.5', 1400);
   const s2 = await sess(B, reader, 'ASIA2', 'dhimas@krom.id', '182.1.2.3', 60);
   const call = (s, id, mins, name, src, action, res = [], denied = false, err = null) => db.query(
     `INSERT INTO track_calls(session_id, event_id, at, action, event_source, event_name, resources, denied, error_code) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
     [s, id, minsAgo(mins), action, src, name, res, denied, err]);
   // deploy: calls spread over two days, so a search must walk back through several slices
-  for (let i = 0; i < 30; i++) await call(s1, `d${String(i).padStart(2, '0')}`, 5 + i * 90, i % 3 ? 'UpdateService' : 'DescribeServices', 'ecs', i % 3 ? 'ecs:UpdateService' : 'ecs:DescribeServices', ['arn:aws:ecs:x:service/payments-api']);
+  for (let i = 0; i < 30; i++) await call(5 + i * 90 < 1400 ? s1 : s1old, `d${String(i).padStart(2, '0')}`, 5 + i * 90, i % 3 ? 'UpdateService' : 'DescribeServices', 'ecs', i % 3 ? 'ecs:UpdateService' : 'ecs:DescribeServices', ['arn:aws:ecs:x:service/payments-api']);
   await call(s1, 'kms1', 7, 'Decrypt', 'kms', 'kms:Decrypt', ['arn:aws:kms:x:key/abc'], true, 'AccessDenied');
   await call(s2, 'r1', 30, 'GetObject', 's3', 's3:GetObject', ['arn:aws:s3:::kbi-reports/q3.csv']);
 });

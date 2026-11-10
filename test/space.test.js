@@ -119,3 +119,27 @@ test('Curious Monkey is its own identity: its sign-ins to the scanner roles are 
   const one = await api.spaceAccount(owner, A);
   assert.deepEqual(one.scanner.targets.map((x) => [x.roleId, x.sessions]), [[sA, 30]]);
 });
+
+test('one account: chaining from a neighbour is one line per role here, however many roles it comes from', async () => {
+  const other = (await db.query(`INSERT INTO roles(account_id, arn, name, kind) VALUES ($1,'arn:aws:iam::222222222222:role/hotfix','hotfix','custom') RETURNING id`, [B])).rows[0].id;
+  const sess = (acc, role, key, at, parent = null) => db.query(
+    `INSERT INTO track_sessions(account_id, role_id, access_key_id, started_at, calls, parent_key_id) VALUES ($1,$2,$3,$4,1,$5)`, [acc, role, key, at, parent]);
+  // two more entries into deploy: one more from release, one from a second staging role
+  await sess(B, R.release, 'ASIAB9', hoursAgo(3.2)); await sess(A, R.deploy, 'ASIAA9', hoursAgo(3), 'ASIAB9');
+  await sess(B, other, 'ASIAB8', hoursAgo(4.2)); await sess(A, R.deploy, 'ASIAA8', hoursAgo(4), 'ASIAB8');
+  const n = (await api.spaceAccount(owner, A)).neighbours.find((x) => x.name === 'payments-stg');
+  const into = n.links.filter((l) => l.dir === 'in');
+  assert.equal(into.length, 1);                                   // deploy, once, not once per staging role
+  assert.equal(into[0].roleId, R.deploy);
+  assert.equal(into[0].sessions, 3);
+  assert.equal(into[0].otherRole, 'release +1 more');             // the busiest role on the other side, then a count
+  assert.equal(n.sessions, n.links.reduce((t, l) => t + l.sessions, 0));
+  assert.equal(n.moreLinks, 0);
+});
+
+test('the Space indexes are built without a transaction, valid, and migrating again changes nothing', async () => {
+  const idx = (await db.query(`SELECT c.relname, i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+                               WHERE c.relname IN ('activity_daily_day_idx', 'track_sessions_chained_idx') ORDER BY 1`)).rows;
+  assert.deepEqual(idx.map((x) => [x.relname, x.indisvalid]), [['activity_daily_day_idx', true], ['track_sessions_chained_idx', true]]);
+  assert.equal(await (await import('../src/migrate.js')).migrate(() => {}), 0);
+});
