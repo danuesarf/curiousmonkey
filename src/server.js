@@ -46,7 +46,7 @@ export function createApp() {
     setHeaders: (res, file) => { if (/\.(html|js|mjs|css|json)$/.test(file)) res.setHeader('Cache-Control', 'no-cache'); } }));
   app.get(/^\/(?!api).*/, (req, res) => res.sendFile(path.join(pub, 'index.html')));
 
-  // eslint-disable-next-line no-unused-vars
+  // Express spots an error handler by its four parameters, so `next` stays even though it is unused.
   app.use((err, req, res, next) => {
     if (err instanceof ZodError) return res.status(400).json({ error: 'invalid_input', message: err.issues.map((i) => `${i.path.join('.') || 'input'}: ${i.message}`).join('; ') });
     if (err.status && err.status < 500) return res.status(err.status).json({ error: err.code || 'error', message: err.message, field: err.field });
