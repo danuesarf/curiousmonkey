@@ -6,6 +6,7 @@
 import { query } from './db.js';
 import { scopeSql } from './auth/rbac.js';
 import { normalizeStatements, arr } from './analyzer/policy.js';
+import { isIdentityCenter, instanceKey, instanceLabel, instanceOf, identityCenters } from './identityCenter.js';
 
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };   // 'none' must be ranked, or nothing ever beats it
 export const FINDINGS = {
@@ -17,6 +18,9 @@ export const FINDINGS = {
   'oidc-broad-sub': 'OIDC subject condition is a broad wildcard',
   'oidc-no-aud': 'OIDC trust without an audience (aud) condition',
   'saml-no-aud': 'SAML trust without SAML:aud',
+  'idc-multiple': 'Account trusts more than one IAM Identity Center',
+  'idc-other': 'IAM Identity Center that is not your organisation\'s',
+  'idc-unknown': 'IAM Identity Center instance not known yet',
   'iam-user': 'Trusts an IAM user directly (long-lived keys)',
   'deleted-principal': 'Points at a deleted identity (unique ID instead of ARN)',
   'broad-action': 'Allows sts:* or * in a trust policy',
@@ -57,6 +61,24 @@ const condList = (c) => {
   return out;
 };
 
+/**
+ * IAM Identity Center: every account's AWSSSO_..._DO_NOT_DELETE provider for one instance gets the same source, so the
+ * maps draw the instance once. An account that trusts two instances, or not the one most of your accounts trust,
+ * is flagged: another Identity Center can sign people in to these roles without yours ever seeing it.
+ */
+function identityCenterEdge(e, f, arn, role, ctx) {
+  const stored = ctx.saml?.get(`${role.account_id}|${arn}`) || null;
+  if (!isIdentityCenter({ name: arn.split('/').pop(), issuer: stored?.issuer })) return;
+  const issuer = stored?.issuer || null, key = instanceKey(issuer), inst = instanceOf(issuer);
+  Object.assign(e, { source: instanceLabel(issuer), identityCenter: { key, region: inst?.region || null, instance: inst?.instance || null, managedFrom: inst?.homeAccount || null } });
+  const idc = ctx.idc;
+  if (!issuer) { f('idc-unknown', 'info', 'Give the scanner role iam:ListSAMLProviders and iam:GetSAMLProvider, then scan again, to tell which Identity Center this is.'); return; }
+  const mine = [...(idc?.byAccount.get(role.account_id)?.keys() || [])].filter((k) => k !== 'unknown');
+  const name = (k) => `${instanceLabel(idc.issuers.get(k))}${instanceOf(idc.issuers.get(k))?.homeAccount ? ` (managed from ${instanceOf(idc.issuers.get(k)).homeAccount})` : ''}`;
+  if (mine.length > 1) f('idc-multiple', 'high', `This account trusts ${mine.length} IAM Identity Center instances: ${mine.map(name).join(', ')}. An organisation has one; check who runs the others and remove their AWSSSO provider if it is not yours.`);
+  if (idc?.primary && key !== idc.primary) f('idc-other', 'high', `Most of your accounts trust ${name(idc.primary)}; this is ${name(key)}. It may be an account instance turned on inside this account, or another organisation's.`);
+}
+
 /** All edges of one role. `ctx` knows which AWS accounts are connected, and what was seen entering the role. */
 export function edgesOf(role, ctx) {
   const own = role.aws_account_id;
@@ -93,7 +115,10 @@ export function edgesOf(role, ctx) {
         const pv = providerOf(p.raw);
         const isSaml = pv.kind === 'saml' || st.actions.some((a) => /AssumeRoleWithSAML/i.test(a));
         Object.assign(e, { type: isSaml ? 'saml' : 'oidc', group: isSaml ? 'saml' : 'oidc', source: pv.label, provider: pv.host || p.raw });
-        if (isSaml) { if (!has(/^SAML:aud$/i)) f('saml-no-aud', 'low', 'Add SAML:aud = https://signin.aws.amazon.com/saml so assertions meant for other apps are refused.'); }
+        if (isSaml) {
+          if (!has(/^SAML:aud$/i)) f('saml-no-aud', 'low', 'Add SAML:aud = https://signin.aws.amazon.com/saml so assertions meant for other apps are refused.');
+          identityCenterEdge(e, f, p.raw, role, ctx);
+        }
         else {
           const subs = conds.filter((c) => /:sub$/i.test(c.key) || /^accounts\.google\.com:(sub|oaud)$/i.test(c.key));
           if (!subs.length) f('oidc-no-sub', pv.noSubSeverity || 'high', pv.label === 'GitHub Actions' ? 'Any GitHub repository in the world can get a token for this role. Pin token.actions.githubusercontent.com:sub to your repo and branch.'
@@ -240,7 +265,11 @@ export async function trustMap(user, q = '', { limit = 500 } = {}) {
   const complete = new Set([...hist].filter(([, v]) => v.complete).map(([k]) => k));
   const states = (await query('SELECT account_id, status FROM cloud_accounts')).rows;
   const windowDays = new Map([...hist].filter(([, v]) => v.backTo).map(([k, v]) => [k, Math.max(1, Math.round((Date.now() - new Date(v.backTo)) / 864e5))]));
-  const ctx = { connected, seen, complete, windowDays, accountState: new Map(states.map((a) => [a.account_id, a.status])) };
+  // SAML providers of every account, not only the viewer's: which Identity Center is the organisation's is decided
+  // across the estate
+  const samlRows = (await query('SELECT account_id, arn, name, issuer FROM saml_providers')).rows;
+  const ctx = { connected, seen, complete, windowDays, accountState: new Map(states.map((a) => [a.account_id, a.status])),
+    saml: new Map(samlRows.map((x) => [`${x.account_id}|${x.arn}`, x])), idc: identityCenters(samlRows) };
   const all = roles.flatMap((r) => edgesOf(r, ctx));
   const terms = parseQuery(q);
   const rows = all.filter((e) => matchesQuery(e, terms))

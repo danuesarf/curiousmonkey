@@ -10,6 +10,7 @@ export const SCANNER_ALLOW = [
   'iam:ListRoles', 'iam:GetRole', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'iam:GetPolicy', 'iam:GetPolicyVersion',
   'iam:GenerateServiceLastAccessedDetails', 'iam:GetServiceLastAccessedDetails', 'cloudtrail:LookupEvents', 'cloudtrail:DescribeTrails',
   'cloudtrail:GetEventSelectors', 'cloudtrail:ListEventDataStores', 'organizations:DescribeOrganization',
+  'iam:ListSAMLProviders', 'iam:GetSAMLProvider',   // which IdP, or IAM Identity Center instance, each SAML provider is
 ];
 const DENY_DATA = [
   'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:Scan', 'secretsmanager:GetSecretValue',

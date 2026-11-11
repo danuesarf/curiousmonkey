@@ -3,7 +3,7 @@
 // de-duplication logic be tested honestly.
 import crypto from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { buildEstate, MANAGED } from './estate.js';
+import { buildEstate, MANAGED, samlProvidersOf } from './estate.js';
 import { trailDayPrefix } from '../aws/trailKeys.js';
 
 const h32 = (s) => parseInt(crypto.createHash('sha1').update(s).digest('hex').slice(0, 8), 16);
@@ -92,6 +92,12 @@ export function demoGateway(account) {
   return {
     mode: 'demo',
     async verify() { return { ok: true, accountId: acct, arn: account.role_arn }; },
+    async listSamlProviders() {
+      calls++;
+      // DEMO_SAML_DENIED=1: answer as AWS does for a scanner role created before it could read SAML providers
+      if (process.env.DEMO_SAML_DENIED) throw Object.assign(new Error('User is not authorized to perform: iam:ListSAMLProviders'), { name: 'AccessDenied' });
+      return samlProvidersOf(acct);
+    },
     async listRoles() {
       return estate.map((r) => ({ arn: r.arn, name: r.name, path: r.path, createDate: new Date(demoNow() - 400 * DAY), trustPolicy: r.trust, boundaryArn: null }));
     },

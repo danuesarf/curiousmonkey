@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **IAM Identity Center as one source.** Every account's `AWSSSO_<id>_DO_NOT_DELETE` SAML provider is matched to its Identity Center instance by the issuer in its metadata, and the Trust map and Space draw each instance once, with the account it is managed from.
+- **Warnings for a second Identity Center.** An account that trusts more than one instance, or an instance other than the one most of your accounts use, is a high finding (`finding:idc-multiple`, `finding:idc-other`). Either can mean an account instance turned on inside a member account, or another organisation's.
+- **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
+
+### Changed
+- The scanner policy now includes `iam:ListSAMLProviders` and `iam:GetSAMLProvider` (metadata only). Existing scanner roles keep working without them; until they are added, Identity Center instances are grouped as one and marked "instance not read yet".
+- Events and Space are much faster on large estates (tens of millions of calls); two indexes are built without blocking writes on first start.
+
 ## 0.1.0 · 2026-11-09
 
 The first release of **Curious Monkey**: see what every IAM role in every AWS account really uses, who can get into it, and cut it down to least privilege with evidence. Self-hosted and read-only.

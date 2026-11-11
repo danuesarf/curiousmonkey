@@ -47,6 +47,11 @@ test('a full scan inventories roles of every kind and records who used them', as
   assert.equal(roles.find((r) => r.name.startsWith('AWSReservedSSO_')).kind, 'identity-center');
   const t = await totals(A);
   assert.ok(t.calls > 1000, `expected many calls, got ${t.calls}`);
+  // its SAML providers are stored with the issuer from their metadata
+  const saml = (await db.query(`SELECT name, issuer FROM saml_providers WHERE account_id=$1`, [A])).rows;
+  assert.equal(saml.length, 1);
+  assert.match(saml[0].name, /^AWSSSO_[0-9a-f]{16}_DO_NOT_DELETE$/);
+  assert.match(saml[0].issuer, /^https:\/\/portal\.sso\.ap-southeast-1\.amazonaws\.com\/saml\/assertion\//);
 });
 
 test('inline and attached policies are both analysed', async () => {
@@ -210,4 +215,17 @@ test('a worker lost mid-run makes the next attempt read in smaller slices', asyn
   const after = (await db.query(`SELECT options, progress, status FROM scan_jobs WHERE id=$1`, [job.id])).rows[0];
   assert.equal(after.status, 'succeeded');
   assert.equal(Number(after.options.sliceHours), 3);
+});
+
+test('a scanner role that cannot read SAML providers keeps what was stored and says what to add', async () => {
+  const stored = async () => (await db.query(`SELECT count(*)::int n FROM saml_providers WHERE account_id=$1`, [A])).rows[0].n;
+  const before = await stored();
+  process.env.DEMO_SAML_DENIED = '1';           // the demo answers AccessDenied, as AWS does for an older scanner role
+  const run = await q.enqueueRun(A);
+  try { await drain(); } finally { delete process.env.DEMO_SAML_DENIED; }
+  assert.equal((await q.runDetail(run)).run.status, 'succeeded');
+  assert.equal(await stored(), before);
+  const logged = (await db.query(`SELECT l.message FROM scan_job_log l JOIN scan_jobs j ON j.id = l.job_id WHERE j.run_id=$1 AND l.message LIKE '%SAML providers%'`, [run])).rows;
+  assert.equal(logged.length, 1);
+  assert.match(logged[0].message, /iam:ListSAMLProviders and iam:GetSAMLProvider/);
 });

@@ -3,7 +3,8 @@
 import { STSClient, AssumeRoleCommand, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import { IAMClient, ListRolesCommand, GetRoleCommand, ListRolePoliciesCommand, GetRolePolicyCommand,
   ListAttachedRolePoliciesCommand, GetPolicyCommand, GetPolicyVersionCommand,
-  GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand } from '@aws-sdk/client-iam';
+  GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand, ListSAMLProvidersCommand, GetSAMLProviderCommand } from '@aws-sdk/client-iam';
+import { samlIssuer } from '../identityCenter.js';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
 import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
@@ -51,6 +52,15 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       } while (Marker);
       return roles.map((x) => ({ arn: x.Arn, awsId: x.RoleId || null, name: x.RoleName, path: x.Path, createDate: x.CreateDate,
         trustPolicy: decode(x.AssumeRolePolicyDocument), boundaryArn: x.PermissionsBoundary?.PermissionsBoundaryArn || null }));
+    },
+    async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
+      const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];
+      const out = [];
+      for (const p of list) {
+        const d = await iam.send(new GetSAMLProviderCommand({ SAMLProviderArn: p.Arn }));
+        out.push({ arn: p.Arn, name: p.Arn.split('/').pop(), issuer: samlIssuer(d.SAMLMetadataDocument), createdAt: p.CreateDate || d.CreateDate || null });
+      }
+      return out;
     },
     async getRoleDetail(name) {   // ListRoles omits last-used and tags
       const r = (await iam.send(new GetRoleCommand({ RoleName: name }))).Role;

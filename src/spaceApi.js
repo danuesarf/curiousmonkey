@@ -31,7 +31,8 @@ async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12 } = {}
     if (!OUTSIDE.has(e.group) || !accountIds.has(e.accountId) || (roleIds && !roleIds.has(e.roleId))) continue;
     const key = /account/.test(e.group) ? `acct:${e.principalAccount || e.source}` : `${e.group}:${e.source}`;
     if (!by.has(key)) by.set(key, { key, group: e.group, label: /account/.test(e.group) ? `Account ${e.principalAccount || e.source}` : e.source,
-      sub: e.group === 'public' ? 'anyone · Principal "*"' : e.group === 'external-account' ? (e.principalAccountName || 'not in your org') : e.group.toUpperCase(),
+      sub: e.group === 'public' ? 'anyone · Principal "*"' : e.group === 'external-account' ? (e.principalAccountName || 'not in your org')
+        : e.identityCenter ? `SAML · ${e.identityCenter.managedFrom ? `managed from ${e.identityCenter.managedFrom}` : e.identityCenter.key === 'unknown' ? 'instance not read yet' : e.identityCenter.region}` : e.group.toUpperCase(),
       worst: 'none', findings: new Set(), targets: new Map(), sessions: 0, lastSeen: null });
     const s = by.get(key);
     if ((SEV[e.worst] ?? 4) < (SEV[s.worst] ?? 4)) s.worst = e.worst;

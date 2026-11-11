@@ -1,4 +1,5 @@
 // A small invented AWS estate used by AWS_MODE=demo and by the tests. Nothing here is real.
+import crypto from 'node:crypto';
 const P = (stmts) => ({ Version: '2012-10-17', Statement: stmts });
 const A = (Action, Resource = '*', extra = {}) => ({ Effect: 'Allow', Action, Resource, ...extra });
 
@@ -8,6 +9,18 @@ export const MANAGED = {
   'arn:aws:iam::aws:policy/aws-service-role/AmazonECSServiceRolePolicy': P([A(['ec2:Describe*', 'elasticloadbalancing:Describe*', 'elasticloadbalancing:RegisterTargets', 'elasticloadbalancing:DeregisterTargets'])]),
   'arn:aws:iam::aws:policy/PowerUserAccess': P([{ Effect: 'Allow', NotAction: ['iam:*', 'organizations:*', 'account:*'], Resource: '*' }]),
 };
+
+// IAM Identity Center: every account gets its own AWSSSO_<id>_DO_NOT_DELETE provider, all issued by the one
+// organisation instance (managed from an invented account). The staging demo account also has an account instance
+// of its own turned on, so the "more than one Identity Center" warning has something to show.
+const hex = (s, n) => crypto.createHash('sha1').update(s).digest('hex').slice(0, n);
+const issuerFor = (home, ins) => `https://portal.sso.ap-southeast-1.amazonaws.com/saml/assertion/${Buffer.from(`${home}_ins-${ins}`).toString('base64')}`;
+export const ssoProviderName = (acct, which = 'org') => `AWSSSO_${hex(`${which}${acct}`, 16)}_DO_NOT_DELETE`;
+export function samlProvidersOf(acct) {
+  const out = [{ name: ssoProviderName(acct), issuer: issuerFor('999900001111', 'a1b2c3d4e5f60718') }];
+  if (acct.endsWith('2')) out.push({ name: ssoProviderName(acct, 'local'), issuer: issuerFor(acct, hex(`local${acct}`, 16)) });
+  return out.map((p) => ({ ...p, arn: `arn:aws:iam::${acct}:saml-provider/${p.name}`, createdAt: new Date('2025-03-01T00:00:00Z') }));
+}
 
 export function buildEstate(acct) {
   const arn = (name, path = '/') => `arn:aws:iam::${acct}:role${path}${name}`;
@@ -64,7 +77,7 @@ export function buildEstate(acct) {
               { p: 'svc:ecs', src: 'elasticloadbalancing.amazonaws.com', name: 'RegisterTargets', perHour: 1 }],
       advisor: { ec2: 0, elasticloadbalancing: 0 } },
     { name: 'AWSReservedSSO_PlatformEngineer_3f1c9a', path: '/aws-reserved/sso.amazonaws.com/', kind: 'identity-center', permissionSet: 'PlatformEngineer',
-      trust: P([{ Effect: 'Allow', Action: ['sts:AssumeRoleWithSAML', 'sts:TagSession'], Principal: { Federated: `arn:aws:iam::${acct}:saml-provider/AWSSSO_abc_DO_NOT_DELETE` }, Condition: { StringEquals: { 'SAML:aud': 'https://signin.aws.amazon.com/saml' } } }]),
+      trust: P([{ Effect: 'Allow', Action: ['sts:AssumeRoleWithSAML', 'sts:TagSession'], Principal: { Federated: `arn:aws:iam::${acct}:saml-provider/${ssoProviderName(acct)}` }, Condition: { StringEquals: { 'SAML:aud': 'https://signin.aws.amazon.com/saml' } } }]),
       inline: [], attached: ['arn:aws:iam::aws:policy/PowerUserAccess'],
       principals: [{ key: 'sso:dewi@acme', type: 'SAMLUser', federated: true, hours: [2, 3, 4, 5], sessions: 'day', days: [1, 2, 3, 4, 5] }],
       usage: [{ p: 'sso:dewi@acme', src: 'eks.amazonaws.com', name: 'DescribeCluster', perHour: 3 },

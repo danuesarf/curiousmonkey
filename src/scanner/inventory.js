@@ -91,8 +91,26 @@ export async function runInventory(ctx) {
   // roles that disappeared keep their history but stop being analysed
   await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, seen]);
 
+  // SAML providers and who issues for them: tells IAM Identity Center instances apart. A scanner role created before
+  // iam:ListSAMLProviders / iam:GetSAMLProvider were part of its policy cannot read them: keep what is stored and say so.
+  if (gw.listSamlProviders) {
+    try {
+      const providers = await gw.listSamlProviders();
+      await tx(async (c) => {
+        await c.query('DELETE FROM saml_providers WHERE account_id=$1 AND NOT (arn = ANY($2))', [account.id, providers.map((p) => p.arn)]);
+        for (const p of providers) await c.query(
+          `INSERT INTO saml_providers(account_id, arn, name, issuer, created_at, seen_at) VALUES ($1,$2,$3,$4,$5,now())
+           ON CONFLICT (account_id, arn) DO UPDATE SET name=EXCLUDED.name, issuer=EXCLUDED.issuer, created_at=EXCLUDED.created_at, seen_at=now()`,
+          [account.id, p.arn, p.name, p.issuer, p.createdAt]);
+      });
+    } catch (e) {
+      if (!/AccessDenied|not authorized/i.test(`${e.name} ${e.message}`)) throw e;
+      ctx.log('cannot read SAML providers: add iam:ListSAMLProviders and iam:GetSAMLProvider to the scanner role so IAM Identity Center instances can be told apart', null, 'warn');
+    }
+  }
+
   // buckets and other resources that have data events turned on
-  const found = await gw.discoverDataEvents().catch((e) => { ctx.log(`data event discovery failed: ${e.message}`, null, 'warn'); return []; });
+  const found =await gw.discoverDataEvents().catch((e) => { ctx.log(`data event discovery failed: ${e.message}`, null, 'warn'); return []; });
   await tx(async (c) => {
     await c.query('DELETE FROM data_event_sources WHERE account_id=$1', [account.id]);
     for (const f of found) {

@@ -10,6 +10,7 @@
 import { h, svg, get, num, ago } from '../lib.js';
 import { go } from '../main.js';
 import { trackView } from './track.js';
+import { related, FADE } from './spaceRelated.js';
 
 const W = 1000, H = 900;
 // one colour per environment, checked together with every pair compared (colour-blind ΔE ≥ 10, normal vision ≥ 17).
@@ -183,7 +184,9 @@ export async function spacePage(ctx) {
   const bar = h('div', { class: 'space-timeline' });
   const scene = h('div', { class: 'scene space-scene' }, h('div', { class: 'space-stage' }, box, hud, cam), bar);
   const page = h('div', { class: 'stack space-page', style: 'gap:0' }, h('div', { class: 'scene-layout space-layout' }, left, scene, right));
-  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; } Object.assign(st, patch); render(); };
+  // the page opens with something described in the sidebar but the whole scene lit; once the user picks something,
+  // everything not connected to it fades so what belongs to what is plain
+  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
   ctx.onLeave(() => { stop(); closeTrack(); });
 
@@ -274,6 +277,8 @@ export async function spacePage(ctx) {
   function render() {
     const hour = st.hour, sel = st.sel, motion = !still() && !st.dragging, focus = M.view === 'estate' ? st.zone : '';
     const dimOf = (env) => (!focus ? 1 : focus === 'outer' ? 0.3 : env === focus ? 1 : 0.22);
+    const rel = st.lit && sel ? related(M, sel) : null;
+    const fade = (...ids) => (!rel || ids.some((x) => rel.has(x)) ? 1 : FADE);
     // where every path starts and ends
     const ent = new Map();
     for (const g of M.groups) ent.set(g.id, { p3: [g.x, g.y, 22], env: g.env });
@@ -314,7 +319,7 @@ export async function spacePage(ctx) {
     const selRole = M.view === 'account' ? M.byRole.get(sel) : null;
     const cands = [];
     for (const g of M.groups) {
-      const E = ENV[g.env], dim = dimOf(g.env), c = P(g.x, g.y, 0), rx = g.R * 1.8 * c[3];
+      const E = ENV[g.env], dim = dimOf(g.env) * fade(g.id), c = P(g.x, g.y, 0), rx = g.R * 1.8 * c[3];
       const a0 = -Math.PI / 2, act = (1 - g.coldShare) * Math.PI * 2;
       if (g.planned) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, 0, Math.PI * 2, 48), fill: E.base, 'fill-opacity': 0.05, stroke: E.hot, 'stroke-width': 1.3, 'stroke-dasharray': '3 5', opacity: o2(0.85 * dim) }));
       else out.halo.push(svg('ellipse', { cx: f(c[0]), cy: f(c[1]), rx: f(rx), ry: f(rx * sinEl), fill: `url(#sp-h-${g.env})`, opacity: o2((0.08 + 0.64 * Math.sqrt(g.prof[hour] / maxHour)) * dim) }));
@@ -325,8 +330,9 @@ export async function spacePage(ctx) {
       if (g.planned) { const q = P(g.x, g.y, 0); bx0 = bx1 = q[0]; by0 = by1 = q[1]; }
       g.stars.forEach((s, i) => {
         const p = P(s.x, s.y, s.z), lv = lg(s.calls7) / maxLog, k = Math.max(0.72, p[3] / ref) * k0;
-        out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f((s.cold ? 1 : 0.8 + 0.42 * lg(s.calls7)) * k), fill: s.cold ? COLD : lv > 0.8 ? E.hot : lv > 0.45 ? E.base : E.dim, opacity: o2((s.cold ? 0.7 : 0.95) * dim), filter: !s.cold && i < 3 && dim === 1 ? 'url(#sp-glow)' : null })]);
-        if (!s.cold && i < (M.view === 'account' ? 6 : 3)) { const b = P(s.x, s.y, 0); out.stems.push(svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(p[0]), y2: f(p[1]), stroke: E.base, 'stroke-width': 0.8, opacity: o2(0.4 * dim) })); }
+        const sd = M.view === 'account' ? dimOf(g.env) * fade(s.id) : dim;
+        out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f((s.cold ? 1 : 0.8 + 0.42 * lg(s.calls7)) * k), fill: s.cold ? COLD : lv > 0.8 ? E.hot : lv > 0.45 ? E.base : E.dim, opacity: o2((s.cold ? 0.7 : 0.95) * sd), filter: !s.cold && i < 3 && sd === 1 ? 'url(#sp-glow)' : null })]);
+        if (!s.cold && i < (M.view === 'account' ? 6 : 3)) { const b = P(s.x, s.y, 0); out.stems.push(svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(p[0]), y2: f(p[1]), stroke: E.base, 'stroke-width': 0.8, opacity: o2(0.4 * sd) })); }
         bx0 = Math.min(bx0, p[0]); by0 = Math.min(by0, p[1]); bx1 = Math.max(bx1, p[0]); by1 = Math.max(by1, p[1]); topZ = Math.max(topZ, s.z);
       });
       const t = P(g.x, g.y, topZ + 10), fp = [P(g.x - g.R, g.y), P(g.x + g.R, g.y), P(g.x, g.y - g.R), P(g.x, g.y + g.R)];
@@ -336,7 +342,7 @@ export async function spacePage(ctx) {
       out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
         svg('circle', { cx: f(hc[0]), cy: f(hc[1]), r: f(Math.max(16, g.R * c[3] * 1.15)), fill: '#000', opacity: 0 })));
       const isSel = M.view === 'estate' ? sel === g.id : selRole?.cluster === g;
-      cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0) + (g.planned ? -200 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : g.planned ? '#8d9a93' : E.base, pick: pick(target), below: fp[2][1] - t[1] + 14 });
+      cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0) + (g.planned ? -200 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : g.planned ? '#8d9a93' : E.base, faded: dim < 0.5, pick: pick(target), below: fp[2][1] - t[1] + 14 });
       if (M.view === 'estate' && sel === g.id) {
         const x0 = Math.min(bx0, ...fp.map((q) => q[0])) - 6, y0 = Math.min(by0, t[1]) - 6, x1 = Math.max(bx1, ...fp.map((q) => q[0])) + 6, y1 = Math.max(by1, ...fp.map((q) => q[1])) + 6, q = 9;
         out.marks.push(svg('path', { d: ring3(g.x, g.y, g.R * 1.16, 0, Math.PI * 2, 56), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
@@ -349,27 +355,27 @@ export async function spacePage(ctx) {
         out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(r.id) }, svg('title', null, `${pretty(r.name).label} · ${kfmt(r.calls7)} calls in 7 days`), svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 7, fill: '#000', opacity: 0 })));
         if (sel === r.id) { out.marks.push(svg('path', { d: glyph('account', p[0], p[1], 9), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 })); out.marks.push(svg('path', { d: ring3(r.cluster.x, r.cluster.y, r.cluster.R * 1.12, 0, Math.PI * 2, 56), fill: 'none', stroke: '#fff', 'stroke-width': 1.1, opacity: 0.55 })); }
       }
-      for (const s of M.rim) { const p = P(s.x, s.y, 0); out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f(2.1 * Math.max(0.72, p[3] / ref)), fill: '#8d9a93', opacity: 0.85 })]); }
+      for (const s of M.rim) { const p = P(s.x, s.y, 0); out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f(2.1 * Math.max(0.72, p[3] / ref)), fill: '#8d9a93', opacity: o2(0.85 * (rel ? FADE : 1)) })]); }
       for (const t of M.towers) {
         const b = P(t.x, t.y, 0), tp = P(t.x, t.y, t.h), k = Math.max(0.72, tp[3] / ref);
-        out.towers.push(svg('g', null, svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(b[0]), y2: f(tp[1]), stroke: '#9cc7b4', 'stroke-width': f(1.4 * k), opacity: 0.55 }),
+        out.towers.push(svg('g', { opacity: fade(t.id) }, svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(b[0]), y2: f(tp[1]), stroke: '#9cc7b4', 'stroke-width': f(1.4 * k), opacity: 0.55 }),
           svg('ellipse', { cx: f(b[0]), cy: f(b[1]), rx: f(9 * k), ry: f(9 * k * sinEl), fill: 'none', stroke: '#9cc7b4', 'stroke-width': 0.9, opacity: 0.6 }),
           svg('path', { d: glyph('service', tp[0], tp[1], 6 * k), fill: '#eef7f2', stroke: '#fff', 'stroke-width': 0.6, filter: 'url(#sp-glow)' }),
           t.denied ? svg('circle', { cx: f(tp[0]), cy: f(tp[1]), r: f(11 * k), fill: 'none', stroke: RED, 'stroke-width': 1.4, class: 'sp-pulse' }) : null));
         out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(t.id) }, svg('title', null, `${t.name} · ${kfmt(t.calls)} calls in 7 days${t.denied ? ` · ⚠ ${num(t.denied)} refused` : ''}`), svg('circle', { cx: f(tp[0]), cy: f(tp[1]), r: 14, fill: '#000', opacity: 0 })));
         tops.set(t.id, tp);
-        cands.push({ pr: 1500 + lg(t.calls) * 40 + (sel === t.id ? 3000 : 0), x: tp[0], y: tp[1] - 4, text: t.name, color: '#9cc7b4', pick: pick(t.id), below: 26 });
+        cands.push({ pr: 1500 + lg(t.calls) * 40 + (sel === t.id ? 3000 : 0) - (fade(t.id) < 1 ? 1400 : 0), x: tp[0], y: tp[1] - 4, text: t.name, color: '#9cc7b4', faded: fade(t.id) < 1, pick: pick(t.id), below: 26 });
         if (sel === t.id) out.marks.push(svg('path', { d: glyph('account', tp[0], tp[1], 11), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
       }
       for (const g of M.gates) {
         const c = P(g.x, g.y, 0), k = Math.max(0.75, c[3] / ref), col = g.risk === 'high' ? RED : g.risk === 'medium' ? WARN : '#d5dceb', on = sel === g.src;
-        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(g.src) }, svg('title', null, `${g.roles.length} roles can be entered from here · click for the list`),
+        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(g.src), opacity: fade(g.id, g.src) }, svg('title', null, `${g.roles.length} roles can be entered from here · click for the list`),
           svg('path', { d: glyph('saml', c[0], c[1], 7 * k), fill: '#03100b', stroke: col, 'stroke-width': on ? 2 : 1.3 }),
           svg('text', { x: f(c[0]), y: f(c[1] + 4 * k), 'text-anchor': 'middle', fill: col, class: 'sp-small', style: 'font-size:9px' }, String(g.roles.length))));
       }
       for (const n of M.fars) {
         const E = ENV[n.env], c = P(n.x, n.y, 0), id = `far:${n.id}`;
-        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(id) }, svg('title', null, `${n.name} · neighbouring account`), svg('path', { d: ring3(n.x, n.y, 40, 0, Math.PI * 2, 36), fill: E.base, 'fill-opacity': 0.12, stroke: E.base, 'stroke-width': 1.3 }),
+        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(id), opacity: fade(id) }, svg('title', null, `${n.name} · neighbouring account`), svg('path', { d: ring3(n.x, n.y, 40, 0, Math.PI * 2, 36), fill: E.base, 'fill-opacity': 0.12, stroke: E.base, 'stroke-width': 1.3 }),
           svg('text', { x: f(c[0]), y: f(c[1] + 40 * c[3] * sinEl + 16), 'text-anchor': 'middle', fill: E.hot, class: 'sp-small' }, n.name)));
         tops.set(id, P(n.x, n.y, 10));
         if (sel === id) out.marks.push(svg('path', { d: ring3(n.x, n.y, 50, 0, Math.PI * 2, 40), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
@@ -404,6 +410,8 @@ export async function spacePage(ctx) {
       else if (l.kind === 'scan') { color = CM; w = 1.1; dash = '1.5 4'; o = t || now ? 0.95 : 0.3; flow = now ? 1 : 0; }
       else if (l.kind === 'in' || l.kind === 'out') { color = ENV[(ent.get(l.kind === 'in' ? l.from : l.to)).env]?.base || OUT; w = 1.3; o = t ? 0.95 : 0.45; flow = t ? 2 : 1; }
       if (!show) continue;
+      const on = !rel || rel.has(l.id);
+      if (!on) { o *= FADE; flow = 0; flag = null; }
       if (focus && focus !== 'outer' && a.env !== focus && b.env !== focus) o *= 0.25;
       if (focus === 'outer' && a.env !== 'outer' && b.env !== 'outer') o *= 0.25;
       const g3 = arc3(a.p3, b.p3, l.from < l.to ? 1 : -1, P, liftOf(l, a.p3, b.p3));
@@ -411,7 +419,7 @@ export async function spacePage(ctx) {
       // every path but the per-cluster service bundles can be clicked: a wide invisible stroke along it
       const ext = /^ext/.test(l.kind), mid = g3.pts[ext ? 6 : 12];
       tops.set(l.id, mid);
-      if (l.kind !== 'use' && l.kind !== 'fan' && o > 0.15) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
+      if (l.kind !== 'use' && l.kind !== 'fan' && (o > 0.15 || (rel && !on && o > 0.15 * FADE))) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
         svg('title', null, linkTitle(l))));
       if (sel === l.id) out.marks.push(svg('circle', { cx: f(mid[0]), cy: f(mid[1]), r: 6, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
       if (cut < 1 && t) { const q = g3.pts[Math.round(cut * 24)]; out.sparks.push(svg('g', null, svg('circle', { cx: f(q[0]), cy: f(q[1]), r: 5, fill: 'none', stroke: RED, 'stroke-width': 1.4, class: 'sp-pulse' }))); }
@@ -437,7 +445,7 @@ export async function spacePage(ctx) {
     }
     for (const { s, p, g0, k, size } of sats) {
       const [anchor, lx, ly] = s.place, ring = s.risk === 'high' ? RED : s.risk === 'medium' ? WARN : null;
-      out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(s.id), opacity: focus && focus !== 'outer' ? 0.35 : 1 },
+      out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(s.id), opacity: (focus && focus !== 'outer' ? 0.35 : 1) * fade(s.id) },
         svg('title', null, `${s.label} · ${s.sub}${s.findings.length ? ` · ${s.findings.join('; ')}` : ''}`),
         svg('line', { x1: f(p[0]), y1: f(p[1]), x2: f(g0[0]), y2: f(g0[1]), stroke: '#8b98ad', 'stroke-width': 0.8, 'stroke-dasharray': '1.5 3.5' }),
         svg('ellipse', { cx: f(g0[0]), cy: f(g0[1]), rx: f(7 * k), ry: f(7 * k * sinEl), fill: 'none', stroke: '#8b98ad', 'stroke-width': 0.8, opacity: 0.7 }),
@@ -457,7 +465,7 @@ export async function spacePage(ctx) {
       for (const tr of tries) { const x0 = tr[0] === 'start' ? tr[1] : tr[0] === 'end' ? tr[1] - w : tr[1] - w / 2, r = [x0, tr[2] - 11, x0 + w, tr[2] + 17]; if (fits(r)) { pl = tr; blocks.push(r); break; } }
       blocks.push([p[0] - 16, p[1] - 16, p[0] + 16, p[1] + 16]);
       if (on) out.marks.push(svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 17, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
-      out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(CM_ID), opacity: focus ? 0.4 : 1 },
+      out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(CM_ID), opacity: (focus ? 0.4 : 1) * fade(CM_ID) },
         svg('title', null, `Curious Monkey · this portal's scanner${today ? ` · reading ${today} account${today === 1 ? '' : 's'} in this hour` : ''} · click for where it reads`),
         svg('line', { x1: f(p[0]), y1: f(p[1]), x2: f(g0[0]), y2: f(g0[1]), stroke: CM, 'stroke-width': 0.8, 'stroke-dasharray': '1.5 3.5', opacity: 0.7 }),
         svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 16, fill: '#000', opacity: 0 }),
@@ -485,6 +493,7 @@ export async function spacePage(ctx) {
         blocks.push(r);
         out.labels.push(svg('g', { class: 'sp-hit', onClick: c.pick }, svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.color, 'stroke-width': 0.8, opacity: 0.7 }),
           svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: 20, rx: 3, fill: '#03100b', 'fill-opacity': 0.88, stroke: c.color }), svg('text', { x: f(cx), y: f(cy + 3.6), 'text-anchor': 'middle', fill: '#e3efe8', class: 'sp-pill' }, c.text)));
+        if (c.faded && rel) out.labels[out.labels.length - 1].setAttribute('opacity', FADE + 0.15);
         break;
       }
     }
