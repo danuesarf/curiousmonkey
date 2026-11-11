@@ -26,19 +26,44 @@ spec:
           readinessProbe: { exec: { command: [pg_isready, -U, cm, -d, cm] }, periodSeconds: 5 }
           livenessProbe: { exec: { command: [pg_isready, -U, cm, -d, cm] }, initialDelaySeconds: 30, periodSeconds: 20, failureThreshold: 6 }
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
-          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { cpu: "2", memory: 1Gi } }
+          # Sized for tens of millions of stored calls. Space and Events re-read the last day or week of sessions and
+          # activity on every load, so that working set has to stay in memory; the rest of the pod's memory is the
+          # OS page cache. Keep shared_buffers about 1/4 and effective_cache_size about 3/4 of the memory limit.
+          args:
+            - -c
+            - shared_buffers=2GB
+            - -c
+            - effective_cache_size=6GB
+            - -c
+            - work_mem=16MB
+            - -c
+            - maintenance_work_mem=512MB
+            - -c
+            - random_page_cost=1.1            # SSD (gp3); the default 4 assumes spinning disks and prefers sequential scans
+            - -c
+            - effective_io_concurrency=200
+            - -c
+            - max_wal_size=4GB                # fewer forced checkpoints while the worker backfills history
+            - -c
+            - checkpoint_completion_target=0.9
+          resources: { requests: { cpu: 500m, memory: 8Gi }, limits: { cpu: "2", memory: 8Gi } }
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }
             - { name: run, mountPath: /var/run/postgresql }     # socket and lock files
             - { name: tmp, mountPath: /tmp }
+            - { name: shm, mountPath: /dev/shm }               # parallel queries share memory here; the container default is 64 MB
       volumes:
         - { name: run, emptyDir: {} }
         - { name: tmp, emptyDir: {} }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 1Gi } }
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:
         accessModes: [ReadWriteOnce]
-        resources: { requests: { storage: 20Gi } }
+        # On EKS use a gp3 class (3,000 IOPS / 125 MB/s at any size). gp2 gives 3 IOPS per GiB once its burst credits run
+        # out, which a first history backfill always does: 300 IOPS at 100 GiB, and every page feels like it hangs.
+        # storageClassName: gp3
+        resources: { requests: { storage: 100Gi } }
 ---
 apiVersion: v1
 kind: Service
