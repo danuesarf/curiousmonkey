@@ -12,8 +12,10 @@ const SESSION_COLS = `s.id, s.account_id, s.role_id, s.access_key_id, s.parent_k
 const FROM = `FROM track_sessions s JOIN roles r ON r.id=s.role_id JOIN cloud_accounts a ON a.id=s.account_id LEFT JOIN principals p ON p.id=s.principal_id`;
 
 /** Sessions to pick from, newest first. A session that started a jump says so. */
-export async function listSessions(user, { accountId, roleId, limit = 50 } = {}) {
+// `fromAccountId`: only sessions entered from a session in that account (role chaining across accounts).
+export async function listSessions(user, { accountId, roleId, fromAccountId, limit = 50 } = {}) {
   const p = [], where = [];
+  if (fromAccountId) { p.push(fromAccountId); where.push(`s.parent_key_id IS NOT NULL AND EXISTS (SELECT 1 FROM track_sessions pa WHERE pa.access_key_id = s.parent_key_id AND pa.account_id=$${p.length})`); }
   if (accountId) { p.push(accountId); where.push(`s.account_id=$${p.length}`); }
   if (roleId) { p.push(roleId); where.push(`s.role_id=$${p.length}`); }
   if (user.scope_accounts) { p.push(user.scope_accounts); where.push(`s.account_id = ANY($${p.length}::uuid[])`); }

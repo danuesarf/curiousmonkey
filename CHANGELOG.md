@@ -10,6 +10,10 @@
 - **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
 
 ### Changed
+- **Space, easier to read.** The right-hand panel now leads with one sentence, the key numbers, then who can get in (from outside your org and from your other accounts, separately) and where it goes. With nothing picked it shows an overview and what to check first. The legend is folded away.
+- **Windows instead of leaving the page.** Anything in Space that used to navigate away (calls, a role, the trust map, sessions) opens in a window over Space, marked with a window icon; it is loaded when opened and dropped when closed. Entries under "who can get in" and "where it goes" open the sessions or trust behind them.
+- **A bell in the top bar** lists what needs a look in the last 24 hours, on every page.
+- **Move the view** in Space: Shift+drag, right-drag, a sideways swipe, the arrow keys or the Move buttons.
 - **Events and Space rebuilt for large estates.** Two small tables are written as calls arrive: how many calls of each kind every role made in each hour, and which sessions were active. A search now reads them first, so it skips hours with no match and reads only the sessions that can have one; a search with no match anywhere answers at once. On 20 million stored calls a rare search (`ssm:` denied over 7 days) went from 51 s to 0.5 s, and the first page from seconds to about 150 ms.
 - Calls stored before the upgrade are counted in the background, newest day first; Events says how far back it has got. Until then older hours are searched the previous way.
 - Space and the first page of Events are remembered for a few seconds in the API and refreshed in the background while someone is looking; the browser remembers both Space views, and fetches an account as soon as you pick it, so zooming in does not wait.

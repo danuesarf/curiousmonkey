@@ -180,3 +180,12 @@ test('once the rollups cover an account, its hours come from them: calls in the 
   const acct = await api.spaceAccount(owner, A);
   assert.equal(JSON.stringify(acct).includes('"hourStart"'), true);
 });
+
+test('sessions can be listed by the account they were entered from, for the window Space opens', async () => {
+  const { listSessions } = await import('../src/sessions.js');
+  const all = await listSessions(owner, { accountId: A }), fromStg = await listSessions(owner, { accountId: A, fromAccountId: B });
+  assert.ok(fromStg.length > 0 && fromStg.length < all.length);
+  assert.ok(fromStg.every((x) => x.isJump));
+  assert.ok((await listSessions(owner, { accountId: B, fromAccountId: A })).every((x) => x.isJump));
+  assert.equal((await listSessions(owner, { accountId: A, fromAccountId: A })).length, 0);       // chaining inside one account is not from another
+});

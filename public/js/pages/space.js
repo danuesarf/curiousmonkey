@@ -8,8 +8,7 @@
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in WIB); play steps through them.
 import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette } from '../lib.js';
-import { go } from '../main.js';
-import { trackView } from './track.js';
+import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
 
 const W = 1000, H = 900;
@@ -189,7 +188,11 @@ export async function spacePage(ctx) {
   const accountId = ctx.params.get('account') || [...(live.length ? live : est.accounts)].sort((a, b) => b.calls7 - a.calls7)[0].id;
   const M = view === 'estate' ? estateModel(est) : accountModel(await (wanted || getCached(`/space/account/${accountId}`)));
   ctx.setCrumbs(h('a', { href: '#/space' }, 'Space'), ...(view === 'account' ? [M.account.name] : []));
-  const st = { dir: 'both', sel: M.defaultSel, hour: M.events.find((e) => e.target === M.defaultSel)?.hour ?? 23, playing: false, az: -14, el: 33, zoom: 1.15, zone: '', timer: null, fit: null, dragging: false };
+  const st = { dir: 'both', sel: null, lit: false, hour: 23, playing: false, az: -14, el: 33, zoom: 1.15, px: 0, py: 0, zone: '', timer: null, fit: null, dragging: false };
+  // the bell (and links) can open Space on one thing at one hour; otherwise nothing is picked and the overview shows
+  { const want = ctx.params.get('sel'), hr = Number(ctx.params.get('hour'));
+    if (want && (M.view === 'estate' ? M.by.has(want) : M.byRole.has(want))) { st.sel = want; st.lit = true; }
+    if (ctx.params.get('hour') != null && hr >= 0 && hr <= 23) st.hour = Math.floor(hr); }
   const left = h('aside', { class: 'left' }), right = h('aside', { class: 'right' });
   const stage = svg('svg', { class: 'space-svg', viewBox: `0 0 ${W} ${H}`, role: 'img' });
   const box = h('div', { class: 'space-box' }, stage);
@@ -201,7 +204,7 @@ export async function spacePage(ctx) {
   // everything not connected to it fades so what belongs to what is plain
   const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; if (M.view === 'estate' && M.by.has(patch.sel) && !M.by.get(patch.sel).planned) getCached(`/space/account/${patch.sel}`).catch(() => {}); } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
-  ctx.onLeave(() => { stop(); closeTrack(); });
+  ctx.onLeave(() => stop());
 
   // ---------- sessions (Track): a role's sessions in the sidebar, replayed over the scene without leaving Space ----------
   const sessions = new Map();          // role id -> sessions, or 'loading'
@@ -213,55 +216,52 @@ export async function spacePage(ctx) {
     }
     return sessions.get(roleId);
   };
-  let trackOpen = null;
-  async function openTrack(opts, label) {
-    closeTrack();
-    stop(); st.playing = false;
-    const q = new URLSearchParams(Object.entries(opts).filter(([, v]) => v));
-    const body = h('div', { class: 'sp-track-body' }, h('p', { class: 'muted small', style: 'padding:20px' }, 'Loading sessions…'));
-    const close = h('button', { class: 'btn sm', onClick: () => closeTrack() }, 'Close');
-    const dlg = h('div', { class: 'sp-track', role: 'dialog', 'aria-modal': 'true', 'aria-label': `Sessions: ${label}` },
-      h('div', { class: 'sp-track-head' },
-        h('div', { class: 'stack', style: 'gap:2px;min-width:0' }, h('span', { class: 'eyebrow' }, 'TRACK · ONE SESSION, CALL BY CALL'), h('b', { class: 'sp-track-title' }, label)),
-        h('div', { class: 'row', style: 'gap:8px' }, h('a', { class: 'btn sm', href: `#/track?${q}` }, 'Open as a page'), close)),
-      body);
-    const onKey = (e) => { if (e.key === 'Escape') closeTrack(); };
-    document.addEventListener('keydown', onKey);
-    page.append(dlg); close.focus();
-    const mine = { dlg, onKey, v: null };
-    trackOpen = mine;
-    const v = await trackView({ ...opts, empty: h('button', { class: 'btn sm', onClick: () => closeTrack() }, 'Back to Space') });
-    if (trackOpen !== mine) { v.stop(); return; }
-    mine.v = v; body.replaceChildren(v.el);
-  }
-  function closeTrack() {
-    if (!trackOpen) return;
-    trackOpen.v?.stop(); document.removeEventListener('keydown', trackOpen.onKey); trackOpen.dlg.remove(); trackOpen = null;
-  }
+  // Anything that would leave Space opens in a window over it instead (sessions, calls, a role, the trust map).
+  // The window's page is fetched and built when it opens and dropped when it closes; Space stays as it was underneath.
+  const openWin = (hash, title, eyebrow) => { stop(); st.playing = false; ctx.openWindow(hash, { title, eyebrow }); };
+  const leaves = (href) => typeof href === 'string' && href.startsWith('#/') && !href.startsWith('#/space');
+  const openTrack = (opts, label) => openWin(`#/track?${new URLSearchParams(Object.entries(opts).filter(([, v]) => v))}`, label, 'TRACK · ONE SESSION, CALL BY CALL');
   const sessionItems = (roleId, label) => {
     const l = sessionsFor(roleId);
     return Array.isArray(l) ? l.map((x) => ({ label: x.sessionName || x.id.slice(0, 8), tone: x.denied ? 'bad' : null, value: num(x.calls),
       meta: [x.principal || x.callerArn || 'unknown caller', x.denied ? `⚠ ${num(x.denied)} denied` : null, x.hasJumps ? 'jumped into another role' : null, x.isJump ? 'jumped in' : null,
         x.startKnown ? ago(x.startedAt) : 'started earlier'].filter(Boolean).join(' · '),
-      onClick: () => openTrack({ role: roleId, session: x.id }, label) })) : [];
+      opens: true, onClick: () => openTrack({ role: roleId, session: x.id }, label) })) : [];
   };
 
   // drag to orbit: the framing is held while dragging, then refitted
+  const clampPan = (v, size) => Math.max(-size * 0.9 * st.zoom, Math.min(size * 0.9 * st.zoom, v));
   let drag = null;
   // the pointer is captured only once a drag has really started: capturing on press would send every click to the
   // scene itself instead of the thing under the pointer, and nothing could be clicked
-  stage.addEventListener('pointerdown', (ev) => { if (ev.button === 0) drag = { x: ev.clientX, y: ev.clientY, az: st.az, el: st.el, moved: false, id: ev.pointerId }; });
+  // plain drag orbits; Shift+drag, or dragging with the right or middle button, moves the view sideways and up and down
+  stage.addEventListener('pointerdown', (ev) => { if (ev.button <= 2) drag = { x: ev.clientX, y: ev.clientY, az: st.az, el: st.el, px: st.px, py: st.py, pan: ev.shiftKey || ev.button !== 0, moved: false, id: ev.pointerId }; });
+  stage.addEventListener('contextmenu', (ev) => ev.preventDefault());
   stage.addEventListener('pointermove', (ev) => {
     if (!drag) return; const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
     if (!drag.moved && Math.hypot(dx, dy) < 5) return;
     if (!drag.moved) { try { stage.setPointerCapture(drag.id); } catch { /* pointer already gone */ } }
     drag.moved = true; st.dragging = true;
+    if (drag.pan) {
+      const k = W / (stage.getBoundingClientRect().width || W);
+      st.px = clampPan(drag.px + dx * k, W); st.py = clampPan(drag.py + dy * k, H);
+      if (!drag.raf) drag.raf = requestAnimationFrame(() => { drag && (drag.raf = 0); render(); });
+      return;
+    }
     const az = Math.round(drag.az - dx * 0.35), el = Math.max(18, Math.min(70, Math.round(drag.el + dy * 0.2)));
     if (az !== st.az || el !== st.el) { st.az = az; st.el = el; if (!drag.raf) drag.raf = requestAnimationFrame(() => { drag && (drag.raf = 0); render(); }); }
   });
   const endDrag = () => { if (drag?.moved) { st.dragging = false; render(); setTimeout(() => { drag = null; }, 0); } else drag = null; };
   // zoom only when asked: the wheel, or the + and − buttons
-  stage.addEventListener('wheel', (ev) => { ev.preventDefault(); set({ zoom: Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015))) }); }, { passive: false });
+  // a sideways swipe (or Shift+wheel) moves the view left and right
+  stage.addEventListener('wheel', (ev) => { ev.preventDefault();
+    if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey) { set({ px: clampPan(st.px - (ev.deltaX || ev.deltaY) * 0.8, W) }); return; }
+    set({ zoom: Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015))) }); }, { passive: false });
+  stage.setAttribute('tabindex', '0');
+  stage.addEventListener('keydown', (ev) => {
+    const d = { ArrowLeft: [90, 0], ArrowRight: [-90, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[ev.key]; if (!d) return;
+    ev.preventDefault(); set({ px: clampPan(st.px + d[0], W), py: clampPan(st.py + d[1], H) });
+  });
   stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
   stage.addEventListener('click', (ev) => { if (drag?.moved) { ev.stopPropagation(); return; } if (ev.target === stage) set({ sel: null }); });
 
@@ -282,7 +282,7 @@ export async function spacePage(ctx) {
       st.fit = { D, F, top, bottom };
     }
     const F = st.fit.F * st.zoom, [ox, ou] = p(0, 0, 0);
-    const CX = W / 2 - F * ox, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou;
+    const CX = W / 2 - F * ox + st.px, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou + st.py;
     return (x, y, z = 0) => { const [X, U, dep] = p(x, y, z); return [CX + F * X, CY - F * U, dep, F / dep]; };
   }
   const hourLabel = (b) => new Date(M.hourStart + b * 36e5).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
@@ -580,7 +580,7 @@ export async function spacePage(ctx) {
         rows.push(row('Only when', e.conditions.length ? clip(e.conditions.join(' and '), 160) : 'no conditions', e.conditions.length ? null : 'bad'));
         rows.push(row('Used', e.sessions ? `${num(e.sessions)} sessions, last ${ago(e.lastSeen)}` : 'never seen used'));
       }
-      const q = `account:${acct.awsAccountId} ${s.group === 'external-account' ? `from:${s.key.replace(/^acct:/, '')}` : s.group === 'public' ? 'source:public' : `provider:"${s.label}"`}`;
+      const q = `account:${acct.awsAccountId} ${trustQ(s)}`;
       return { eyebrow: `TRUST · ${s.group.toUpperCase()}`, title: `${a} → ${b}`, sub: `can enter ${edges.length || l.roles || 1} role${(edges.length || l.roles || 1) === 1 ? '' : 's'} in ${acct.name}`, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
         tags: l.kind === 'extHigh' ? [{ t: '⚠ RISKY TRUST', c: RED }] : l.kind === 'extWarn' ? [{ t: 'LOOSE TRUST', c: WARN }] : [],
         rows: rows.length ? rows : [row('Trust', s.findings.join('; ') || 'nothing flagged')],
@@ -610,6 +610,36 @@ export async function spacePage(ctx) {
     if (l.kind === 'use1') return { eyebrow: 'CALLS · 7 DAYS', title: `${a} → ${b}`, sub: '', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
     return null;
   }
+  // the Trust map query for one outside identity
+  const trustQ = (x) => (x.group === 'external-account' ? `from:${x.key.replace(/^acct:/, '')}` : x.group === 'public' ? 'source:public' : `provider:"${x.label}"`);
+  // nothing picked: what the whole scene says, and where to start
+  function overview() {
+    const order = { high: 0, medium: 1 };
+    const ways = [...M.sources].sort((a, b) => (order[a.risk] ?? 2) - (order[b.risk] ?? 2) || (b.sessions || 0) - (a.sessions || 0)).slice(0, 6)
+      .map((x) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, meta: [x.sub, x.findings[0] || 'conditions pinned', x.sessions ? `used ${num(x.sessions)}×` : 'never used'].join(' · '), pick: x.id }));
+    const risky = M.sources.filter((x) => x.risk === 'high').length, loose = M.sources.filter((x) => x.risk === 'medium').length;
+    if (M.view === 'estate') {
+      const live = M.groups.filter((g) => !g.planned), roles = live.reduce((n, g) => n + g.roles, 0), cold = live.reduce((n, g) => n + g.cold, 0), high = live.reduce((n, g) => n + g.high, 0);
+      return { eyebrow: 'OVERVIEW', title: 'Your estate', sub: 'Click anything on the map for its details', swatch: '#2a8a5c', closable: false, tags: [],
+        summary: `${live.length} account${live.length === 1 ? '' : 's'} with ${num(roles)} roles. ${roles ? Math.round((100 * cold) / roles) : 0}% of the roles were never called. ${M.sources.length + M.hidden} identities outside your org can get in${risky ? `, ${risky} through risky trust` : ''}.`,
+        stats: [{ k: 'Accounts', v: num(live.length) }, { k: 'Roles', v: num(roles) }, { k: 'Never called', v: num(cold), tone: roles && cold / roles > 0.5 ? 'warn' : null },
+          { k: 'High-risk roles', v: num(high), tone: high ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Loose ways in', v: num(loose), tone: loose ? 'warn' : null }],
+        rows: [],
+        lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.' },
+          { title: 'Accounts with high-risk roles', items: live.filter((g) => g.high).sort((a, b) => b.high - a.high).slice(0, 6).map((g) => ({ label: g.name, icon: 'account', meta: `${ENV[g.env].name} · ${num(g.roles)} roles`, value: `${g.high} high`, tone: 'bad', pick: g.id })), empty: 'No account has a high-risk role.' }],
+        actions: [['Trust map', '#/trust', true], ['All roles', '#/roles'], ['All calls', '#/events']] };
+    }
+    const denied = M.roles.filter((r) => r.denied7).sort((a, b) => b.denied7 - a.denied7);
+    return { eyebrow: `OVERVIEW · ${ENV[M.account.environment]?.name.toUpperCase() || ''}`, title: M.account.name, sub: `${M.account.awsAccountId} · click anything on the map for its details`, swatch: ENV[M.account.environment]?.base || '#2a8a5c', closable: false, tags: [],
+      summary: `${num(M.roleCount)} roles, ${num(M.roles.length)} called this week across ${M.towers.length} services. ${M.sources.length + M.hidden} identities outside your org and ${M.fars.length} of your other accounts connect to it.`,
+      stats: [{ k: 'Roles', v: num(M.roleCount) }, { k: 'Called · 7 d', v: num(M.roles.length) }, { k: 'Never called', v: num(M.rim.length), tone: M.roleCount && M.rim.length / M.roleCount > 0.5 ? 'warn' : null },
+        { k: 'Refused calls', v: num(denied.reduce((n, r) => n + r.denied7, 0)), tone: denied.length ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Other accounts', v: num(M.fars.length) }],
+      rows: [],
+      lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.' },
+        ...(denied.length ? [{ title: 'Roles with refused calls', items: denied.slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.cluster.label, value: num(r.denied7), tone: 'bad', pick: r.id })) }] : []),
+        { title: 'Busiest roles', items: [...M.roles].sort((a, b) => b.calls7 - a.calls7).slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.services.map((x) => x.name).slice(0, 3).join(' · '), value: kfmt(r.calls7), pick: r.id })) }],
+      actions: [['Its calls', `#/events?account=${M.account.id}`, true], ['Track sessions', () => openTrack({ account: M.account.id }, M.account.name)], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`], ['Back to estate', '#/space']] };
+  }
   function detail(id) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
     const tag = (t, c) => ({ t, c });
@@ -632,16 +662,31 @@ export async function spacePage(ctx) {
         actions: [['Onboard', `#/accounts/new?from=${g.id}`, true], ['Accounts', '#/accounts']] };
       if (g) {
         const look = M.events.find((e) => e.target === g.id);
-        const ins = M.links.filter((l) => l.to === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => `${M.by.get(l.from).name}${l.kind === 'new' ? ' (new)' : ''}`);
-        const outs = M.links.filter((l) => l.from === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => M.by.get(l.to).name);
-        const none = 'no other account in 90 days';
-        const today = g.hourly.reduce((s, x) => s + x.sessions, 0);
+        const chain = (l) => l.kind === 'chain' || l.kind === 'new';
+        const fromOut = M.sources.map((x) => ({ x, t: x.targets.find((t) => t.accountId === g.id) })).filter((o) => o.t)
+          .sort((a, b) => ({ high: 0, medium: 1 }[a.x.risk] ?? 2) - ({ high: 0, medium: 1 }[b.x.risk] ?? 2) || (b.t.sessions || 0) - (a.t.sessions || 0));
+        const ins = M.links.filter((l) => l.to === g.id && chain(l)), outs = M.links.filter((l) => l.from === g.id && chain(l));
+        const scan = M.scanner?.targets.find((t) => t.accountId === g.id);
+        const today = g.hourly.reduce((n, x) => n + x.sessions, 0), risky = fromOut.filter((o) => o.x.risk === 'high').length;
+        const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
         return { eyebrow: `ACCOUNT · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base,
           tags: [...(g.high ? [{ t: `⚠ ${g.high} HIGH-RISK ROLE${g.high === 1 ? '' : 'S'}`, c: RED, href: `#/roles?accounts=${g.id}&risks=High` }] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
-          rows: [row('Roles', `${g.roles} · ${g.active} called · ${g.cold} never called`), row('Calls', `${kfmt(g.calls7)} in 7 days · ${today} sessions today`),
-            ...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [])],
-          lists: [{ title: 'Entered from', items: M.links.filter((l) => l.to === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => ({ label: M.by.get(l.from).name, meta: `${l.roles.length} role pair${l.roles.length === 1 ? '' : 's'} · last ${ago(l.lastSeen)}${l.kind === 'new' ? ' · new today' : ''}`, value: num(l.sessions), pick: l.id })), empty: none },
-            { title: 'Reaches', items: M.links.filter((l) => l.from === g.id && (l.kind === 'chain' || l.kind === 'new')).map((l) => ({ label: M.by.get(l.to).name, meta: `${l.roles.length} role pair${l.roles.length === 1 ? '' : 's'} · last ${ago(l.lastSeen)}`, value: num(l.sessions), pick: l.id })), empty: none }],
+          summary: `${plural(fromOut.length, 'identity', 'identities')} from outside your org${risky ? ` (${risky} with risky trust)` : ''} and ${ins.length} of your other accounts can get in. It reaches ${plural(outs.length, 'other account')}.`,
+          stats: [{ k: 'Roles', v: num(g.roles) }, { k: 'Never called', v: num(g.cold), tone: g.roles && g.cold / g.roles > 0.5 ? 'warn' : null, hint: g.roles ? `${Math.round((100 * g.cold) / g.roles)}% of its roles` : '' },
+            { k: 'High risk', v: num(g.high), tone: g.high ? 'bad' : null }, { k: 'Calls · 7 d', v: kfmt(g.calls7) }, { k: 'Sessions · 24 h', v: num(today) }, { k: 'Ways in', v: num(fromOut.length + ins.length), tone: risky ? 'bad' : null }],
+          rows: look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [],
+          lists: [
+            { title: 'Who can get in · from outside your org', hint: 'Sign-in providers, pipelines, vendors and other AWS accounts that a trust policy here lets in.',
+              items: fromOut.map(({ x, t }) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null,
+                meta: [x.sub, plural(t.roles.length, 'role'), t.sessions ? `used ${num(t.sessions)}×` : 'never seen coming in'].join(' · '), pick: x.id,
+                window: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} ${trustQ(x)}`)}`, winTitle: `${x.label} → ${g.name}` })), empty: 'No trust policy here lets anyone outside your org in.' },
+            { title: 'Who can get in · your other accounts', hint: 'Seen entering a role here in the last 90 days. Click one to replay those sessions.',
+              items: [...ins.map((l) => ({ label: M.by.get(l.from).name, icon: 'account', meta: `${plural(l.roles.length, 'role pair')} · last ${ago(l.lastSeen)}${l.kind === 'new' ? ' · new today' : ''}`, value: num(l.sessions), pick: l.id,
+                window: `#/track?account=${g.id}&from=${l.from}`, winTitle: `${M.by.get(l.from).name} → ${g.name}`, winEyebrow: 'TRACK · SESSIONS THAT CAME IN' })),
+              ...(scan ? [{ label: 'Curious Monkey', icon: 'cm', meta: `this portal's scanner · ${scan.sessions ? `last ${ago(scan.lastSeen)}` : 'no sign-in seen yet'}`, value: num(scan.sessions), pick: CM_ID }] : [])], empty: 'None of your other accounts entered it in 90 days.' },
+            { title: 'Where it goes', hint: 'Accounts a role or user here entered in the last 90 days. Click one to replay those sessions.',
+              items: outs.map((l) => ({ label: M.by.get(l.to).name, icon: 'account', meta: `${plural(l.roles.length, 'role pair')} · last ${ago(l.lastSeen)}`, value: num(l.sessions), pick: l.id,
+                window: `#/track?account=${l.to}&from=${g.id}`, winTitle: `${g.name} → ${M.by.get(l.to).name}`, winEyebrow: 'TRACK · SESSIONS THAT WENT OUT' })), empty: 'It entered no other account in 90 days.' }],
           actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
@@ -655,21 +700,23 @@ export async function spacePage(ctx) {
         rows: [row('Trust', s.findings.length ? s.findings.join('; ') : 'conditions pinned: nothing to flag', s.findings.length ? 'bad' : 'ok'),
           row('Seen', s.sessions ? `${num(s.sessions)} sessions · last ${ago(s.lastSeen)}` : 'never seen coming in')],
         lists: [{ title: M.view === 'estate' ? 'Accounts it can enter' : 'Roles it can enter', items }],
-        actions: [['Trust map', `#/trust?q=${encodeURIComponent(s.group === 'external-account' ? `from:${s.key.replace(/^acct:/, '')}` : s.group === 'public' ? 'source:public' : `provider:"${s.label}"`)}`, true]] };
+        actions: [['Trust map', `#/trust?q=${encodeURIComponent(trustQ(s))}`, true]] };
     }
     if (M.view !== 'account') return null;
     const r = M.byRole.get(id);
     if (r) {
       const p = pretty(r.name);
-      const callers = M.sources.filter((x) => x.targets.some((t) => t.roles.includes(r.id))).map((x) => ({ label: x.label, meta: x.sub, tone: x.risk === 'high' ? 'bad' : null, pick: x.id }));
+      const callers = M.sources.filter((x) => x.targets.some((t) => t.roles.includes(r.id))).map((x) => ({ label: x.label, icon: GLYPH[x.group] || 'account', meta: x.sub, tone: x.risk === 'high' ? 'bad' : null, pick: x.id }));
       const cmT = M.scanner?.targets.find((t) => t.roleId === r.id);
-      if (cmT) callers.unshift({ label: 'Curious Monkey', meta: `this portal's scanner · last ${ago(cmT.lastSeen)}`, value: num(cmT.sessions), pick: CM_ID });
+      if (cmT) callers.unshift({ label: 'Curious Monkey', icon: 'cm', meta: `this portal's scanner · last ${ago(cmT.lastSeen)}`, value: num(cmT.sessions), pick: CM_ID });
       const way = (dir) => M.fars.flatMap((n) => n.links.filter((l) => l.roleId === r.id && l.dir === dir).map((l) => ({ label: `${n.name} · ${l.otherRole}`,
         meta: [l.sessions ? `used · ${num(l.sessions)} sessions` : 'not used in 7 days', l.allowed ? 'allowed by trust' : 'seen chaining'].join(' · '), value: l.sessions ? num(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: `far:${n.id}` })));
       const chained = st.dir === 'out' ? [] : way('in'), goes = st.dir === 'in' ? [] : way('out');
       return { eyebrow: `ROLE · ${r.cluster.label.toUpperCase()}`, title: p.label, sub: p.kind ? `${p.kind} · ${r.name}` : `${M.account.name} · ${M.account.awsAccountId}`, swatch: ENV[r.cluster.env].base, round: true,
         tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/roles/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
-        rows: [row('Calls', `${kfmt(r.calls7)} in 7 days`)],
+        summary: `${r.calls7 ? `Called ${kfmt(r.calls7)} times this week into ${r.services.length} service${r.services.length === 1 ? '' : 's'}.` : 'Quiet this week.'} ${callers.length + chained.length} can enter it${goes.length ? `; it can go on to ${goes.length} role${goes.length === 1 ? '' : 's'} elsewhere` : ''}.`,
+        stats: [{ k: 'Calls · 7 d', v: kfmt(r.calls7) }, { k: 'Refused', v: num(r.denied7 || 0), tone: r.denied7 ? 'bad' : null }, { k: 'Can enter it', v: num(callers.length + chained.length), tone: callers.some((c) => c.tone === 'bad') ? 'bad' : null }],
+        rows: [],
         lists: [{ title: 'Calls into', items: r.services.map((v) => ({ label: v.name, value: kfmt(v.calls), meta: v.denied ? `⚠ ${num(v.denied)} refused` : null, tone: v.denied ? 'bad' : null, pick: `svc:${v.name}` })) },
           ...(st.dir === 'out' ? [] : [{ title: 'Entered by', items: [...callers, ...chained], empty: 'only callers inside this account' }]),
           ...(st.dir === 'in' ? [] : [{ title: 'Can go to', items: goes, empty: 'no role in your other accounts trusts it' }]),
@@ -713,14 +760,22 @@ export async function spacePage(ctx) {
     for (const rid of ids) if (!seen.has(rid)) { seen.add(rid); const x = M.byRole?.get(rid); out.push({ label: x ? pretty(x.name).label : 'a role', pick: x ? rid : null, href: x ? null : `#/roles/${rid}` }); }
     return out.sort((a, b) => (a.tone === 'bad' ? 0 : 1) - (b.tone === 'bad' ? 0 : 1) || a.label.localeCompare(b.label));
   }
+  // The right-hand panel, top to bottom: what it is, one sentence on what matters, the numbers, what you can do,
+  // then who and what it connects to. A row or button with the window mark opens a window over Space; ◎ finds it on the map.
+  const ICONS = { oidc: 'M6 1.5l4.5 2.6v5.2L6 11.9 1.5 9.3V4.1z', saml: 'M6 1l5 5-5 5-5-5z', account: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0', web: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0M1.5 6h9M6 1.5c2 2 2 7 0 9M6 1.5c-2 2-2 7 0 9', cm: 'M6 6m-4 0a4 4 0 1 0 8 0a4 4 0 1 0-8 0' };
+  const icon = (kind) => svg('svg', { class: `sp-ico sp-ico-${kind}`, width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' }, svg('path', { d: ICONS[kind] || ICONS.account, fill: kind === 'cm' ? CM : 'none', stroke: kind === 'cm' ? CM : 'currentColor', 'stroke-width': 1.2 }));
   function panelEl(b) {
     const list = (L) => {
       const ul = h('ul', { class: 'sp-items' }), more = h('button', { class: 'btn sm sp-more' });
       const item = (it) => {
-        const body = [h('span', { class: 'sp-item-main' }, h('span', { class: 'sp-item-label' }, it.label), it.meta ? h('span', { class: 'sp-item-meta' }, it.meta) : null), it.value != null ? h('span', { class: 'mono sp-item-val' }, it.value) : null];
-        return h('li', { class: it.tone ? `sp-${it.tone}` : null }, it.onClick ? h('button', { class: 'sp-item', title: it.label, onClick: it.onClick }, ...body)
-          : it.pick ? h('button', { class: 'sp-item', title: it.label, onClick: () => set({ sel: it.pick }) }, ...body)
-          : it.href ? h('a', { class: 'sp-item', href: it.href, title: it.label }, ...body) : h('div', { class: 'sp-item' }, ...body));
+        const open = it.window || (leaves(it.href) ? it.href : null);
+        const act = it.onClick || (open ? () => openWin(open, it.winTitle || it.label, it.winEyebrow) : it.pick ? () => set({ sel: it.pick }) : null);
+        const body = [it.icon ? icon(it.icon) : null, h('span', { class: 'sp-item-main' }, h('span', { class: 'sp-item-label' }, it.label), it.meta ? h('span', { class: 'sp-item-meta' }, it.meta) : null),
+          it.value != null ? h('span', { class: 'mono sp-item-val' }, it.value) : null, open || it.opens ? windowIcon() : null];
+        const tip = open || it.opens ? `${it.label} · opens in a window` : it.label;
+        const main = act ? h('button', { class: 'sp-item', title: tip, onClick: act }, ...body) : it.href ? h('a', { class: 'sp-item', href: it.href, title: it.label }, ...body) : h('div', { class: 'sp-item' }, ...body);
+        const locate = (open || it.onClick) && it.pick ? h('button', { class: 'sp-locate', title: 'Show it on the map', 'aria-label': `Show ${it.label} on the map`, onClick: () => set({ sel: it.pick }) }, '◎') : null;
+        return h('li', { class: it.tone ? `sp-${it.tone}` : null }, main, locate);
       };
       const draw = () => {
         const q = (st.filter || '').toLowerCase(), m = L.items.filter((it) => !q || `${it.label} ${it.meta || ''}`.toLowerCase().includes(q));
@@ -732,19 +787,30 @@ export async function spacePage(ctx) {
       const filter = L.items.length > 8 && h('input', { type: 'search', class: 'sp-filter', placeholder: `Filter ${L.items.length}…`, 'aria-label': `Filter ${L.title}`, value: st.filter || '',
         onInput: (ev) => { st.filter = ev.target.value; st.showAll = false; draw(); } });
       draw();
-      return h('section', { class: 'sp-list-block' }, h('div', { class: 'sp-lh' }, h('h3', { class: 'eyebrow' }, L.title), h('span', { class: 'mono faint' }, String(L.items.length))), filter || null, ul, more);
+      return h('section', { class: 'sp-list-block' }, h('div', { class: 'sp-lh' }, h('h3', null, L.title), h('span', { class: `mono sp-count${L.items.length ? '' : ' zero'}` }, String(L.items.length))),
+        L.hint && L.items.length ? h('p', { class: 'sp-hint' }, L.hint) : null, filter || null, ul, more);
     };
-    return h('section', { class: 'sp-panel', 'aria-label': `Selected: ${b.title}` },
+    const action = ([label, href, primary]) => {
+      const cls = primary ? 'btn primary small' : 'btn small';
+      if (typeof href === 'function') return h('button', { class: cls, title: `${label} · opens in a window`, onClick: href }, label, windowIcon());
+      if (leaves(href)) return h('button', { class: cls, title: `${label} · opens in a window`, onClick: () => openWin(href, `${label} · ${b.title}`) }, label, windowIcon());
+      return h('a', { class: cls, href, title: `${label} · stays in Space` }, label, ' →');
+    };
+    const tagEl = (t) => (t.href ? h('button', { class: 'sp-tag sp-tag-link', title: 'Show them · opens in a window', style: `color:${t.c};border-color:${t.c}`, onClick: () => openWin(t.href, t.t.replace(/^⚠ /, '')) }, t.t, windowIcon())
+      : h('span', { class: 'sp-tag', style: `color:${t.c};border-color:${t.c}` }, t.t));
+    return h('section', { class: 'sp-panel', 'aria-label': `${b.closable === false ? '' : 'Selected: '}${b.title}` },
       h('div', { class: 'sp-card-head' },
         h('div', { class: 'sp-card-titles' },
-          h('div', { class: 'sp-eyebrow' }, h('span', null, b.eyebrow), ...b.tags.map((t) => t.href ? h('a', { class: 'sp-tag sp-tag-link', href: t.href, title: 'Show them', style: `color:${t.c};border-color:${t.c}` }, `${t.t} →`) : h('span', { class: 'sp-tag', style: `color:${t.c};border-color:${t.c}` }, t.t))),
+          h('div', { class: 'sp-eyebrow' }, h('span', null, b.eyebrow)),
           h('div', { class: 'sp-card-title' }, h('span', { class: 'sp-swatch', style: `background:${b.swatch}${b.round ? ';border-radius:50%' : ''}` }), h('b', null, b.title)),
           b.sub ? h('span', { class: 'sp-card-sub' }, b.sub) : null),
-        h('button', { class: 'sp-x', 'aria-label': 'Close', onClick: () => set({ sel: null }) }, '×')),
+        b.closable === false ? null : h('button', { class: 'sp-x', 'aria-label': 'Close and show the overview', title: 'Close and show the overview', onClick: () => set({ sel: null }) }, '×')),
+      b.tags.length ? h('div', { class: 'sp-tags' }, ...b.tags.map(tagEl)) : null,
+      b.summary ? h('p', { class: 'sp-sum' }, b.summary) : null,
+      b.stats?.length ? h('div', { class: 'sp-stats' }, ...b.stats.map((x) => h('div', { class: `sp-stat${x.tone ? ` sp-${x.tone}` : ''}`, title: x.hint || null }, h('b', { class: 'mono' }, x.v), h('span', null, x.k)))) : null,
       b.rows.length ? h('dl', null, ...b.rows.map((r) => h('div', null, h('dt', null, r.k), h('dd', { class: r.tone ? `sp-${r.tone}` : null }, r.v)))) : null,
-      ...(b.lists || []).map(list),
-      b.actions.length ? h('div', { class: 'sp-card-actions' }, ...b.actions.map(([label, href, primary]) => (typeof href === 'function'
-        ? h('button', { class: primary ? 'btn primary small' : 'btn small', onClick: href }, label) : h('a', { class: primary ? 'btn primary small' : 'btn small', href }, label)))) : null);
+      b.actions.length ? h('div', { class: 'sp-card-actions' }, ...b.actions.map(action)) : null,
+      ...(b.lists || []).map(list));
   }
 
   // ---------- beside the plane ----------
@@ -792,10 +858,6 @@ export async function spacePage(ctx) {
         h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, `${cur ? cur.label : 'Roles'} · roles`), h('span', { class: 'mono faint' }, String(cur ? cur.roles.length : 0))),
         h('div', { class: 'sp-list' }, ...(cur ? cur.roles : []).map((r) => row(st.sel === r.id, `background:${r.denied7 ? RED : ENV[r.cluster.env].base};border-radius:50%`, pretty(r.name).label, r.services.map((x) => x.name).join(' · ') || 'quiet this week', kfmt(r.calls7), () => set({ sel: st.sel === r.id ? null : r.id })))));
     }
-    const feed = M.events.length ? M.events.slice(0, 12).map((e) => h('button', { class: 'sp-feed', 'aria-pressed': String(st.sel === e.target && st.hour === e.hour), style: `border-left-color:${TONE[e.tone] || '#fff'}`,
-      onClick: () => set({ sel: e.target || st.sel, hour: e.hour }) },
-      h('span', { class: 'sp-feed-top' }, h('span', { style: `color:${TONE[e.tone] || '#fff'}` }, e.kind), h('span', { class: 'faint' }, hourLabel(e.hour))), h('span', { class: 'sp-feed-text' }, e.text), h('span', { class: 'faint tiny' }, e.where)))
-      : [h('p', { class: 'muted small' }, 'Nothing flagged in the last 24 hours.')];
     const sw = (style) => h('span', { class: 'sp-sw', style });
     const legend = M.view === 'estate' ? [
       [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), 'The green plane is your organization; each ring on it is one account'],
@@ -821,10 +883,13 @@ export async function spacePage(ctx) {
       [sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid ${RED}`), 'Red ring on a service: calls to it were refused this week'],
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],
     ];
-    const b = st.sel ? detail(st.sel) : null;
-    right.replaceChildren(...(b ? [panelEl(b)] : []), h('section', { class: 'sp-section' }, h('h2', { class: 'eyebrow' }, M.view === 'estate' ? 'Needs a look · last 24 h' : 'In this account · last 24 h'), ...feed),
-      h('section', { class: 'sp-section sp-legend' }, h('h2', { class: 'eyebrow' }, 'How to read it'), ...legend.map(([s, t]) => h('div', null, s, h('span', null, t))),
-        M.hidden ? h('p', { class: 'faint tiny' }, `${M.hidden} more identities outside the org are in the `, h('a', { href: '#/trust' }, 'Trust map'), '.') : null));
+    const b = (st.sel && detail(st.sel)) || overview();
+    const key = h('details', { class: 'sp-legend' }, h('summary', null, 'How to read the map'), ...legend.map(([s, t]) => h('div', null, s, h('span', null, t))),
+      M.hidden ? h('p', { class: 'faint tiny' }, `${M.hidden} more identities outside the org are in the Trust map.`) : null);
+    key.open = !!st.legend; key.addEventListener('toggle', () => { st.legend = key.open; });
+    const top = right.scrollTop, same = right.dataset.for === String(st.sel);
+    right.replaceChildren(panelEl(b), key);
+    right.dataset.for = String(st.sel); right.scrollTop = same ? top : 0;
   }
   function renderBar() {
     const hour = st.hour, perHour = Array.from({ length: 24 }, (_, i) => M.groups.reduce((s, g) => s + g.prof[i], 0)), max = Math.max(1, ...perHour);
@@ -845,12 +910,20 @@ export async function spacePage(ctx) {
     if (focused) input.focus();
     hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} WIB`),
       h('div', null, M.view === 'estate' ? `${M.groups.length} ACCOUNTS · ${num(M.groups.reduce((s, g) => s + g.roles, 0))} ROLES · ${M.sources.length + M.hidden} OUTSIDE` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
-      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO ORBIT · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO ORBIT · SCROLL TO ZOOM'));
-    cam.replaceChildren(h('span', { class: 'eyebrow' }, 'Camera'), ...[['◀', 'Rotate left', () => set({ az: st.az - 20 })], ['▶', 'Rotate right', () => set({ az: st.az + 20 })],
-      ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })], ['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })], ['Reset', 'Reset the camera', () => set({ az: -14, el: 33, zoom: 1.15 })]]
-      .map(([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon)));
+      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM'));
+    const btn = ([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon);
+    const moved = st.px || st.py || st.az !== -14 || st.el !== 33 || st.zoom !== 1.15;
+    cam.replaceChildren(
+      h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Move'), ...[['←', 'Move the view left', () => set({ px: clampPan(st.px + 120, W) })], ['→', 'Move the view right', () => set({ px: clampPan(st.px - 120, W) })],
+        ['↑', 'Move the view up', () => set({ py: clampPan(st.py + 80, H) })], ['↓', 'Move the view down', () => set({ py: clampPan(st.py - 80, H) })]].map(btn)),
+      h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Turn'), ...[['⟲', 'Rotate left', () => set({ az: st.az - 20 })], ['⟳', 'Rotate right', () => set({ az: st.az + 20 })],
+        ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })]].map(btn)),
+      h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Zoom'), ...[['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })]].map(btn),
+        h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
   }
 
+  ctx.setNotices({ title: M.view === 'estate' ? 'Needs a look · last 24 h' : `In ${M.account.name} · last 24 h`,
+    items: M.events.map((e) => ({ kind: e.kind, tone: e.tone, text: e.text, where: e.where, time: hourLabel(e.hour), onPick: () => set({ sel: e.target || st.sel, hour: e.hour }) })) });
   render();
   return page;
 }

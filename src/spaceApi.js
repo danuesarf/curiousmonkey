@@ -6,7 +6,7 @@
 // started and how many calls they made, so the replay has hours; parent_key_id gives role chaining across accounts),
 // the trust map (who outside the org can enter, and how worrying that trust is), and changes (what needs a look).
 import { read as query } from './db.js';
-import { coveredFrom } from './rollups.js';
+import { uncovered } from './rollups.js';
 import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
 import { environmentOf } from './environments.js';
@@ -25,20 +25,29 @@ const bucketOf = (t, start) => Math.max(0, Math.min(23, Math.floor((new Date(t).
 async function hourStart() { return new Date((await query(`SELECT ${BUCKETS} AS t`)).rows[0].t).getTime(); }
 
 // The last 24 hours, hour by hour. From the hourly rollups (calls counted in the hour they were made; sessions that
-// made a call in it): a few thousand small rows. Accounts whose older calls are still being counted fall back to
-// adding up their sessions by the hour they started.
+// made a call in it): a few thousand small rows. Only an account whose last day is still being counted (a few
+// minutes after an upgrade) is added up from its sessions instead, by the hour they started; the others never wait
+// for it.
+async function split(ids, start) {
+  const pending = await uncovered(ids, start);
+  return [ids.filter((id) => !pending.has(id)), ids.filter((id) => pending.has(id))];
+}
 async function hourlyByAccount(ids, start) {
-  if (await coveredFrom(ids) <= start) return query(
-    `SELECT c.account_id, c.hour AS h, COALESCE(s.sessions, 0)::int AS sessions, c.calls, c.denied
-       FROM (SELECT account_id, hour, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
-               FROM call_hourly WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) c
-       LEFT JOIN (SELECT account_id, hour, count(DISTINCT session_id) AS sessions FROM session_hours WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) s
-         ON s.account_id = c.account_id AND s.hour = c.hour`, [ids]);
-  return query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
-                  FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [ids]);
+  const [ready, behind] = await split(ids, start);
+  const [a, b] = await Promise.all([
+    ready.length ? query(
+      `SELECT c.account_id, c.hour AS h, COALESCE(s.sessions, 0)::int AS sessions, c.calls, c.denied
+         FROM (SELECT account_id, hour, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
+                 FROM call_hourly WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) c
+         LEFT JOIN (SELECT account_id, hour, count(DISTINCT session_id) AS sessions FROM session_hours WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) s
+           ON s.account_id = c.account_id AND s.hour = c.hour`, [ready]) : { rows: [] },
+    behind.length ? query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
+                             FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [behind]) : { rows: [] }]);
+  return { rows: [...a.rows, ...b.rows] };
 }
 async function hourlyByRole(accountId, start) {
-  if (await coveredFrom([accountId]) <= start) return query(
+  const [ready] = await split([accountId], start);
+  if (ready.length) return query(
     `SELECT role_id, hour AS h, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
        FROM call_hourly WHERE account_id=$1 AND hour >= ${BUCKETS} GROUP BY 1, 2`, [accountId]);
   return query(`SELECT role_id, date_trunc('hour', started_at) AS h, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied

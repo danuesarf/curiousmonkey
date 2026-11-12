@@ -13,10 +13,11 @@ const time = (d) => new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', m
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export async function trackPage(ctx) {
-  const roleId = ctx.params.get('role'), account = ctx.params.get('account');
-  const v = await trackView({ role: roleId, account, session: ctx.params.get('session'),
-    onSelect: (id) => history.replaceState(null, '', `#/track?${new URLSearchParams({ ...(roleId ? { role: roleId } : {}), ...(account ? { account } : {}), session: id })}`),
-    empty: h('a', { class: 'btn sm', href: '#/' }, 'Back to radar') });
+  const roleId = ctx.params.get('role'), account = ctx.params.get('account'), from = ctx.params.get('from');
+  const v = await trackView({ role: roleId, account, from, session: ctx.params.get('session'),
+    // in a window over another page the address bar belongs to that page
+    onSelect: (id) => ctx.inWindow || history.replaceState(null, '', `#/track?${new URLSearchParams({ ...(roleId ? { role: roleId } : {}), ...(account ? { account } : {}), ...(from ? { from } : {}), session: id })}`),
+    empty: ctx.inWindow ? null : h('a', { class: 'btn sm', href: '#/' }, 'Back to radar') });
   ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), 'Track', v.title);
   ctx.onLeave(() => v.stop());
   return v.el;
@@ -27,8 +28,8 @@ export async function trackPage(ctx) {
  * its replay. Mounted by the Track page and by Space. `onSelect(sessionId)` is told when another session is chosen.
  * Returns { el, stop, title }; call stop() when the view goes away.
  */
-export async function trackView({ role: roleId = null, account = null, session: wanted = null, onSelect = () => {}, empty = null } = {}) {
-  const qs = new URLSearchParams(); if (roleId) qs.set('role', roleId); if (account) qs.set('account', account);
+export async function trackView({ role: roleId = null, account = null, from = null, session: wanted = null, onSelect = () => {}, empty = null } = {}) {
+  const qs = new URLSearchParams(); if (roleId) qs.set('role', roleId); if (account) qs.set('account', account); if (from) qs.set('from', from);
   const list = await get(`/sessions?${qs}`);
   const title = roleId && list.items[0] ? list.items[0].role : 'All roles';
   if (!list.items.length) {

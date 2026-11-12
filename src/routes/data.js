@@ -331,10 +331,11 @@ data.delete('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
 
 // ---------- sessions and tracks ----------
 data.get('/sessions', requirePerm('view'), wrap(async (req, res) => {
-  const q = z.object({ account: uuid.optional(), role: uuid.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+  const q = z.object({ account: uuid.optional(), role: uuid.optional(), from: uuid.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
   if (q.account && !inScope(req.user, q.account)) throw NotFound();
+  if (q.from && !inScope(req.user, q.from)) throw NotFound();
   if (q.role) await roleFor(req, q.role);
-  res.json({ items: await listSessions(req.user, { accountId: q.account, roleId: q.role, limit: q.limit }), retentionDays: config.scanner.sessionRetentionDays });
+  res.json({ items: await listSessions(req.user, { accountId: q.account, roleId: q.role, fromAccountId: q.from, limit: q.limit }), retentionDays: config.scanner.sessionRetentionDays });
 }));
 data.get('/sessions/:id/track', requirePerm('view'), wrap(async (req, res) => {
   const t = await buildTrack(req.user, uuid.parse(req.params.id));
@@ -564,6 +565,13 @@ data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
 }));
 // Space is worked out at most every few seconds per viewer scope and kept warm while someone is looking (src/cache.js)
 data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}`, () => spaceEstate(req.user)))));
+// what needs a look in the last 24 hours, for the bell in the top bar: the estate's flagged events, from the same
+// remembered answer as Space (worked out at most once a minute when only the bell asks)
+data.get('/space/flags', requirePerm('view'), wrap(async (req, res) => {
+  const e = await cached(`space:${scopeKey(req.user)}`, () => spaceEstate(req.user), { freshMs: Number(process.env.CACHE_FRESH_MS ?? 20_000) > 0 ? 60_000 : 0 });
+  const name = new Map(e.accounts.map((a) => [a.id, a.name]));
+  res.json({ hourStart: e.hourStart, items: e.events.map((x) => ({ ...x, accountName: name.get(x.accountId) || null })) });
+}));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
   const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}`, () => spaceAccount(req.user, id)); if (!r) throw NotFound(); res.json(r);

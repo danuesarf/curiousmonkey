@@ -87,6 +87,13 @@ export async function coveredFrom(accountIds) {
   for (const r of cov.rows) if (!want || want.has(r.account_id)) t = Math.max(t, new Date(r.covered_from).getTime());
   return t;
 }
+/** Which of these accounts are not covered back to `sinceMs` yet. */
+export async function uncovered(accountIds, sinceMs) {
+  await coveredFrom(accountIds);
+  const want = new Set(accountIds), out = new Set();
+  for (const r of cov.rows) if (want.has(r.account_id) && new Date(r.covered_from).getTime() > sinceMs) out.add(r.account_id);
+  return out;
+}
 export const forgetCoverage = () => { cov = { at: 0, rows: [] }; };
 
 /** Backfill progress for the health page. */

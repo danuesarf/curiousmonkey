@@ -1,4 +1,4 @@
-import { h, svg, clear, get, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR } from './lib.js';
+import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR } from './lib.js';
 import * as authPages from './pages/auth.js';
 import { overview } from './pages/overview.js';
 import { rolePage } from './pages/role.js';
@@ -43,7 +43,8 @@ const routes = [
   [/^#\/settings$/, () => settingsPage, 'settings'],
 ];
 
-export function go(hash) { location.hash = hash; }
+// inside a window (below) navigation stays in the window; otherwise it changes the page
+export function go(hash) { if (win) return void winGo(hash); location.hash = hash; }
 const can = (p) => state.user?.permissions.includes(p);
 
 const ICON = {
@@ -61,6 +62,100 @@ const mark = (size = 40) => svg('svg', { width: size, height: size, viewBox: '0 
   svg('path', { d: 'M20 20 L38 20 A18 18 0 0 0 32.7 7.3 Z', fill: '#f6e016', 'fill-opacity': '0.25' }), svg('path', { d: 'M20 20 L38 20', stroke: '#f6e016', 'stroke-width': '1.5' }),
   svg('path', { d: 'M26 12 q4 2 3 7 q-3 -2 -6 -1 q0 -4 3 -6z', fill: '#f6e016' }));
 export { mark };
+
+// ---------- a window over the current page ----------
+// Any page can be opened in a window on top of the one being looked at (Space does this for sessions, calls, a role,
+// the trust map), so the place you were is still there when it closes. Nothing is fetched or built until it opens;
+// closing it runs the page's own clean-up and drops it. Links and go() inside the window move the window, not the page.
+const WIN_ICON = () => svg('svg', { class: 'win-ico', width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' },
+  svg('path', { d: 'M1.5 3.5h7v7h-7zM4 3.5v-2h6.5V8h-2', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.2 }));
+export { WIN_ICON as windowIcon };
+let win = null;
+const routeOf = (hash) => { const [path, qs] = String(hash).split('?'); for (const [re, pick, , full] of routes) { const m = path.match(re); if (m) return { page: pick(m), full, params: new URLSearchParams(qs || '') }; } return null; };
+async function winGo(hash, push = true) {
+  const mine = win; if (!mine) return;
+  mine.leave.forEach((f) => f()); mine.leave = [];
+  if (push && mine.at && mine.at !== hash) mine.back.push(mine.at);
+  mine.at = hash; mine.backBtn.hidden = !mine.back.length; mine.tab.href = hash;
+  const r = routeOf(hash);
+  mine.body.className = `win-body${r?.full ? ' full' : ''}`;
+  mine.body.replaceChildren(h('div', { class: 'muted', style: 'padding:24px' }, h('span', { class: 'spin' }), ' Loading'));
+  if (!r) { mine.body.replaceChildren(h('div', { class: 'empty' }, 'Nothing here.')); return; }
+  try {
+    const out = await r.page({ params: r.params, inWindow: true, onLeave: (f) => mine.leave.push(f), reload: () => winGo(hash, false), refreshStatus, openWindow, setNotices: () => {},
+      setCrumbs: (...parts) => { const last = parts[parts.length - 1]; if (last && !(mine.named && !mine.back.length)) mine.title.textContent = typeof last === 'string' ? last : last.textContent; } });
+    if (win !== mine || mine.at !== hash) return;       // closed, or moved on, while it loaded
+    mine.body.replaceChildren(out); mine.body.scrollTop = 0;
+  } catch (e) {
+    if (win !== mine || mine.at !== hash) return;
+    mine.body.replaceChildren(h('div', { class: 'alert bad', style: 'margin:20px' }, e instanceof ApiError ? e.message : 'Something went wrong while loading this.'));
+    console.error(e);
+  }
+}
+export function openWindow(hash, { title = '', eyebrow = '' } = {}) {
+  closeWindow();
+  const titleEl = h('b', { class: 'win-title' }, title), body = h('div', { class: 'win-body' });
+  const backBtn = h('button', { class: 'btn sm', hidden: true, onClick: () => { const prev = win?.back.pop(); if (prev) winGo(prev, false); } }, '← Back');
+  const tab = h('a', { class: 'btn sm', href: hash, target: '_blank', rel: 'noopener', title: 'Open this in a new browser tab' }, 'New tab ↗');
+  const close = h('button', { class: 'btn sm primary', onClick: () => closeWindow() }, 'Close');
+  const dlg = h('div', { class: 'win', role: 'dialog', 'aria-modal': 'true', 'aria-label': title || 'Window' },
+    h('div', { class: 'win-head' }, backBtn, h('div', { class: 'stack', style: 'gap:2px;min-width:0;flex:1' }, eyebrow ? h('span', { class: 'eyebrow' }, eyebrow) : null, titleEl), tab, close), body);
+  // links inside move the window; ones that open a new tab, or are held with a key, are left alone
+  dlg.addEventListener('click', (ev) => {
+    const a = ev.target.closest?.('a[href^="#/"]');
+    if (!a || a.target || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button) return;
+    ev.preventDefault(); winGo(a.getAttribute('href'));
+  });
+  const onKey = (ev) => { if (ev.key === 'Escape') closeWindow(); };
+  document.addEventListener('keydown', onKey);
+  win = { dlg, body, title: titleEl, named: !!title, backBtn, tab, onKey, leave: [], back: [], at: null, url: location.href, opener: document.activeElement };
+  document.body.append(dlg); close.focus();
+  winGo(hash, false);
+}
+export function closeWindow() {
+  if (!win) return;
+  const w = win; win = null;
+  w.leave.forEach((f) => f());
+  document.removeEventListener('keydown', w.onKey); w.dlg.remove();
+  if (location.href !== w.url) history.replaceState(null, '', w.url);    // a page in the window may have rewritten the address
+  w.opener?.focus?.();
+}
+
+// ---------- the bell: what needs a look in the last 24 hours ----------
+// Everywhere it lists the estate's flagged events and takes you to Space. A page can put its own list there while
+// it is open (Space does, so picking one selects it in place).
+const KIND_LABEL = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
+const NOTICE_TONE = { high: '#ff5a4f', warn: '#fab219', medium: '#fab219', info: '#ffffff', good: '#6fe3b0', low: '#d5dceb' };
+let notices = null, bellOpen = false;      // a page's own list, or null for the estate's
+const bellEl = h('div', { class: 'bell' });
+export function setNotices(n) { notices = n; drawBell(); }
+const hourText = (start, b) => new Date(start + b * 36e5).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+async function drawBell() {
+  let n = notices;
+  if (!n && state.user) {
+    try {
+      const f = await getCached('/space/flags', 60_000), start = new Date(f.hourStart).getTime();
+      n = { title: 'Needs a look · last 24 h', items: f.items.map((e) => ({ kind: KIND_LABEL[e.kind] || e.kind.toUpperCase(), tone: e.severity, text: e.title, where: `${e.accountName || 'an account'}${e.roleName ? ` · ${e.roleName}` : ''}`,
+        time: hourText(start, e.hour), onPick: () => go(`#/space?sel=${e.accountId}&hour=${e.hour}`) })) };
+    } catch { n = { title: 'Needs a look · last 24 h', items: [] }; }
+    if (notices) n = notices;
+  }
+  if (!n) { bellEl.replaceChildren(); return; }
+  const worst = n.items.some((e) => e.tone === 'high') ? 'high' : n.items.some((e) => e.tone === 'warn' || e.tone === 'medium') ? 'warn' : n.items.length ? 'info' : 'none';
+  const btn = h('button', { class: `bell-btn bell-${worst}`, 'aria-expanded': String(bellOpen), 'aria-haspopup': 'true', title: n.title,
+    onClick: (ev) => { ev.stopPropagation(); bellOpen = !bellOpen; drawBell(); } },
+    svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('path', { d: 'M8 1.5a4 4 0 0 0-4 4v3L2.5 11h11L12 8.5v-3a4 4 0 0 0-4-4zM6.5 13a1.5 1.5 0 0 0 3 0', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4 })),
+    n.items.length ? `${n.items.length} TO LOOK AT` : 'NOTHING FLAGGED');
+  const pop = bellOpen ? h('div', { class: 'bell-pop', role: 'menu', 'aria-label': n.title },
+    h('div', { class: 'bell-head' }, h('span', { class: 'eyebrow' }, n.title), h('span', { class: 'mono faint' }, String(n.items.length))),
+    ...(n.items.length ? n.items.slice(0, 40).map((e) => h('button', { class: 'bell-item', role: 'menuitem', style: `border-left-color:${NOTICE_TONE[e.tone] || '#fff'}`, onClick: () => { bellOpen = false; drawBell(); e.onPick(); } },
+      h('span', { class: 'bell-top' }, h('span', { style: `color:${NOTICE_TONE[e.tone] || '#fff'}` }, e.kind), h('span', { class: 'faint' }, e.time)),
+      h('span', { class: 'bell-text' }, e.text), h('span', { class: 'faint tiny' }, e.where)))
+      : [h('p', { class: 'muted small', style: 'margin:10px 12px' }, 'Nothing flagged in the last 24 hours.')])) : null;
+  bellEl.replaceChildren(btn, ...(pop ? [pop] : []));
+}
+document.addEventListener('click', (ev) => { if (bellOpen && !bellEl.contains(ev.target)) { bellOpen = false; drawBell(); } });
+document.addEventListener('keydown', (ev) => { if (bellOpen && ev.key === 'Escape') { bellOpen = false; drawBell(); } });
 
 const statusBar = h('header', { class: 'status' });
 const crumbsEl = h('span', { class: 'crumbs' });
@@ -86,7 +181,8 @@ export async function refreshStatus() {
   meter.querySelector('b').style.color = s.complete ? '#6fe3b0' : '#f6e016';
   if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = TONE_COLOR[fr.tone];
   const firstAcct = s.reading?.[0]?.id;
-  statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }),
+  if (!bellEl.firstChild) drawBell();
+  statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), can('view') ? bellEl : null,
     s.unidentified > 0 && h('a', { class: 'unk-badge', href: firstAcct ? `#/accounts/${firstAcct}/unidentified` : '#/accounts', title: 'Calls under event names not yet identified' },
       svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: '#f0b45a', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }), svg('circle', { cx: 8, cy: 8, r: 1.8, fill: '#f0b45a' })),
       `${s.unidentified} UNIDENTIFIED`),
@@ -112,7 +208,10 @@ function shell(active, content, full) {
 }
 
 async function render() {
+  closeWindow();
   state.leave.forEach((f) => f()); state.leave = [];
+  if (notices) { notices = null; }
+  bellOpen = false; drawBell();
   const hash = location.hash;
   const [path, qs] = hash.split('?'); const params = new URLSearchParams(qs || '');
   try {
@@ -133,7 +232,7 @@ async function render() {
       const page = pick(m);
       const content = h('div', { class: 'stack-lg' }, h('div', { class: 'muted', style: null }, h('span', { class: 'spin' }), ' Loading'));
       mount(shell(key, content, full));
-      const out = await page({ params, onLeave: (f) => state.leave.push(f), reload: render, setCrumbs, refreshStatus });
+      const out = await page({ params, onLeave: (f) => state.leave.push(f), reload: render, setCrumbs, refreshStatus, openWindow, setNotices });
       clear(content); content.append(out);
       return;
     }
