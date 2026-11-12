@@ -2,7 +2,7 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago, loadEnvironments, envName, envs } from '../lib.js';
+import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint } from '../lib.js';
 import { go } from '../main.js';
 
 const CX = 400, CY = 400;
@@ -127,7 +127,7 @@ function dial(kids, top, value, color, trend, trendColor) {
 const stage = (label) => svg('svg', { class: 'stage', viewBox: '-110 0 1020 800', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': label });
 const hudEl = (a, b, c) => h('div', { class: 'hud' }, h('div', { class: 'hot' }, `● ${a}`), h('div', null, b), h('div', null, c));
 function legend(items) {
-  return h('div', { class: 'legend' }, items.map(([sw, t]) => { const s = h('span', { 'aria-hidden': 'true' }); s.style.cssText = sw; return h('span', null, s, t); }));
+  return h('div', { class: 'legend' }, items.map(([sw, t]) => { const s = h('span', { 'aria-hidden': 'true' }); s.style.cssText = paint(sw); return h('span', null, s, t); }));
 }
 function spark(points, color) {
   const vals = points.filter((v) => v != null); if (vals.length < 2) return null;
@@ -143,7 +143,7 @@ function feedList(items, seenAt, onPick) {
       h('span', { class: 'row mono tiny', style: 'justify-content:space-between' }, h('span', { style: `color:${SEV[f.severity]};letter-spacing:.06em` }, KIND[f.kind] || f.kind, fresh ? h('span', { class: 'fresh' }, ' NEW') : null), h('span', { class: 'faint' }, ago(f.at))),
       h('span', { class: 'small', style: 'line-height:1.4' }, f.title),
       h('span', { class: 'tiny faint', style: 'overflow-wrap:anywhere' }, [f.account_name, f.detail].filter(Boolean).join(' · ')));
-    b.style.borderLeftColor = SEV[f.severity]; return b;
+    b.style.borderLeftColor = paint(SEV[f.severity]); return b;
   }));
 }
 
@@ -345,4 +345,4 @@ async function accountView(ctx, shell) {
 function statGrid(items) {
   return h('div', { class: 'stat-grid' }, items.map(([k, v, c]) => h('div', null, h('span', { class: 'mono', style: `color:${c};font-size:17px` }, v), h('span', { class: 'tiny muted' }, k))));
 }
-function pill(text, color) { const s = h('span', { class: 'pill' }, text); s.style.color = color; s.style.borderColor = color; return s; }
+function pill(text, color) { const s = h('span', { class: 'pill' }, text); s.style.color = paint(color); s.style.borderColor = paint(color); return s; }

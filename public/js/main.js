@@ -1,4 +1,5 @@
-import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR } from './lib.js';
+import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, paint } from './lib.js';
+import { theme, setTheme, initTheme } from './theme.js';
 import * as authPages from './pages/auth.js';
 import { overview } from './pages/overview.js';
 import { rolePage } from './pages/role.js';
@@ -178,17 +179,28 @@ export async function refreshStatus() {
       svg('circle', { cx: 13, cy: 13, r: 10, fill: 'none', stroke: s.complete ? '#6fe3b0' : '#f6e016', 'stroke-width': 3, 'stroke-dasharray': `${(C * frac).toFixed(1)} ${C.toFixed(1)}`, transform: 'rotate(-90 13 13)' })),
     h('span', null, h('b', { style: null }, s.accounts === 0 ? 'NO ACCOUNTS YET' : s.complete ? 'HISTORY COMPLETE' : `HISTORY ${s.progress}% READ`),
       h('span', { class: fr ? `fresh-${fr.tone}` : null }, s.accounts === 0 ? 'Connect one to start' : fr ? fr.text : [upTo && `up to ${upTo}`, eta, 'results are provisional'].filter(Boolean).join(' · '))));
-  meter.querySelector('b').style.color = s.complete ? '#6fe3b0' : '#f6e016';
-  if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = TONE_COLOR[fr.tone];
+  meter.querySelector('b').style.color = paint(s.complete ? '#6fe3b0' : '#f6e016');
+  if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = paint(TONE_COLOR[fr.tone]);
   const firstAcct = s.reading?.[0]?.id;
   if (!bellEl.firstChild) drawBell();
   statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), can('view') ? bellEl : null,
     s.unidentified > 0 && h('a', { class: 'unk-badge', href: firstAcct ? `#/accounts/${firstAcct}/unidentified` : '#/accounts', title: 'Calls under event names not yet identified' },
       svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: '#f0b45a', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }), svg('circle', { cx: 8, cy: 8, r: 1.8, fill: '#f0b45a' })),
       `${s.unidentified} UNIDENTIFIED`),
-    meter);
+    meter, themeBtn());
 }
 setInterval(() => refreshStatus(), 20000);
+
+// ---------- light / dark ----------
+const SUN = 'M12 4V2M12 22v-2M4 12H2M22 12h-2M6.3 6.3 4.9 4.9M19.1 19.1l-1.4-1.4M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+const MOON = 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z';
+function themeBtn() {
+  const light = theme() === 'light';
+  return h('button', { class: 'theme-btn', title: light ? 'Switch to the dark theme' : 'Switch to the light theme', 'aria-label': light ? 'Dark theme' : 'Light theme',
+    onClick: () => { setTheme(light ? 'dark' : 'light'); refreshStatus(); render(); } },
+    svg('svg', { width: 18, height: 18, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'aria-hidden': 'true' }, svg('path', { d: light ? MOON : SUN })));
+}
+initTheme();
 
 function shell(active, content, full) {
   const item = (key, href, label, perm) => (!perm || can(perm)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },

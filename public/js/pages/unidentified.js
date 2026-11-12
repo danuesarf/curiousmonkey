@@ -1,7 +1,7 @@
 // Unidentified calls: CloudTrail event names that did not match an IAM action.
 // Each one has a state: open → (suggested) → identified, or unresolved with a note,
 // which reopens after 30 days if the name is still being called.
-import { h, get, post, api, num, ago, fmtDate, toast } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, paint } from '../lib.js';
 import { session, go } from '../main.js';
 import { COVERAGE_ROWS, pct } from './accounts.js';
 
@@ -81,8 +81,8 @@ export async function unidentifiedPage(ctx, id) {
     // coverage strip: where every event went
     const parts = [['assume_events', '#6fe3b0', 'Role sessions'], ['role_calls', '#f6e016', 'Role calls'], ['not_role', '#5f8c73', 'Not a role'], ['other_role', '#3b5f4c', 'Role not in this account']];
     const strip = h('div', { class: 'covbar', role: 'img', 'aria-label': 'Share of events by outcome' }, parts.map(([k, col]) => {
-      const s = h('span', { title: `${k}: ${num(t[k])}` }); s.style.flex = String(t[k] || 0); s.style.background = col; return s; }));
-    const unk = h('span'); unk.style.flex = String(t.unmapped || 0); unk.style.background = 'repeating-linear-gradient(45deg,#f0b45a 0 3px,transparent 3px 6px)'; strip.append(unk);
+      const s = h('span', { title: `${k}: ${num(t[k])}` }); s.style.flex = String(t[k] || 0); s.style.background = paint(col); return s; }));
+    const unk = h('span'); unk.style.flex = String(t.unmapped || 0); unk.style.background = paint('repeating-linear-gradient(45deg,#f0b45a 0 3px,transparent 3px 6px)'); strip.append(unk);
 
     const list = groups[st.tab];
     root.replaceChildren(

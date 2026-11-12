@@ -3,13 +3,15 @@ const nativeReplace = Element.prototype.replaceChildren;
 Element.prototype.replaceChildren = function (...kids) { return nativeReplace.apply(this, kids.flat(Infinity).filter((k) => k != null && k !== false)); };
 const nativeAppend = Element.prototype.append;
 Element.prototype.append = function (...kids) { return nativeAppend.apply(this, kids.flat(Infinity).filter((k) => k != null && k !== false)); };
+import { paint, COLOUR_ATTRS } from './theme.js';
+export { paint } from './theme.js';
 // Tiny DOM helpers. Everything goes in as text nodes, so data from the API can never become markup.
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
     if (v == null || v === false) continue;
     if (k === 'class') el.className = v;
-    else if (k === 'style') el.style.cssText = v; // CSSOM, allowed under the strict CSP (a style attribute is not)
+    else if (k === 'style') el.style.cssText = paint(v); // CSSOM, allowed under the strict CSP (a style attribute is not)
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
     else if (k === 'value') el.value = v;
     else if (k === 'checked' || k === 'disabled' || k === 'selected') el[k] = Boolean(v);
@@ -29,9 +31,9 @@ export const svg = (tag, props, ...kids) => {
   const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
   for (const [k, v] of Object.entries(props || {})) {
     if (v == null || v === false) continue;
-    if (k === 'style') el.style.cssText = v;
+    if (k === 'style') el.style.cssText = paint(v);
     else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
-    else el.setAttribute(k, v);
+    else el.setAttribute(k, COLOUR_ATTRS.has(k) ? paint(String(v)) : v);
   }
   return add(el, kids);
 };

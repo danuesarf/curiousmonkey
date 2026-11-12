@@ -2,7 +2,7 @@
 // Each session is a lane. A call that assumed another role is a portal; the session it created
 // starts from that portal on its own lane, in its own colour. Replay sends a comet along the path,
 // pulses each node as it lands and flashes the matching rows in the call log.
-import { h, svg, get, num, fmtDate, ago } from '../lib.js';
+import { h, svg, get, num, fmtDate, ago, paint } from '../lib.js';
 import { go } from '../main.js';
 
 const LANE = ['#6fe3b0', '#8ec5ff', '#c9a7ff', '#ffb38a', '#f6e016', '#7fe0e0'];
@@ -178,7 +178,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
         const done = i <= pos; const c = s.denied ? '#ff6b5e' : laneColor(s.lane);
         segEls[i].lit.setAttribute('opacity', done ? 0.9 : 0);
         const core = nodeEls[i].core; const ring = core.tagName === 'circle' ? core : core.firstChild;
-        ring.setAttribute('fill', done && core.tagName === 'circle' ? c : '#030d08');
+        ring.setAttribute('fill', paint(done && core.tagName === 'circle' ? c : '#030d08'));
         ring.setAttribute('filter', done ? 'url(#tglow)' : '');
       });
       shown.forEach((s, i) => s.calls.forEach((ci) => { const r = rowFor.get(ci); if (r) { r.classList.toggle('past', i <= pos); r.classList.toggle('future', i > pos); } }));
@@ -217,7 +217,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
       const k = Math.min(1, (now - startT) / dur);
       const p = seg.getPointAtLength(len * k), q = seg.getPointAtLength(Math.max(0, len * k - 10));
       comet.setAttribute('cx', p.x); comet.setAttribute('cy', p.y); comet.setAttribute('opacity', 1);
-      comet.setAttribute('fill', segs[next].kind === 'jump' ? '#8ec5ff' : '#f6e016');
+      comet.setAttribute('fill', paint(segs[next].kind === 'jump' ? '#8ec5ff' : '#f6e016'));
       tail.setAttribute('cx', q.x); tail.setAttribute('cy', q.y); tail.setAttribute('opacity', 1);
       segEls[next].lit.setAttribute('opacity', r1(0.9 * k * 10) / 10);
       if (k >= 1) { land(next); startT = now + 120 / speed; }

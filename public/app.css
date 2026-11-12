@@ -4,11 +4,11 @@
 :root{--bg:#030d08;--panel:#051209;--surface:#07170f;--raise:#0b2418;--ink:#e3efe8;--ink2:#cfe3d8;--muted:#a9bfb2;--faint:#7e978a;
   --line:#143425;--line2:#0f2a1d;--edge:#1f4a35;--green:#6fe3b0;--green-d:#2c7a56;--banana:#f6e016;--banana-d:#e3cf0e;--blue:#8ec5ff;
   --red:#ff6b5e;--red-ink:#ffb3aa;--red-bg:#1d0c09;--red-line:#6b2a22;--amber:#f0b45a;--amber-ink:#ffd89a;--amber-bg:#140f05;--amber-line:#6b4a12;
-  --prov-bg:#0f1006;--prov-line:#5a5110;--prov-ink:#e9e2a6;--never:#5f8c73;--radius:2px;--mono:"Geist Mono",ui-monospace,monospace;color-scheme:dark}
+  --prov-bg:#0f1006;--prov-line:#5a5110;--prov-ink:#e9e2a6;--never:#5f8c73;--banana-fill:#f6e016;--banana-hover:#fff27a;--amber-fill:#f0b45a;--on-accent:#030d08;--radius:2px;--mono:"Geist Mono",ui-monospace,monospace;color-scheme:dark}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 Geist,system-ui,sans-serif}
-a{color:var(--banana)}a:hover{color:#fff27a}
+a{color:var(--banana)}a:hover{color:var(--banana-hover)}
 code,pre,.mono{font-family:var(--mono)}
 h1{margin:0;font-size:30px;line-height:1.15;font-weight:500;letter-spacing:-.03em}
 h2{margin:0;font-size:15px;font-weight:600}
@@ -64,8 +64,8 @@ p{margin:0}
 .tile.warn{border-color:var(--amber-line);background:var(--amber-bg)}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;padding:0 14px;font:inherit;font-size:14px;color:var(--ink);background:var(--surface);border:1px solid var(--edge);border-radius:var(--radius);cursor:pointer;text-decoration:none;white-space:nowrap}
 .btn:hover{border-color:var(--ink);color:var(--ink)}
-.btn.primary{background:var(--banana);color:#030d08;border-color:var(--banana);font-weight:600}.btn.primary:hover{background:#fff27a;color:#030d08}
-.btn.amber{background:var(--amber);color:#030d08;border-color:var(--amber);font-weight:600}
+.btn.primary{background:var(--banana-fill);color:var(--on-accent);border-color:var(--banana-fill);font-weight:600}.btn.primary:hover{background:var(--banana-hover);color:var(--on-accent)}
+.btn.amber{background:var(--amber-fill);color:var(--on-accent);border-color:var(--amber-fill);font-weight:600}
 .btn.danger{color:var(--red-ink);border-color:var(--red-line)}.btn.danger-solid{background:#9b2a1f;border-color:#9b2a1f;color:#fff}
 .btn.sm{min-height:34px;padding:0 12px;font-size:13px}
 .btn[disabled]{opacity:.55;cursor:not-allowed}
@@ -115,7 +115,7 @@ ol.steps{list-style:none;margin:0;padding:0;display:flex;gap:28px;flex-wrap:wrap
 .filters select{min-height:36px;width:auto}
 .filters .count{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--muted)}
 .chip{font:inherit;font-size:13px;min-height:36px;padding:0 12px;border:1px solid var(--edge);background:var(--surface);color:var(--ink);cursor:pointer;border-radius:var(--radius)}
-.chip[aria-pressed=true]{background:var(--banana);color:#030d08;border-color:var(--banana);font-weight:600}
+.chip[aria-pressed=true]{background:var(--banana-fill);color:var(--on-accent);border-color:var(--banana-fill);font-weight:600}
 table{border-collapse:collapse;width:100%;font-size:13px}
 th{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:11px 12px;border-top:1px solid var(--line2);vertical-align:middle}
@@ -191,7 +191,7 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .hud .hot{color:var(--banana)}
 .scene-tools{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:4px}
 .scene-tools button{width:36px;height:36px;background:var(--surface);border:1px solid var(--edge);color:var(--ink);font:inherit;cursor:pointer}
-.scene-tools button[aria-pressed=true]{background:var(--banana);color:#030d08;border-color:var(--banana)}
+.scene-tools button[aria-pressed=true]{background:var(--banana-fill);color:var(--on-accent);border-color:var(--banana-fill)}
 .legend{position:absolute;left:16px;bottom:12px;display:flex;flex-wrap:wrap;gap:6px 14px;max-width:640px;font-size:12px;color:var(--muted);pointer-events:none}
 .legend span{display:flex;align-items:center;gap:6px}
 .hint-br{position:absolute;right:16px;bottom:12px;font-size:12px;color:var(--faint);pointer-events:none}
@@ -294,8 +294,8 @@ details>summary::-webkit-details-marker{display:none}details[open]>summary{margi
 .radar3 .radar-layout{height:calc(100vh - 52px);grid-template-columns:300px minmax(0,1fr) 340px}
 .rtabs{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--edge);flex:none}
 .rtabs button{height:34px;font:inherit;font-size:12.5px;cursor:pointer;border:0;background:transparent;color:var(--ink)}
-.rtabs button[aria-selected=true]{background:var(--banana);color:#030d08;font-weight:600}
-.rtabs button[aria-checked=true]{background:var(--banana);color:#030d08;font-weight:600}
+.rtabs button[aria-selected=true]{background:var(--banana-fill);color:var(--on-accent);font-weight:600}
+.rtabs button[aria-checked=true]{background:var(--banana-fill);color:var(--on-accent);font-weight:600}
 .rtabs button[aria-checked=true] .faint{color:#030d08;opacity:.7}
 .sp-dir .eyebrow{margin:0 0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .rval{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex:none}
@@ -632,3 +632,18 @@ details.sp-legend summary::-webkit-details-marker{display:none}
 .cam-row .eyebrow{margin-right:4px;width:38px;text-align:right}
 .space-cam .cam-reset{min-width:68px}.space-cam .cam-reset:disabled{opacity:.4;cursor:default}
 .space-svg:focus-visible{outline:1px solid var(--banana);outline-offset:-1px}
+
+/* Light theme ("lab paper"): the same design on pale mint paper with deep green ink. Banana stays banana where it
+   is a fill; as text it becomes gold so it can be read. Literal colours elsewhere are mapped by js/theme.js, so
+   rules here use variables only. */
+:root[data-theme=light]{--bg:#eef5f1;--panel:#fafdfb;--surface:#f2f8f4;--raise:#e3efe8;--ink:#0b1d14;--ink2:#1b3226;--muted:#456052;--faint:#62796d;
+  --line:#d3e2d9;--line2:#e1ebe5;--edge:#b3cbbd;--green:#0a8a56;--green-d:#86cfaa;--banana:#8f7400;--banana-d:#7a6300;--blue:#1d62c4;
+  --red:#cc3227;--red-ink:#9e2018;--red-bg:#fdeeec;--red-line:#eeb0a8;--amber:#b05f06;--amber-ink:#864600;--amber-bg:#fdf3e4;--amber-line:#e8c38c;
+  --prov-bg:#fbf7dc;--prov-line:#d8c862;--prov-ink:#5a4f00;--never:#6b9680;--banana-fill:#f6e016;--banana-hover:#ffeb3d;--amber-fill:#f5b24c;--on-accent:#0b1d14;
+  --grid:#d6e5dc;--shadow:rgba(16,58,38,.08);color-scheme:light}
+:root[data-theme=light] body{background-color:var(--bg);background-image:radial-gradient(var(--grid) 1px,transparent 1.2px);background-size:24px 24px}
+:root[data-theme=light] .card,:root[data-theme=light] .tile{box-shadow:0 1px 2px var(--shadow),0 4px 14px -6px var(--shadow)}
+:root[data-theme=light] .rail,:root[data-theme=light] .status{box-shadow:0 0 0 1px var(--line),0 2px 10px -4px var(--shadow)}
+/* theme switch in the status bar */
+.theme-btn{flex:none;display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;background:none;border:1px solid var(--edge);color:var(--muted);cursor:pointer;border-radius:var(--radius)}
+.theme-btn:hover{color:var(--ink);border-color:var(--ink)}
