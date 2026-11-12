@@ -51,6 +51,8 @@ before(async () => {
   const down = await entered(R.release, 'role:111111111111:payments-api', 'role/payments-api (111111111111)', hoursAgo(240), hoursAgo(5), 11);
   await entered(R.api, 'role:999999999999:vendor', 'role/vendor (999999999999)', hoursAgo(5), hoursAgo(5), 2);   // not in the org: not an account-to-account path
   await db.query(`INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at) VALUES ('ASIAA1',$1,$2,$3),('ASIAB3',$4,$5,$6)`, [R.deploy, up, hoursAgo(2), R.release, down, hoursAgo(5)]);
+  // sessions put here directly were never counted into the hourly rollups: like calls stored before an upgrade
+  await db.query(`INSERT INTO rollup_backfill(account_id, covered_from) SELECT id, date_trunc('day', now()) + interval '2 days' FROM cloud_accounts`);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 
@@ -163,4 +165,18 @@ test('one account, in and out: trust between your accounts is drawn even when no
   // a viewer who cannot see staging sees neither direction with it
   const prodOnly = await api.spaceAccount({ id: 'x', scope_accounts: [A] }, A);
   assert.equal(prodOnly.neighbours.length, 0);
+});
+
+test('once the rollups cover an account, its hours come from them: calls in the hour they were made', async () => {
+  const roll = await import('../src/rollups.js');
+  const hour = `date_trunc('hour', now()) - interval '3 hours'`;
+  await db.query(`INSERT INTO call_hourly(account_id, hour, role_id, k, denied, n)
+                  VALUES ($1, ${hour}, $2, gen_random_uuid(), false, 40), ($1, ${hour}, $2, gen_random_uuid(), true, 2)`, [A, R.deploy]);
+  await db.query(`INSERT INTO session_hours(account_id, hour, role_id, session_id) VALUES ($1, ${hour}, $2, gen_random_uuid()), ($1, ${hour}, $2, gen_random_uuid())`, [A, R.deploy]);
+  await db.query(`UPDATE rollup_backfill SET done = true`); roll.forgetCoverage();
+  const a = (await api.spaceEstate(owner)).accounts.find((x) => x.name === 'payments-prod');
+  assert.deepEqual(a.hourly[20], { sessions: 2, calls: 42, denied: 2 });
+  assert.equal(a.hourly.reduce((t, h) => t + h.calls, 0), 42);
+  const acct = await api.spaceAccount(owner, A);
+  assert.equal(JSON.stringify(acct).includes('"hourStart"'), true);
 });

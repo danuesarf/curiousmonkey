@@ -1,3 +1,4 @@
+import { pruneRollups } from '../rollups.js';
 import { config } from '../config.js';
 import { query, tx } from '../db.js';
 import { parseEvent } from '../analyzer/events.js';
@@ -126,6 +127,7 @@ export async function runEvents(ctx) {
   await query(`DELETE FROM seen_events WHERE seen_at < now() - interval '3 days'`);
   await query(`DELETE FROM role_sessions WHERE seen_at < now() - interval '2 days' AND started_at < now() - interval '2 days'`);   // credentials last at most 12h
   await query(`DELETE FROM track_sessions WHERE account_id=$1 AND COALESCE(last_call_at, started_at) < now() - make_interval(days => $2)`, [account.id, config.scanner.sessionRetentionDays]);
+  await pruneRollups(account.id);
   return { slices: slices.length, events: total, gap };
 }
 

@@ -17,6 +17,7 @@ import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
+import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
@@ -548,7 +549,12 @@ const EventsQ = z.object({
 });
 const eventsOpts = (req) => { const o = EventsQ.parse(req.query); return { ...o, account: o.account || null, role: o.role || null, session: o.session || null }; };
 // a page of calls: the first one small so the page opens fast, then older ones as the list is scrolled
-data.get('/events', requirePerm('view'), wrap(async (req, res) => res.json(await searchEvents(req.user, { ...eventsOpts(req), limit: Math.max(1, Math.min(200, Number(req.query.limit) || 50)) }))));
+// The first page of a search is remembered for a moment, so opening Events or flipping a filter back is instant.
+data.get('/events', requirePerm('view'), wrap(async (req, res) => {
+  const opts = { ...eventsOpts(req), limit: Math.max(1, Math.min(200, Number(req.query.limit) || 50)) };
+  const find = () => searchEvents(req.user, opts);
+  res.json(opts.before || opts.from || opts.to ? await find() : await cached(`events:${scopeKey(req.user)}:${JSON.stringify(opts)}`, find, { staleMs: 2 * 60_000 }));
+}));
 data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
   const r = await searchEvents(req.user, { ...eventsOpts(req), limit: 5000 });
   await audit(req, 'events.export', { type: 'events' }, { q: req.query.q || null, rows: r.items.length });
@@ -556,9 +562,11 @@ data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
   res.setHeader('content-disposition', `attachment; filename="curious-monkey-events-${new Date().toISOString().slice(0, 16).replace(':', '')}.csv"`);
   res.send(eventsCsv(r.items));
 }));
-data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await spaceEstate(req.user))));
+// Space is worked out at most every few seconds per viewer scope and kept warm while someone is looking (src/cache.js)
+data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}`, () => spaceEstate(req.user)))));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
-  const r = await spaceAccount(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
+  const id = uuid.parse(req.params.id);
+  const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}`, () => spaceAccount(req.user, id)); if (!r) throw NotFound(); res.json(r);
 }));
 data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   const accountId = req.query.account ? uuid.parse(req.query.account) : null;

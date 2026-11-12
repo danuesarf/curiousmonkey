@@ -6,6 +6,7 @@
 //   role_sessions     temporary access key -> principal, so later calls are attributed to who started the session
 //   track_sessions    / track_calls: session replay, within the retention window
 //   activity_daily    calls per role, principal, action and day; activity_resources; passrole_observed
+import { rollupKey } from '../rollups.js';
 import { config } from '../config.js';
 import { matchTrust } from '../analyzer/trust.js';
 import { recordNewCaller } from '../radarHistory.js';
@@ -13,6 +14,7 @@ import { recordNewCaller } from '../radarHistory.js';
 const DAY = 864e5;
 const CHUNK = 5000;                                     // rows per statement for the big inserts
 const J = (v) => JSON.stringify(v);
+const knownKinds = new Set();          // call_kinds rows known to be stored (see migration 023)
 const chunks = (a, n = CHUNK) => { const out = []; for (let i = 0; i < a.length; i += n) out.push(a.slice(i, i + n)); return out; };
 
 export function principalFrom(e) {
@@ -244,20 +246,51 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
     const tally = new Map();
     for (const part of chunks(callRows)) {
       await c.query(
-        `INSERT INTO track_calls(session_id, event_id, at, action, event_source, event_name, resources, denied, error_code, child_key_id)
-         SELECT s, ev, t, a, src, nm, CASE WHEN res = '' THEN '{}'::text[] ELSE string_to_array(res, chr(31)) END, d, ec, ck
+        `INSERT INTO track_calls(session_id, event_id, at, action, event_source, event_name, resources, denied, error_code, child_key_id, rolled)
+         SELECT s, ev, t, a, src, nm, CASE WHEN res = '' THEN '{}'::text[] ELSE string_to_array(res, chr(31)) END, d, ec, ck, true
            FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::text[], $5::text[], $6::text[], $7::text[], $8::bool[], $9::text[], $10::text[]) AS u(s, ev, t, a, src, nm, res, d, ec, ck)
          ON CONFLICT DO NOTHING`,
         [part.map((x) => sessionId.get(x.key)), part.map((x) => x.e.id), part.map((x) => x.e.time), part.map((x) => x.action), part.map((x) => x.e.eventSource || 'sts.amazonaws.com'),
          part.map((x) => x.e.eventName), part.map((x) => x.resources.join('\u001f')), part.map((x) => !!x.e.denied), part.map((x) => x.e.errorCode), part.map((x) => x.childKey || null)]);
     }
     const once = new Set();
+    const hourly = new Map(), active = new Map();     // call_hourly and session_hours, see migration 023
     for (const x of callRows) {
       const sid = sessionId.get(x.key), k = `${sid}|${x.e.id}`;
       if (once.has(k)) continue;                       // the same event twice in one session (it cannot be stored twice)
       once.add(k);
       const t = tally.get(sid) || { n: 0, denied: 0, last: x.e.time };
       t.n++; if (x.e.denied) t.denied++; if (x.e.time > t.last) t.last = x.e.time; tally.set(sid, t);
+      const hour = new Date(Math.floor(x.e.time.getTime() / 36e5) * 36e5).toISOString();
+      const src = x.e.eventSource || 'sts.amazonaws.com', hk = [hour, x.role.id, x.action || '', src, x.e.eventName, x.e.errorCode || '', x.e.denied ? 1 : 0].join('\u001f');
+      const h = hourly.get(hk); if (h) h.n++; else hourly.set(hk, { hour, role: x.role.id, action: x.action || '', src, name: x.e.eventName, error: x.e.errorCode || '', denied: !!x.e.denied, n: 1,
+        k: rollupKey(x.action || '', src, x.e.eventName, x.e.errorCode || '', !!x.e.denied) });
+      const ak = `${hour}|${x.role.id}|${sid}`; if (!active.has(ak)) active.set(ak, { hour, role: x.role.id, sid });
+    }
+    // sorted, so two batches touching the same rows take their locks in the same order
+    const byKey = (m) => [...m.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([, v]) => v);
+    // kinds of call not seen by this process before go into the dictionary first
+    const fresh = byKey(hourly).filter((x) => !knownKinds.has(x.k)).filter((x, i, all) => all.findIndex((y) => y.k === x.k) === i).sort((a, b) => (a.k < b.k ? -1 : 1));
+    for (const part of chunks(fresh)) {
+      const added = new Set((await c.query(
+        `INSERT INTO call_kinds(k, action, event_source, event_name, error_code, denied)
+         SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bool[]) ON CONFLICT DO NOTHING RETURNING k`,
+        [part.map((x) => x.k), part.map((x) => x.action), part.map((x) => x.src), part.map((x) => x.name), part.map((x) => x.error), part.map((x) => x.denied)])).rows.map((x) => x.k));
+      // one that was already there is committed, so it need not be sent again; one added here may yet be rolled back
+      for (const x of part) if (!added.has(x.k)) knownKinds.add(x.k);
+    }
+    for (const part of chunks(byKey(hourly))) {
+      await c.query(
+        `INSERT INTO call_hourly(account_id, hour, role_id, k, denied, n)
+         SELECT $1::uuid, * FROM unnest($2::timestamptz[], $3::uuid[], $4::uuid[], $5::bool[], $6::int[])
+         ON CONFLICT (account_id, hour, role_id, k) DO UPDATE SET n = call_hourly.n + EXCLUDED.n`,
+        [accountId, part.map((x) => x.hour), part.map((x) => x.role), part.map((x) => x.k), part.map((x) => x.denied), part.map((x) => x.n)]);
+    }
+    for (const part of chunks(byKey(active))) {
+      await c.query(
+        `INSERT INTO session_hours(account_id, hour, role_id, session_id)
+         SELECT $1::uuid, * FROM unnest($2::timestamptz[], $3::uuid[], $4::uuid[]) ON CONFLICT DO NOTHING`,
+        [accountId, part.map((x) => x.hour), part.map((x) => x.role), part.map((x) => x.sid)]);
     }
     if (tally.size) {
       const T = [...tally.entries()];

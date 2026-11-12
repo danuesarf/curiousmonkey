@@ -36,6 +36,29 @@ pool.on('error', (e) => console.error(JSON.stringify({ level: 'error', msg: 'pg 
 
 export const query = (text, params) => pool.query(text, params);
 
+// Heavy read-only pages (Events, Space) can be pointed at a streaming replica with DATABASE_READ_URL, so they never
+// compete with the worker's writes. Without it they use the primary. A replica a few seconds behind is fine for both.
+export const readPool = process.env.DATABASE_READ_URL
+  ? new pg.Pool({ connectionString: process.env.DATABASE_READ_URL, max: Number(process.env.DATABASE_READ_POOL_MAX || 10), ssl: sslOptions() })
+  : pool;
+if (readPool !== pool) readPool.on('error', (e) => console.error(JSON.stringify({ level: 'error', msg: 'pg read pool error', error: e.message })));
+
+/** A read-only query on the replica (or primary). With timeoutMs the server gives up after that long (error code 57014). */
+export async function read(text, params, { timeoutMs = 0 } = {}) {
+  if (!timeoutMs) return readPool.query(text, params);
+  const client = await readPool.connect();
+  try {
+    await client.query('BEGIN READ ONLY');
+    await client.query(`SET LOCAL statement_timeout = ${Math.max(1, Math.floor(Number(timeoutMs)))}`);
+    const r = await client.query(text, params);
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally { client.release(); }
+}
+
 export async function tx(fn) {
   const client = await pool.connect();
   try {
@@ -52,5 +75,6 @@ export async function tx(fn) {
 }
 
 export async function closePool() {
+  if (readPool !== pool) await readPool.end();
   await pool.end();
 }

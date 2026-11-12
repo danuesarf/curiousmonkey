@@ -49,6 +49,17 @@ export async function api(method, path, body) {
   return data;
 }
 export const get = (p) => api('GET', p);
+// A GET remembered for a moment, so going back and forth between two views does not wait on the network again.
+const remembered = new Map();
+export function getCached(path, maxAgeMs = 45_000) {
+  const e = remembered.get(path);
+  if (e && Date.now() - e.at < maxAgeMs) return e.p;
+  const p = get(path);
+  remembered.set(path, { at: Date.now(), p });
+  p.catch(() => remembered.delete(path));
+  if (remembered.size > 40) remembered.delete(remembered.keys().next().value);
+  return p;
+}
 export const post = (p, b) => api('POST', p, b ?? {});
 
 export function toast(msg, bad = false) {

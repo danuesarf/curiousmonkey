@@ -7,7 +7,7 @@
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in WIB); play steps through them.
-import { h, svg, get, num, ago, loadEnvironments, envPalette } from '../lib.js';
+import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette } from '../lib.js';
 import { go } from '../main.js';
 import { trackView } from './track.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
@@ -179,12 +179,15 @@ function accountModel(d) {
 
 export async function spacePage(ctx) {
   const view = ctx.params.get('view') === 'account' ? 'account' : 'estate';
-  const [est, envs] = await Promise.all([get('/space'), loadEnvironments()]);
+  // both views are fetched together and remembered briefly, so zooming into an account and back does not wait twice
+  const wanted = view === 'account' && ctx.params.get('account') ? getCached(`/space/account/${ctx.params.get('account')}`) : null;
+  wanted?.catch(() => {});
+  const [est, envs] = await Promise.all([getCached('/space'), loadEnvironments()]);
   useEnvironments(envs);
   if (!est.accounts.length) return h('div', { class: 'stack' }, h('h1', null, 'Space'), h('p', { class: 'muted' }, 'No accounts yet. Connect one to see it here.'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an account'));
   const live = est.accounts.filter((a) => !a.planned);
   const accountId = ctx.params.get('account') || [...(live.length ? live : est.accounts)].sort((a, b) => b.calls7 - a.calls7)[0].id;
-  const M = view === 'estate' ? estateModel(est) : accountModel(await get(`/space/account/${accountId}`));
+  const M = view === 'estate' ? estateModel(est) : accountModel(await (wanted || getCached(`/space/account/${accountId}`)));
   ctx.setCrumbs(h('a', { href: '#/space' }, 'Space'), ...(view === 'account' ? [M.account.name] : []));
   const st = { dir: 'both', sel: M.defaultSel, hour: M.events.find((e) => e.target === M.defaultSel)?.hour ?? 23, playing: false, az: -14, el: 33, zoom: 1.15, zone: '', timer: null, fit: null, dragging: false };
   const left = h('aside', { class: 'left' }), right = h('aside', { class: 'right' });
@@ -196,7 +199,7 @@ export async function spacePage(ctx) {
   const page = h('div', { class: 'stack space-page', style: 'gap:0' }, h('div', { class: 'scene-layout space-layout' }, left, scene, right));
   // the page opens with something described in the sidebar but the whole scene lit; once the user picks something,
   // everything not connected to it fades so what belongs to what is plain
-  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
+  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; if (M.view === 'estate' && M.by.has(patch.sel) && !M.by.get(patch.sel).planned) getCached(`/space/account/${patch.sel}`).catch(() => {}); } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
   ctx.onLeave(() => { stop(); closeTrack(); });
 
@@ -829,7 +832,7 @@ export async function spacePage(ctx) {
     const play = h('button', { class: 'sp-play', 'aria-label': st.playing ? 'Pause the day' : 'Play the day, one hour at a time', 'aria-pressed': String(st.playing),
       onClick: () => { if (st.playing) { stop(); set({ playing: false }); } else { st.playing = true; st.timer = setInterval(() => { if (!page.isConnected) return stop(); set({ hour: (st.hour + 1) % 24 }); }, 1400); render(); } } },
       svg('svg', { width: 14, height: 14, viewBox: '0 0 14 14', 'aria-hidden': 'true' }, st.playing ? svg('path', { d: 'M3 2v10M11 2v10', stroke: 'currentColor', 'stroke-width': 2.4 }) : svg('path', { d: 'M3 1.5 L12 7 L3 12.5 Z', fill: 'currentColor' })));
-    const input = h('input', { type: 'range', min: 0, max: 23, step: 1, value: hour, 'aria-label': 'Hour of the last 24 to show (calls counted in sessions started that hour)', 'aria-valuetext': `${hourLabel(hour)} WIB`,
+    const input = h('input', { type: 'range', min: 0, max: 23, step: 1, value: hour, 'aria-label': 'Hour of the last 24 to show (calls made in that hour)', 'aria-valuetext': `${hourLabel(hour)} WIB`,
       onInput: (ev) => { stop(); set({ hour: Number(ev.target.value), playing: false }); } });
     const focused = document.activeElement?.classList?.contains('sp-range');
     input.classList.add('sp-range');

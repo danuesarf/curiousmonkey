@@ -47,6 +47,13 @@ test('a full scan inventories roles of every kind and records who used them', as
   assert.equal(roles.find((r) => r.name.startsWith('AWSReservedSSO_')).kind, 'identity-center');
   const t = await totals(A);
   assert.ok(t.calls > 1000, `expected many calls, got ${t.calls}`);
+  // every stored call is counted once in the hourly rollup as it arrives, and its session marked active in that hour
+  const rolled = (await db.query(`SELECT (SELECT sum(n)::int FROM call_hourly WHERE account_id=$1) AS hourly,
+    (SELECT count(*)::int FROM track_calls c JOIN track_sessions s ON s.id=c.session_id WHERE s.account_id=$1) AS calls,
+    (SELECT count(*)::int FROM track_calls c JOIN track_sessions s ON s.id=c.session_id WHERE s.account_id=$1 AND c.rolled IS NULL) AS uncounted,
+    (SELECT count(*)::int FROM session_hours WHERE account_id=$1) AS active,
+    (SELECT count(*)::int FROM (SELECT DISTINCT c.session_id, date_trunc('hour', c.at) FROM track_calls c JOIN track_sessions s ON s.id=c.session_id WHERE s.account_id=$1) x) AS expected`, [A])).rows[0];
+  assert.ok(rolled.calls > 0); assert.equal(rolled.hourly, rolled.calls); assert.equal(rolled.uncounted, 0); assert.equal(rolled.active, rolled.expected);
   // its SAML providers are stored with the issuer from their metadata
   const saml = (await db.query(`SELECT name, issuer FROM saml_providers WHERE account_id=$1`, [A])).rows;
   assert.equal(saml.length, 1);

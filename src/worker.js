@@ -1,3 +1,4 @@
+import { rollupBackfillTick } from './rollups.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -191,6 +192,9 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   ];
   if (scheduler) timers.push(setInterval(() => scheduleTick().catch((e) => log('error', 'schedule failed', { error: e.message })), 60_000));
   if (scheduler) timers.push(setInterval(() => tailTick().catch((e) => log('error', 'catch-up scheduling failed', { error: e.message })), 30_000));
+  // count calls stored before the hourly rollups existed; a no-op once every account is covered
+  let rolling = false;
+  timers.push(setInterval(() => { if (rolling) return; rolling = true; rollupBackfillTick({ log }).catch((e) => log('error', 'rollup backfill failed', { error: e.message })).finally(() => { rolling = false; }); }, 30_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });
   return {

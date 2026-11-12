@@ -1,4 +1,5 @@
 // Tests never reach real AWS: no instance-metadata credential lookups (on CI runners those can hang the process).
+process.env.CACHE_FRESH_MS = '0';
 process.env.AWS_EC2_METADATA_DISABLED = 'true';
 
 // Throwaway real Postgres for tests, using the binaries bundled by embedded-postgres.

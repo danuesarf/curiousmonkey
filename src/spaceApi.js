@@ -5,7 +5,8 @@
 // Sources: roles + activity_daily (calls per role per day, so heights cover 7 days), track_sessions (when sessions
 // started and how many calls they made, so the replay has hours; parent_key_id gives role chaining across accounts),
 // the trust map (who outside the org can enter, and how worrying that trust is), and changes (what needs a look).
-import { query } from './db.js';
+import { read as query } from './db.js';
+import { coveredFrom } from './rollups.js';
 import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
 import { environmentOf } from './environments.js';
@@ -22,6 +23,27 @@ const BUCKETS = `date_trunc('hour', now()) - interval '23 hours'`;
 const bucketOf = (t, start) => Math.max(0, Math.min(23, Math.floor((new Date(t).getTime() - start) / 36e5)));
 
 async function hourStart() { return new Date((await query(`SELECT ${BUCKETS} AS t`)).rows[0].t).getTime(); }
+
+// The last 24 hours, hour by hour. From the hourly rollups (calls counted in the hour they were made; sessions that
+// made a call in it): a few thousand small rows. Accounts whose older calls are still being counted fall back to
+// adding up their sessions by the hour they started.
+async function hourlyByAccount(ids, start) {
+  if (await coveredFrom(ids) <= start) return query(
+    `SELECT c.account_id, c.hour AS h, COALESCE(s.sessions, 0)::int AS sessions, c.calls, c.denied
+       FROM (SELECT account_id, hour, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
+               FROM call_hourly WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) c
+       LEFT JOIN (SELECT account_id, hour, count(DISTINCT session_id) AS sessions FROM session_hours WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) s
+         ON s.account_id = c.account_id AND s.hour = c.hour`, [ids]);
+  return query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
+                  FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [ids]);
+}
+async function hourlyByRole(accountId, start) {
+  if (await coveredFrom([accountId]) <= start) return query(
+    `SELECT role_id, hour AS h, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
+       FROM call_hourly WHERE account_id=$1 AND hour >= ${BUCKETS} GROUP BY 1, 2`, [accountId]);
+  return query(`SELECT role_id, date_trunc('hour', started_at) AS h, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
+                  FROM track_sessions WHERE account_id=$1 AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [accountId]);
+}
 
 /** Identities outside the org that can enter roles in these accounts, grouped by source, worst trust first. */
 async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12, rows = null } = {}) {
@@ -116,8 +138,7 @@ export async function spaceEstate(user) {
              LEFT JOIN (SELECT role_id, sum(count) c7, sum(count) FILTER (WHERE day >= current_date - 1) c1
                           FROM activity_daily WHERE day >= current_date - 6 GROUP BY role_id) t ON t.role_id=r.id
             WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL`, [ids]),
-    query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
-             FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [ids]),
+    hourlyByAccount(ids, start),
     // account to account: every role or IAM user in one of your accounts that entered a role in another, over 90 days
     query(`SELECT p.id, p.key, p.kind, p.sessions_count, p.first_seen, p.last_seen, r.id AS role_id, r.name AS role_name, r.account_id AS dst
              FROM principals p JOIN roles r ON r.id = p.role_id AND r.deleted_at IS NULL
@@ -195,8 +216,7 @@ export async function spaceAccount(user, accountId) {
     // calls per role per action over 7 days, so each role has its services
     query(`SELECT d.role_id, d.action, sum(d.count)::bigint AS n, sum(d.error_count)::bigint AS denied FROM activity_daily d JOIN roles r ON r.id=d.role_id
             WHERE r.account_id=$1 AND d.day >= current_date - 6 GROUP BY 1, 2`, [accountId]),
-    query(`SELECT role_id, date_trunc('hour', started_at) AS h, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
-             FROM track_sessions WHERE account_id=$1 AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [accountId]),
+    hourlyByRole(accountId, start),
     // role chaining in and out over 7 days. Two halves so each uses an index: sessions here and their parents (by key),
     // and this account's sessions and their children (by parent key). A parent lives at most 36 h before its child.
     query(`WITH pairs AS (

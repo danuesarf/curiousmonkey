@@ -87,9 +87,11 @@ export async function eventsPage(ctx) {
     count += page.items.length; next = page.next;
     more.hidden = !next;
     if (!count && !page.items.length) body.replaceChildren();
-    status.textContent = count
+    const indexing = page.indexing ? ` Older events are still being indexed (done back to ${time(page.indexing)} WIB); until then, searching before that is slower.` : '';
+    status.textContent = (count
       ? `${count.toLocaleString('en-US')} call${count === 1 ? '' : 's'}, newest first. Searched back to ${time(page.searched.from)} WIB${next ? '' : ', the start of the range'}.`
-      : `No calls match between ${time(page.range.from)} and ${time(page.range.to)} WIB.`;
+      : next ? `No match yet. Searched back to ${time(page.searched.from)} WIB; still looking further back.`
+        : `No calls match between ${time(page.range.from)} and ${time(page.range.to)} WIB.`) + indexing;
   };
   // older calls load by themselves when the end of the list comes into view; the button stays for keyboards and as a fallback
   const loadOlder = async () => {

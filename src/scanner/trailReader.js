@@ -9,6 +9,7 @@
 //
 // Downloads run ahead of the writer in parallel; how far ahead is bounded by file count and bytes, and a batch is
 // written when it reaches a size, so memory stays flat whatever the account's volume.
+import { pruneRollups } from '../rollups.js';
 import { config } from '../config.js';
 import { pool, query, tx } from '../db.js';
 import { loadContext } from './inventory.js';
@@ -112,6 +113,7 @@ export async function readTrail({ ctx, account, gw, decode = decodeTrailFile, no
   await query(`DELETE FROM seen_events WHERE seen_at < now() - interval '3 days'`);
   await query(`DELETE FROM role_sessions WHERE seen_at < now() - interval '2 days' AND started_at < now() - interval '2 days'`);
   await query(`DELETE FROM track_sessions WHERE account_id=$1 AND COALESCE(last_call_at, started_at) < now() - make_interval(days => $2)`, [account.id, config.scanner.sessionRetentionDays]);
+  await pruneRollups(account.id);
   return { regions: regions.length, files: st.files, events: st.events, bytes: st.bytes };
 }
 

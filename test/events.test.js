@@ -33,10 +33,15 @@ before(async () => {
   for (let i = 0; i < 30; i++) await call(5 + i * 90 < 1400 ? s1 : s1old, `d${String(i).padStart(2, '0')}`, 5 + i * 90, i % 3 ? 'UpdateService' : 'DescribeServices', 'ecs', i % 3 ? 'ecs:UpdateService' : 'ecs:DescribeServices', ['arn:aws:ecs:x:service/payments-api']);
   await call(s1, 'kms1', 7, 'Decrypt', 'kms', 'kms:Decrypt', ['arn:aws:kms:x:key/abc'], true, 'AccessDenied');
   await call(s2, 'r1', 30, 'GetObject', 's3', 's3:GetObject', ['arn:aws:s3:::kbi-reports/q3.csv']);
+  // these calls were stored before the hourly rollups existed, as on an upgraded install: nothing is counted yet
+  await db.query(`INSERT INTO rollup_backfill(account_id, covered_from) SELECT id, date_trunc('day', now()) + interval '2 days' FROM cloud_accounts`);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 
-test('newest first, with the session and role each call came from', async () => {
+// The same searches must give the same answers the older way (sessions overlapping a slice) and planned from the rollups.
+function suite(how) {
+
+test(`${how}: newest first, with the session and role each call came from`, async () => {
   const r = await ev.searchEvents(owner, { range: '24h' });
   assert.equal(r.items[0].event_id, 'd00');
   assert.equal(r.items[1].event_id, 'kms1');
@@ -44,7 +49,7 @@ test('newest first, with the session and role each call came from', async () => 
   const times = r.items.map((x) => x.at); assert.deepEqual(times, [...times].sort().reverse());
 });
 
-test('search keys, plain words, negation and the denied filter', async () => {
+test(`${how}: search keys, plain words, negation and the denied filter`, async () => {
   const ids = async (o) => (await ev.searchEvents(owner, { range: '7d', ...o })).items.map((x) => x.event_id);
   assert.deepEqual(await ids({ q: 'ip:182.1' }), ['r1']);
   assert.deepEqual(await ids({ q: 'kbi-reports' }), ['r1']);                       // a plain word finds a resource
@@ -55,7 +60,7 @@ test('search keys, plain words, negation and the denied filter', async () => {
   assert.deepEqual(await ids({ account: B }), ['r1']);
 });
 
-test('paging walks back through time without gaps or repeats', async () => {
+test(`${how}: paging walks back through time without gaps or repeats`, async () => {
   const all = [];
   let next;
   for (let i = 0; i < 20; i++) {
@@ -66,8 +71,40 @@ test('paging walks back through time without gaps or repeats', async () => {
   assert.equal(all.length, 31); assert.equal(new Set(all).size, 31);
 });
 
-test('someone scoped to one account sees only its calls', async () => {
+test(`${how}: someone scoped to one account sees only its calls`, async () => {
   const r = await ev.searchEvents({ id: 'x', scope_accounts: [B] }, { range: '7d' });
   assert.deepEqual(r.items.map((x) => x.event_id), ['r1']);
   assert.ok(ev.eventsCsv(r.items).split('\n')[1].includes('s3:GetObject'));
+});
+}
+
+suite('not counted yet');
+
+test('the backfill counts older calls once, newest day first, and then covers every hour', async () => {
+  const roll = await import('../src/rollups.js');
+  assert.ok(await roll.coveredFrom([A]) > Date.now());                         // nothing covered: searches go the older way
+  let days = 0;
+  for (let i = 0; i < 20; i++) { const n = await roll.rollupBackfillTick({ settleMs: 0, budgetMs: 5000 }); days += n; if (!n) break; }
+  assert.ok(days >= 4);                                                         // two accounts, today back to the oldest session
+  roll.forgetCoverage();
+  assert.equal(await roll.coveredFrom([A, B]), 0);
+  const calls = (await db.query(`SELECT count(*)::int n FROM track_calls`)).rows[0].n;
+  assert.equal((await db.query(`SELECT sum(n)::int n FROM call_hourly`)).rows[0].n, calls);
+  assert.equal((await db.query(`SELECT h.n FROM call_hourly h JOIN call_kinds k USING (k) WHERE k.action='kms:Decrypt' AND k.denied AND k.error_code='AccessDenied'`)).rows[0].n, 1);
+  // the key worked out in SQL is the one the worker uses for calls as they arrive, so both add to the same row
+  for (const x of (await db.query(`SELECT k, action, event_source, event_name, error_code, denied FROM call_kinds`)).rows)
+    assert.equal(roll.rollupKey(x.action, x.event_source, x.event_name, x.error_code, x.denied), x.k);
+  // running again counts nothing twice
+  assert.equal(await roll.rollupBackfillTick({ settleMs: 0 }), 0);
+  assert.equal((await db.query(`SELECT sum(n)::int n FROM call_hourly`)).rows[0].n, calls);
+  const active = (await db.query(`SELECT count(*)::int n FROM (SELECT DISTINCT session_id, date_trunc('hour', at) FROM track_calls) x`)).rows[0].n;
+  assert.equal((await db.query(`SELECT count(*)::int n FROM session_hours`)).rows[0].n, active);
+});
+
+suite('from the rollups');
+
+test('from the rollups: a search with no match anywhere reads no calls and says the whole range was searched', async () => {
+  const r = await ev.searchEvents(owner, { range: '7d', q: 'action:ssm:StartSession', outcome: 'denied' });
+  assert.equal(r.items.length, 0); assert.equal(r.next, null); assert.equal(r.partial, false);
+  assert.equal(r.searched.from, r.range.from);
 });
