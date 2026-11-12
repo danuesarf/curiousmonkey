@@ -8,10 +8,10 @@
 import { query } from './db.js';
 import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
+import { environmentOf } from './environments.js';
 import { config } from './config.js';
 
 const num = (x) => Number(x || 0);
-const ENVS = ['production', 'shared', 'staging', 'development', 'sandbox'];
 const OUTSIDE = new Set(['public', 'external-account', 'oidc', 'saml']);
 const SEV = { high: 0, medium: 1, low: 2, info: 3, none: 4 };   // the trust map's severities
 const MAX_STARS = 2400;            // across the estate; each account gets a share
@@ -24,8 +24,8 @@ const bucketOf = (t, start) => Math.max(0, Math.min(23, Math.floor((new Date(t).
 async function hourStart() { return new Date((await query(`SELECT ${BUCKETS} AS t`)).rows[0].t).getTime(); }
 
 /** Identities outside the org that can enter roles in these accounts, grouped by source, worst trust first. */
-async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12 } = {}) {
-  const m = await trustMap(user, '', { limit: 1e6 });
+async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12, rows = null } = {}) {
+  const m = rows ? { rows } : await trustMap(user, '', { limit: 1e6 });
   const by = new Map();
   for (const e of m.rows) {
     if (!OUTSIDE.has(e.group) || !accountIds.has(e.accountId) || (roleIds && !roleIds.has(e.roleId))) continue;
@@ -163,7 +163,7 @@ export async function spaceEstate(user) {
       const active = x.roles.filter((r) => r.used).sort((m, n) => num(n.calls7) - num(m.calls7) || (n.last_activity_at ? +new Date(n.last_activity_at) : 0) - (m.last_activity_at ? +new Date(m.last_activity_at) : 0));
       const cold = x.roles.length - active.length;
       return {
-        id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null,
+        id: a.id, name: a.name, awsAccountId: a.account_id, environment: environmentOf(a.environment), ou: a.ou || null,
         planned: a.status === 'planned', note: a.status === 'planned' ? a.note : null,
         roles: x.roles.length, active: active.length, cold, high: x.roles.filter((r) => r.risk === 'High').length,
         calls7: x.roles.reduce((s, r) => s + num(r.calls7), 0), calls24h: x.roles.reduce((s, r) => s + num(r.calls24h), 0),
@@ -241,31 +241,67 @@ export async function spaceAccount(user, accountId) {
   if (clusters.length > 6) clusters = [...clusters.slice(0, 5), { key: 'other', roles: clusters.slice(5).flatMap((c) => c.roles) }];
 
   const ids = new Set([a.id]);
-  // one account: every role an identity can enter, for the list. The trust map only needs this account's roles.
-  const outside = await outsiders({ ...user, scope_accounts: [a.id] }, ids, null, { edgeCap: 500 });
-  const names = new Map((await query('SELECT id, name, environment FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(chains.rows.flatMap((c) => [c.src, c.dst]))]])).rows.map((x) => [x.id, x]));
-  // one line per role here and direction, however many roles it pairs with on the other side; the busiest are drawn
+  // Trust into this account's roles (for the outside identities and your accounts that may come in), and trust in
+  // other accounts' roles that names this account (where its identities may go). The second only reads roles whose
+  // trust policy mentions this account's ID.
+  const [inTrust, outTrust] = await Promise.all([
+    trustMap({ ...user, scope_accounts: [a.id] }, '', { limit: 1e6 }),
+    trustMap(user, '', { limit: 1e6, mentions: a.account_id }),
+  ]);
+  const outside = await outsiders(user, ids, null, { edgeCap: 500, rows: inTrust.rows });
+  const byAws = new Map((await query('SELECT id, account_id, name, environment FROM cloud_accounts')).rows.map((x) => [x.account_id, x]));
+  const byId = new Map([...byAws.values()].map((x) => [x.id, x]));
+  const roleHere = new Map((await query('SELECT id, name FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [a.id])).rows.map((r) => [r.name, r.id]));
+  // which role here a principal names (arn:aws:iam::<this>:role/path/name), or null for the whole account or a user
+  const hereRole = (principal) => { const m = String(principal).match(new RegExp(`^arn:aws[a-z-]*:iam::${a.account_id}:role/(?:.*/)?([^/]+)$`)); return m ? roleHere.get(m[1]) || null : null; };
+  const SEVR = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
+
+  // one line per role here and direction, however many roles it pairs with on the other side; the busiest are drawn.
+  // A line is used (sessions seen chaining), allowed (a trust policy lets it), or both.
   const neighbours = new Map();
+  const link = (otherId, dir, roleId) => {
+    const o = byId.get(otherId); if (!o || otherId === a.id || !inScope(user, otherId)) return null;
+    if (!neighbours.has(otherId)) neighbours.set(otherId, { id: otherId, name: o.name, environment: environmentOf(o.environment), awsAccountId: o.account_id, sessions: 0, allowedIn: 0, allowedOut: 0, byLink: new Map() });
+    const n = neighbours.get(otherId), k = `${dir}:${roleId || '*'}`;
+    if (!n.byLink.has(k)) n.byLink.set(k, { dir, roleId, sessions: 0, allowed: 0, worst: 'none', others: new Map() });
+    return [n, n.byLink.get(k)];
+  };
   for (const c of chains.rows) {
-    const other = c.src === a.id ? c.dst : c.src, o = names.get(other); if (!o || !inScope(user, other)) continue;
-    if (!neighbours.has(other)) neighbours.set(other, { id: other, name: o.name, environment: o.environment, sessions: 0, byLink: new Map() });
-    const n = neighbours.get(other), dir = c.src === a.id ? 'out' : 'in', roleId = dir === 'out' ? c.src_role_id : c.dst_role_id;
-    const k = `${dir}:${roleId}`, l = n.byLink.get(k) || { dir, roleId, sessions: 0, others: new Map() };
-    l.sessions += c.n; n.sessions += c.n;
-    const otherRole = dir === 'out' ? c.dst_role : c.src_role; l.others.set(otherRole, (l.others.get(otherRole) || 0) + c.n);
-    n.byLink.set(k, l);
+    const dir = c.src === a.id ? 'out' : 'in', x = link(dir === 'out' ? c.dst : c.src, dir, dir === 'out' ? c.src_role_id : c.dst_role_id); if (!x) continue;
+    const [n, l] = x, other = dir === 'out' ? c.dst_role : c.src_role;
+    l.sessions += c.n; n.sessions += c.n; l.others.set(other, (l.others.get(other) || 0) + c.n);
   }
-  const LINKS_PER_NEIGHBOUR = 40;
-  const nearest = [...neighbours.values()].sort((m, n) => n.sessions - m.sessions).slice(0, 6).map(({ byLink, ...n }) => {
-    const links = [...byLink.values()].sort((m, k) => k.sessions - m.sessions);
+  const allow = (n, l, other, e) => {
+    l.allowed++; if ((SEVR[e.worst] ?? 4) < (SEVR[l.worst] ?? 4)) l.worst = e.worst;
+    if (!l.others.has(other)) l.others.set(other, 0);
+    if (l.dir === 'in') n.allowedIn++; else n.allowedOut++;
+  };
+  // in: a role here trusts another of your accounts (the whole account, or a role or user in it)
+  for (const e of inTrust.rows) {
+    if (e.group !== 'connected-account' || e.accountId !== a.id) continue;
+    const from = byAws.get(e.principalAccount); if (!from) continue;
+    const x = link(from.id, 'in', e.roleId); if (!x) continue;
+    allow(x[0], x[1], e.type === 'aws-root' ? 'whole account' : e.principal.split('/').pop(), e);
+  }
+  // out: a role in another of your accounts trusts this account, or a role here
+  for (const e of outTrust.rows) {
+    if (e.principalAccount !== a.account_id || e.accountId === a.id || !/^aws-/.test(e.type)) continue;
+    const x = link(e.accountId, 'out', hereRole(e.principal)); if (!x) continue;
+    allow(x[0], x[1], e.role, e);
+  }
+  const LINKS_PER_NEIGHBOUR = 40, NEIGHBOURS = 8;
+  const weight = (n) => n.sessions * 10 + n.allowedIn + n.allowedOut;
+  const nearest = [...neighbours.values()].sort((m, n) => weight(n) - weight(m)).slice(0, NEIGHBOURS).map(({ byLink, ...n }) => {
+    const links = [...byLink.values()].sort((m, k) => k.sessions - m.sessions || k.allowed - m.allowed);
     return { ...n, moreLinks: Math.max(0, links.length - LINKS_PER_NEIGHBOUR), links: links.slice(0, LINKS_PER_NEIGHBOUR).map((l) => {
       const others = [...l.others].sort((m, k) => k[1] - m[1]);
-      return { dir: l.dir, roleId: l.roleId, sessions: l.sessions, otherRole: others.length > 1 ? `${others[0][0]} +${others.length - 1} more` : others[0][0] };
+      return { dir: l.dir, roleId: l.roleId, sessions: l.sessions, allowed: l.allowed, worst: l.worst,
+        otherRole: others.length > 1 ? `${others[0][0]} +${others.length - 1} more` : others[0]?.[0] || '' };
     }) };
   });
   return {
     hourStart: new Date(start).toISOString(),
-    account: { id: a.id, name: a.name, awsAccountId: a.account_id, environment: ENVS.includes(a.environment) ? a.environment : 'production', ou: a.ou || null },
+    account: { id: a.id, name: a.name, awsAccountId: a.account_id, environment: environmentOf(a.environment), ou: a.ou || null },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort((m, n) => n.calls7 - m.calls7).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
     neighbours: nearest, outside, scanner: (await scannerOf([a.id], start)).item, events: ev,

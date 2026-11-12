@@ -5,6 +5,8 @@
 ### Added
 - **IAM Identity Center as one source.** Every account's `AWSSSO_<id>_DO_NOT_DELETE` SAML provider is matched to its Identity Center instance by the issuer in its metadata, and the Trust map and Space draw each instance once, with the account it is managed from.
 - **Warnings for a second Identity Center.** An account that trusts more than one instance, or an instance other than the one most of your accounts use, is a high finding (`finding:idc-multiple`, `finding:idc-other`). Either can mean an account instance turned on inside a member account, or another organisation's.
+- **Space: In, Out or Both.** A toggle shows only who can get into an account (outside identities, your other accounts, the scanner) or only where it can go. Paths between your accounts now include what trust policies allow, not only what was used: dashed when allowed but unused, red when the trust is risky.
+- **Environments are yours to edit.** Add, rename, recolour, reorder or remove environments on the Configuration page. Removing one that accounts use asks where to move them.
 - **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
 
 ### Changed

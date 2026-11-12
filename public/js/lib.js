@@ -117,3 +117,18 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger
     ok.focus();
   });
 }
+
+// ---------- environments: names, colours and order, set on the Configuration page ----------
+let envCache = null, envList = [];
+/** The workspace's environments in order, cached for the page's life; `fresh` after they were edited. */
+export function loadEnvironments(fresh = false) {
+  if (!envCache || fresh) envCache = get('/environments').then((r) => { envList = r.environments; return envList; }).catch((e) => { envCache = null; throw e; });
+  return envCache;
+}
+/** An environment's name, once loadEnvironments has run; its id otherwise */
+export const envName = (id) => envList.find((e) => e.id === id)?.name || id || '';
+/** Environments as already loaded, in order */
+export const envs = () => envList;
+const mix = (hex, to, t) => `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - t) + to * t).toString(16).padStart(2, '0')).join('')}`;
+/** base, a darker dim and a light hot shade of one environment colour, as the maps draw them */
+export const envPalette = (hex) => ({ base: hex, dim: mix(hex, 0, 0.3), hot: mix(hex, 255, 0.55) });

@@ -17,6 +17,7 @@ import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
+import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
 import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
@@ -53,7 +54,7 @@ const KeysIn = z.object({
 });
 const AccountFields = {
   name: z.string().trim().min(1).max(80),
-  environment: z.enum(['production', 'shared', 'staging', 'development', 'sandbox']),
+  environment: z.string().transform(resolveEnvironment).refine(isEnvironment, { message: 'Pick one of the environments set on the Configuration page.' }),
   ou: z.string().trim().max(120).nullable().or(z.literal('')),
   regions: z.array(z.string().regex(/^[a-z]{2}(-[a-z]+)+-\d$/)).min(1).max(20),
   eventSource: z.enum(['event-history', 's3']),
@@ -67,7 +68,7 @@ const AccountFields = {
 };
 const AccountIn = z.object({
   ...AccountFields, accountId: z.string().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
-  environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null), regions: AccountFields.regions.default(config.scanner.defaultRegions),
+  environment: AccountFields.environment.default(defaultEnvironment), ou: AccountFields.ou.default(null), regions: AccountFields.regions.default(config.scanner.defaultRegions),
   eventSource: AccountFields.eventSource.default('event-history'), lookbackDays: AccountFields.lookbackDays.optional(),
   s3: AccountFields.s3.default(null), authMode: AccountFields.authMode.default('assume_role'), baseIdentity: AccountFields.baseIdentity.default('system'),
   roleName: AccountFields.roleName.default(config.scanner.roleName), trustPrincipal: AccountFields.trustPrincipal.default(null),
@@ -148,7 +149,7 @@ data.post('/accounts', requirePerm('accounts'), wrap(async (req, res) => {
 // A planned account: a placeholder for an account that will be onboarded later. No access settings, never scanned.
 const PlannedIn = z.object({
   name: AccountFields.name, accountId: z.string().trim().regex(/^\d{12}$/, 'AWS account IDs are 12 digits'),
-  environment: AccountFields.environment.default('production'), ou: AccountFields.ou.default(null),
+  environment: AccountFields.environment.default(defaultEnvironment), ou: AccountFields.ou.default(null),
   note: z.string().trim().max(500).nullable().or(z.literal('')).default(null),
 });
 async function insertPlanned(req, b, { update = false } = {}) {
@@ -174,8 +175,8 @@ data.post('/accounts/planned/bulk', requirePerm('accounts'), wrap(async (req, re
   const lines = z.object({ text: z.string().max(100000) }).parse(req.body).text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   if (lines.length > 500) return say(res, 'Up to 500 lines at a time.', 'text');
   const parsed = lines.map((l, i) => {
-    const [accountId = '', name = '', environment = 'production', ou = ''] = l.split(/\s*[,;\t]\s*/);
-    const r = PlannedIn.safeParse({ accountId, name: name || accountId, environment: (environment || 'production').toLowerCase(), ou: ou || null });
+    const [accountId = '', name = '', environment = '', ou = ''] = l.split(/\s*[,;\t]\s*/);
+    const r = PlannedIn.safeParse({ accountId, name: name || accountId, environment: environment || defaultEnvironment(), ou: ou || null });
     return r.success ? { ok: r.data } : { line: i + 1, text: l, message: r.error.issues[0].message };
   });
   const bad = parsed.filter((x) => !x.ok);

@@ -3,15 +3,15 @@
 // accounts trusting each other. One line per (where it comes from -> account), coloured by its worst finding. Click a
 // line, a source or an account for the roles behind it in the sidebar; the table below follows the selection.
 // Everything is a query, so a view can be shared as a link: #/trust?q=finding:account-root from:123456789012
-import { h, svg, get, num, ago } from '../lib.js';
+import { h, svg, get, num, ago, loadEnvironments, envName } from '../lib.js';
 import { go, session } from '../main.js';
 
 const SEV = { high: 'b-high', medium: 'b-medium', low: 'b-low', info: 'b-neutral' };
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
 const LINE = { high: '#ff5a4f', medium: '#f0b45a', low: '#5f9c80', info: '#5f9c80', none: '#5f9c80' };
 const DOT = { high: '#ff5a4f', medium: '#f0b45a', low: '#9fe8c4', info: '#7e978a', none: '#2f6e52' };
-const ENV = { production: '#c68405', shared: '#676815', staging: '#4b95f0', development: '#37ac78', sandbox: '#a947a3' };
-const ENV_ORDER = ['production', 'shared', 'staging', 'development', 'sandbox'];
+// environment colours and order, from the Configuration page
+let ENV = {}, ENV_ORDER = [];
 const GROUPS = {
   public: ['Anyone', 'Principal "*" or NotPrincipal: no identity is required.'],
   'external-account': ['Outside AWS accounts', 'Vendors and other tenants: accounts not connected to Curious Monkey.'],
@@ -36,7 +36,8 @@ const sevBadge = (s) => s && s !== 'none' && h('span', { class: `badge ${SEV[s]}
 
 export async function trustPage(ctx) {
   const q = ctx.params.get('q') || '';
-  const [m, accts] = await Promise.all([get(`/trust?q=${encodeURIComponent(q)}`), get('/accounts')]);
+  const [m, accts, envList] = await Promise.all([get(`/trust?q=${encodeURIComponent(q)}`), get('/accounts'), loadEnvironments()]);
+  ENV = Object.fromEntries(envList.map((e) => [e.id, e.color])); ENV_ORDER = envList.map((e) => e.id);
   ctx.setCrumbs('Trust map', q || 'All roles');
   // is this account already the account: term of the query (plain or quoted)?
   const hasAccountTerm = (name) => { const t = ` ${q.toLowerCase()} `, n = name.toLowerCase(); return t.includes(` account:${n} `) || t.includes(` account:"${n}" `); };
@@ -90,7 +91,7 @@ export async function trustPage(ctx) {
   for (const env of [...ENV_ORDER, 'other']) {
     const list = shown.filter((a) => envOf(a) === env).sort((a, b) => (SEV_ORDER[a.inbound.worst] - SEV_ORDER[b.inbound.worst]) || a.name.localeCompare(b.name));
     if (!list.length) continue;
-    heads.push({ x: AX, y: y + 14, text: `${env} · ${list.length}`, color: ENV[env] }); y += HEAD;
+    heads.push({ x: AX, y: y + 14, text: `${env === 'other' ? 'other' : envName(env)} · ${list.length}`, color: ENV[env] }); y += HEAD;
     for (const a of list) { pos.set(a.id, { x: AX, y, w: AW }); y += NODE + GAP; }
     y += 8;
   }
@@ -221,7 +222,7 @@ export async function trustPage(ctx) {
     } else if (a) {
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
       // a planned account is not scanned: its own roles and trust policies are unknown, only trust from it (read in other accounts) is
-      side.replaceChildren(head(a.planned ? `PLANNED · ${(a.env || 'account').toUpperCase()} · NOT ONBOARDED` : `${(a.env || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`,
+      side.replaceChildren(head(a.planned ? `PLANNED · ${(envName(a.env) || 'account').toUpperCase()} · NOT ONBOARDED` : `${(envName(a.env) || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`,
         a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
       a.planned
         ? facts([['Who can get in', 'Not known: its roles and trust policies are read once it is onboarded.', 'warn'],

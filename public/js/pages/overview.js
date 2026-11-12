@@ -1,4 +1,4 @@
-import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM } from '../lib.js';
+import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, envName } from '../lib.js';
 import { session, go } from '../main.js';
 
 const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, unidentified: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
@@ -69,7 +69,7 @@ export async function overview(ctx) {
   const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: f[key] === v }, l))); s.addEventListener('change', () => { f[key] = s.value; f.page = 1; load(); }); return s; };
 
   // ---- which accounts: one control in the filter bar, not a table above the roles (works the same for 5 or 500) ----
-  const ENVS = ['production', 'shared', 'staging', 'development', 'sandbox'].filter((e) => accounts.some((a) => a.environment === e));
+  const ENVS = (await loadEnvironments()).map((e) => e.id).filter((e) => accounts.some((a) => a.environment === e));
   const acctLabel = h('span');
   const acctChips = h('div', { class: 'pill-bar acct-chips' });
   const title = h('h1');
@@ -85,12 +85,12 @@ export async function overview(ctx) {
       picked.length > 4 ? h('span', { class: 'small muted' }, `+${picked.length - 4} more`) : null,
       picked.length ? h('button', { type: 'button', class: 'btn sm', onClick: () => { f.accounts.clear(); changed(); } }, 'Clear') : null);
     const needle = acctSearch.value.trim().toLowerCase();
-    const shown = accounts.filter((a) => !needle || `${a.name} ${a.account_id} ${a.environment} ${a.ou || ''}`.toLowerCase().includes(needle))
+    const shown = accounts.filter((a) => !needle || `${a.name} ${a.account_id} ${a.environment} ${envName(a.environment)} ${a.ou || ''}`.toLowerCase().includes(needle))
       .sort((a, b) => (f.accounts.has(b.id) - f.accounts.has(a.id)) || a.name.localeCompare(b.name));
     acctList.replaceChildren(...(shown.length ? shown.map((a) => {
       const cb = h('input', { type: 'checkbox', checked: f.accounts.has(a.id) });
       cb.addEventListener('change', () => { cb.checked ? f.accounts.add(a.id) : f.accounts.delete(a.id); changed(); });
-      return h('label', { class: 'acct-opt' }, cb, h('span', { class: 'acct-opt-b' }, h('span', { class: 'name' }, a.name), h('span', { class: 'tiny muted' }, `${a.account_id} · ${a.environment}${a.ou ? ` · ${a.ou}` : ''}`)),
+      return h('label', { class: 'acct-opt' }, cb, h('span', { class: 'acct-opt-b' }, h('span', { class: 'name' }, a.name), h('span', { class: 'tiny muted' }, `${a.account_id} · ${envName(a.environment)}${a.ou ? ` · ${a.ou}` : ''}`)),
         h('span', { class: 'mono tiny muted' }, `${num(a.roles)} roles`));
     }) : [h('p', { class: 'small muted', style: 'margin:8px' }, 'No account matches.')]));
   }
@@ -100,7 +100,7 @@ export async function overview(ctx) {
     h('summary', { class: 'btn', 'aria-label': 'Choose accounts' }, h('span', { class: 'muted' }, 'Accounts: '), acctLabel, ' ▾'),
     h('div', { class: 'acct-pop' }, acctSearch,
       h('div', { class: 'pill-bar' }, h('button', { type: 'button', class: 'chip', onClick: () => { f.accounts.clear(); changed(); } }, 'All'),
-        ...ENVS.map((e) => h('button', { type: 'button', class: 'chip', onClick: () => onlyEnv(e) }, `${e[0].toUpperCase()}${e.slice(1)} only`))),
+        ...ENVS.map((e) => h('button', { type: 'button', class: 'chip', onClick: () => onlyEnv(e) }, `${envName(e)} only`))),
       acctList));
   // close when clicking elsewhere or pressing Escape
   const outside = (e) => { if (acctPicker.open && !acctPicker.contains(e.target)) acctPicker.open = false; };

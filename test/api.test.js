@@ -370,3 +370,39 @@ test('planned accounts: placeholders with no access, never scanned, onboarded la
   assert.equal(o.json.status, 'pending'); assert.equal(o.json.role_arn, 'arn:aws:iam::424242424242:role/CuriousMonkeyScanner'); assert.ok(o.json.onboarded_at);
   assert.equal((await owner.post(`/api/accounts/${p.json.id}/scan`)).status, 202);
 });
+
+test('environments: the defaults, accounts by name, rename in place, and removing one in use asks where its accounts go', async () => {
+  const put = (body) => owner.call('PUT', '/api/environments', body);
+  const list = (await owner.get('/api/environments')).json.environments;
+  assert.deepEqual(list.map((e) => e.id), ['production', 'shared', 'staging', 'development', 'sandbox']);
+  // an account can be given its environment by name, in any case
+  const a = await owner.post('/api/accounts/planned', { accountId: '313131313131', name: 'env-test-stg', environment: 'Staging' });
+  assert.equal(a.status, 201, a.text);
+  const env = async () => (await db.query(`SELECT environment FROM cloud_accounts WHERE account_id='313131313131'`)).rows[0].environment;
+  assert.equal(await env(), 'staging');
+  assert.equal((await owner.post('/api/accounts/planned', { accountId: '323232323232', name: 'x', environment: 'qa' })).status, 400);
+
+  // add one, rename staging: accounts stay where they are
+  const next = list.map(({ id, name, color }) => ({ id, name: id === 'staging' ? 'Non-production' : name, color }));
+  let r = await put({ environments: [...next, { name: 'QA', color: '#2fb5c4' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.environments.at(-1).id, 'qa');
+  assert.equal(r.json.environments.find((e) => e.id === 'staging').name, 'Non-production');
+  assert.equal(await env(), 'staging');
+  assert.equal((await owner.post('/api/accounts/planned', { accountId: '323232323232', name: 'x', environment: 'qa' })).status, 201);
+
+  // remove staging: refused while accounts use it, then their accounts move where asked
+  const without = r.json.environments.filter((e) => e.id !== 'staging').map(({ id, name, color }) => ({ id, name, color }));
+  const inStaging = (await db.query(`SELECT count(*)::int n FROM cloud_accounts WHERE environment='staging'`)).rows[0].n;
+  r = await put({ environments: without });
+  assert.equal(r.status, 409); assert.deepEqual(r.json.inUse, { staging: inStaging });
+  r = await put({ environments: without, reassign: { staging: 'qa' } });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(r.json.moved, { staging: { to: 'qa', accounts: inStaging } });
+  assert.equal(await env(), 'qa');
+  // at least one, no two with the same name, a real colour; and it is in the audit log
+  assert.equal((await put({ environments: [] })).status, 400);
+  assert.equal((await put({ environments: [{ name: 'A', color: '#000000' }, { name: 'a', color: '#111111' }] })).status, 400);
+  assert.equal((await put({ environments: [{ name: 'A', color: 'red' }] })).status, 400);
+  assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='settings.environments'`)).rowCount >= 2);
+});

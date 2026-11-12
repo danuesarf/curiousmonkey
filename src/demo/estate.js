@@ -22,8 +22,14 @@ export function samlProvidersOf(acct) {
   return out.map((p) => ({ ...p, arn: `arn:aws:iam::${acct}:saml-provider/${p.name}`, createdAt: new Date('2025-03-01T00:00:00Z') }));
 }
 
+// the two demo accounts trust each other a little, as real estates do: monitoring from the whole other account, and
+// the other account's ETL role reading the lake
+const SIBLING = { '111111111111': '222222222222', '222222222222': '111111111111' };
+
 export function buildEstate(acct) {
   const arn = (name, path = '/') => `arn:aws:iam::${acct}:role${path}${name}`;
+  const sib = SIBLING[acct];
+  const alsoFrom = (stmts) => (sib ? stmts : []);
   const roles = [
     { name: 'payments-api-prod', path: '/', kind: 'custom',
       trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: 'ecs-tasks.amazonaws.com' } }]),
@@ -89,7 +95,8 @@ export function buildEstate(acct) {
       inline: [{ name: 'batch', document: P([A(['s3:GetObject'], 'arn:aws:s3:::acme-legacy-batch/*'), A('glue:StartJobRun')]) }], attached: [],
       principals: [], usage: [], advisor: { glue: 210 }, lastUsedDaysAgo: 210 },
     { name: 'monitoring-reader', path: '/', kind: 'custom',
-      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${acct}:root` } }]),
+      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${acct}:root` } },
+        ...alsoFrom([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${sib}:root` } }])]),
       inline: [{ name: 'read', document: P([A(['cloudwatch:GetMetricData', 'cloudwatch:ListMetrics', 'logs:DescribeLogGroups', 'logs:GetLogEvents'])]) }], attached: [],
       principals: [{ key: 'role:grafana', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/grafana/g`, hours: [0, 6, 12, 18], sessions: 'day' }],
       usage: [{ p: 'role:grafana', src: 'monitoring.amazonaws.com', name: 'GetMetricData', perHour: 5 }, { p: 'role:grafana', src: 'logs.amazonaws.com', name: 'DescribeLogGroups', perHour: 1 }],
@@ -102,7 +109,8 @@ export function buildEstate(acct) {
       usage: [{ p: 'svc:ecs-tasks', src: 'logs.amazonaws.com', name: 'CreateLogStream', perHour: 1 }],
       advisor: { logs: 0, ecs: 400, sts: 0 } },
     { name: 'lake-reader', path: '/', kind: 'custom',
-      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: arn('data-etl') }, Condition: { StringEquals: { 'aws:PrincipalTag/team': 'data' } } }]),
+      trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: arn('data-etl') }, Condition: { StringEquals: { 'aws:PrincipalTag/team': 'data' } } },
+        ...alsoFrom([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${sib}:role/data-etl` } }])]),
       inline: [{ name: 'lake', document: P([A(['s3:GetObject', 's3:ListBucket', 's3:DeleteObject', 's3:GetIntelligentTieringConfiguration'], ['arn:aws:s3:::acme-lake', 'arn:aws:s3:::acme-lake/*'])]) }], attached: [],
       principals: [{ key: 'role:data-etl', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/data-etl/dag`, hours: [2], sessions: 'lake', viaRole: 'data-etl', viaPr: 'role:airflow-worker' }],
       // S3 logs ListBucketIntelligentTieringConfigurations, but the permission is s3:GetIntelligentTieringConfiguration:

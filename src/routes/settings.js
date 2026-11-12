@@ -7,6 +7,7 @@ import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { current, saveSettings, effectiveLookback, EVENT_HISTORY_MAX_DAYS, LOOKBACK_CEILING_DAYS, SLICE_CHOICES } from '../settings.js';
 import { historyFor } from '../history.js';
+import { environments, environmentsWithCounts, saveEnvironments } from '../environments.js';
 
 export const settings = Router();
 settings.use(requireUser);
@@ -60,6 +61,22 @@ settings.put('/settings', requirePerm('settings'), wrap(async (req, res) => {
     await audit(req, 'settings.update', { type: 'settings' }, Object.fromEntries(r.changed.map((k) => [k, { from: before[k].value, to: after[k].value }])));
   }
   res.json({ changed: r.changed });
+}));
+
+/** Environments: everyone sees them (the maps and lists are drawn by them); owners and admins edit them. */
+settings.get('/environments', requirePerm('view'), wrap(async (req, res) => res.json({ environments: await environmentsWithCounts() })));
+
+settings.put('/environments', requirePerm('settings'), wrap(async (req, res) => {
+  const body = z.object({ environments: z.array(z.any()), reassign: z.record(z.string(), z.string()).optional() }).parse(req.body || {});
+  const before = environments();
+  try {
+    const r = await saveEnvironments(body.environments, body.reassign || {}, req.user.id);
+    await audit(req, 'settings.environments', { type: 'settings' }, { from: before, to: r.environments, moved: r.moved });
+    res.json({ environments: await environmentsWithCounts(), moved: r.moved });
+  } catch (e) {
+    if (e.code === 'environment_in_use') return res.status(409).json({ error: e.code, message: e.message, inUse: e.inUse });
+    throw e;
+  }
 }));
 
 /** One tiny Converse call with the given (or saved) region and model. Nothing is saved. */

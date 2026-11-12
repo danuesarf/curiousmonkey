@@ -1,5 +1,5 @@
-// Configuration: Bedrock, and how far back CloudTrail history is read.
-import { h, get, api, post, num, ago, fmtDay, toast } from '../lib.js';
+// Configuration: Bedrock, how far back CloudTrail history is read, and the environments accounts belong to.
+import { h, get, api, post, num, ago, fmtDay, toast, loadEnvironments } from '../lib.js';
 
 const MODELS = [
   'global.anthropic.claude-sonnet-4-5-20250929-v1:0', 'apac.anthropic.claude-sonnet-4-5-20250929-v1:0', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
@@ -14,7 +14,7 @@ const tailLabel = (v) => (!v ? 'Off (daily scan only)' : v < 60 ? `${v} min` : `
 export async function settingsPage(ctx) {
   const root = h('div', { class: 'stack-lg settings-page' });
   let d;
-  async function load() { d = await get('/settings'); draw(); }
+  async function load() { const [x, e] = await Promise.all([get('/settings'), get('/environments')]); d = { ...x, environments: e.environments }; draw(); }
 
   function draw() {
     const S = d.settings;
@@ -116,7 +116,7 @@ export async function settingsPage(ctx) {
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      bedrock, history);
+      bedrock, history, environmentsCard(d.environments, load));
     refreshSave();
   }
 
@@ -149,4 +149,58 @@ function row(a, r, i, bar) {
     h('td', null, h('div', { class: 'row nowrap' }, bar(r, a.effectiveDays), h('span', { class: 'tiny muted' }, r.complete ? 'complete' : `${r.daysRead} of ${a.effectiveDays} days`))),
     h('td', null, num(r.events)));
   return h('tr', { class: i === a.regions.length - 1 ? 'group-end' : '' }, ...cells);
+}
+
+// Environments: add, rename, recolour, reorder, remove. Removing one that accounts use asks where they go.
+const SWATCHES = ['#c68405', '#676815', '#4b95f0', '#37ac78', '#a947a3', '#e0614f', '#2fb5c4', '#8f7cf0', '#d0a43a', '#7e978a'];
+function environmentsCard(saved, reload) {
+  let rows = saved.map((e) => ({ ...e }));
+  const reassign = {};
+  const box = h('div', { class: 'card-b stack' });
+  const removed = () => saved.filter((e) => !rows.some((r) => r.id === e.id));
+  const changed = () => JSON.stringify(rows.map(({ id, name, color }) => [id, name, color])) !== JSON.stringify(saved.map(({ id, name, color }) => [id, name, color]));
+  const draw = () => {
+    const err = h('div', { class: 'err', role: 'alert' });
+    const line = (r, i) => {
+      const color = h('input', { type: 'color', value: r.color, 'aria-label': `Colour of ${r.name || 'new environment'}`, class: 'env-color' });
+      color.addEventListener('input', () => { r.color = color.value; save.disabled = !changed(); });
+      const name = h('input', { value: r.name, maxlength: '40', 'aria-label': 'Name', placeholder: 'Name, e.g. Non-production' });
+      name.addEventListener('input', () => { r.name = name.value; save.disabled = !changed(); });
+      const move = (d) => { const j = i + d; [rows[i], rows[j]] = [rows[j], rows[i]]; draw(); };
+      return h('div', { class: 'env-row' }, color, name,
+        h('span', { class: 'tiny muted mono env-meta' }, r.id ? `${r.id} · ${r.accounts || 0} account${r.accounts === 1 ? '' : 's'}` : 'new'),
+        h('div', { class: 'row', style: 'gap:4px' },
+          h('button', { class: 'btn sm', type: 'button', title: 'Earlier (further east in Space)', disabled: i === 0, onClick: () => move(-1) }, '↑'),
+          h('button', { class: 'btn sm', type: 'button', title: 'Later', disabled: i === rows.length - 1, onClick: () => move(1) }, '↓'),
+          h('button', { class: 'btn sm', type: 'button', title: 'Remove', disabled: rows.length === 1, onClick: () => { rows.splice(i, 1); draw(); } }, 'Remove')));
+    };
+    // where the accounts of a removed environment go
+    const moves = removed().filter((e) => e.accounts).map((e) => {
+      const keep = rows.filter((r) => r.id);
+      if (!keep.some((r) => r.id === reassign[e.id])) reassign[e.id] = keep[0]?.id;
+      const sel = h('select', { 'aria-label': `Move the accounts in ${e.name} to` }, keep.map((r) => h('option', { value: r.id, selected: r.id === reassign[e.id] }, r.name)));
+      sel.addEventListener('change', () => { reassign[e.id] = sel.value; });
+      return h('div', { class: 'alert warn row', style: 'gap:8px;flex-wrap:wrap' }, `Removing ${e.name}: move its ${e.accounts} account${e.accounts === 1 ? '' : 's'} to`, sel);
+    });
+    const add = h('button', { class: 'btn sm', type: 'button', disabled: rows.length >= 12, onClick: () => {
+      rows.push({ name: '', color: SWATCHES.find((c) => !rows.some((r) => r.color === c)) || SWATCHES[0], accounts: 0 }); draw(); box.querySelector('.env-row:last-of-type input:not([type=color])')?.focus(); } }, 'Add environment');
+    const save = h('button', { class: 'btn primary', type: 'button', disabled: !changed(), onClick: async () => {
+      save.disabled = true;
+      try {
+        const r = await api('PUT', '/environments', { environments: rows.map(({ id, name, color }) => ({ ...(id ? { id } : {}), name, color })), reassign });
+        await loadEnvironments(true);
+        const moved = Object.values(r.moved || {}).reduce((n, x) => n + x.accounts, 0);
+        toast(`Environments saved${moved ? `; ${moved} account${moved === 1 ? '' : 's'} moved` : ''}.`);
+        await reload();
+      } catch (e) { err.textContent = e.message; save.disabled = false; }
+    } }, 'Save environments');
+    const reset = h('button', { class: 'btn sm', type: 'button', disabled: !changed(), onClick: () => { rows = saved.map((e) => ({ ...e })); draw(); } }, 'Undo changes');
+    box.replaceChildren(h('div', { class: 'env-list stack' }, ...rows.map(line)), ...moves, err, h('div', { class: 'row' }, add, h('span', { class: 'spacer' }), reset, save));
+    if (moves.length || rows.some((r) => !r.id)) save.disabled = false;
+  };
+  draw();
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Environments'),
+      h('p', { class: 'muted small' }, 'What an account can be: the zones in Space, the groups on Radar and the Trust map, the filters on Roles. The order is east to west in Space. Renaming keeps every account where it is.'))),
+    box);
 }

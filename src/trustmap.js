@@ -249,12 +249,15 @@ function termMatches(e, t) {
 export const matchesQuery = (e, terms) => terms.every((t) => termMatches(e, t) !== t.neg);
 
 // ---------------------------------------------------------------- the whole map, for one viewer
-export async function trustMap(user, q = '', { limit = 500 } = {}) {
+// `mentions`: only roles whose trust policy names that AWS account ID somewhere (a whole account, a role or user in it):
+// what that account's identities can get into, without reading every role in the estate.
+export async function trustMap(user, q = '', { limit = 500, mentions = null } = {}) {
   const p = [];
+  const narrow = mentions && /^\d{12}$/.test(mentions) ? ` AND r.trust_policy::text LIKE $${p.push(`%${mentions}%`)}` : '';
   const roles = (await query(
     `SELECT r.id, r.name, r.arn, r.account_id, r.trust_policy, r.risk, r.granted_count, r.last_used_at, r.last_used_region, a.name AS account_name, a.account_id AS aws_account_id, a.environment
        FROM roles r JOIN cloud_accounts a ON a.id=r.account_id
-      WHERE r.deleted_at IS NULL AND ${scopeSql(user, 'r.account_id', p)}`, p)).rows;
+      WHERE r.deleted_at IS NULL${narrow} AND ${scopeSql(user, 'r.account_id', p)}`, p)).rows;
   const connected = new Map((await query('SELECT account_id, name FROM cloud_accounts')).rows.map((a) => [a.account_id, a.name]));
   const seenRows = roles.length ? (await query(
     `SELECT role_id, key, kind, display, last_seen, sessions_count FROM principals WHERE role_id = ANY($1) AND kind <> 'session'`, [roles.map((r) => r.id)])).rows : [];

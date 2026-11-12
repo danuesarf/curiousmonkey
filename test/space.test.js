@@ -143,3 +143,24 @@ test('the Space indexes are built without a transaction, valid, and migrating ag
   assert.deepEqual(idx.map((x) => [x.relname, x.indisvalid]), [['activity_daily_day_idx', true], ['track_sessions_chained_idx', true]]);
   assert.equal(await (await import('../src/migrate.js')).migrate(() => {}), 0);
 });
+
+test('one account, in and out: trust between your accounts is drawn even when nobody used it', async () => {
+  // staging's release role trusts all of production; production's old-batch trusts staging's release role
+  await db.query(`UPDATE roles SET trust_policy=$2 WHERE id=$1`, [R.release, JSON.stringify({ Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: 'arn:aws:iam::111111111111:root' } }] })]);
+  await db.query(`UPDATE roles SET trust_policy=$2 WHERE id=$1`, [R.idle, JSON.stringify({ Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: 'arn:aws:iam::222222222222:role/release' } }] })]);
+  const n = (await api.spaceAccount(owner, A)).neighbours.find((x) => x.name === 'payments-stg');
+  const ins = n.links.filter((l) => l.dir === 'in'), outs = n.links.filter((l) => l.dir === 'out');
+  // in: old-batch may be entered by staging's release role; nobody has
+  const idle = ins.find((l) => l.roleId === R.idle);
+  assert.deepEqual([idle.allowed, idle.sessions, idle.otherRole], [1, 0, 'release']);
+  // in: deploy was entered by release (seen), but no trust policy here names staging: used, not allowed
+  const deploy = ins.find((l) => l.roleId === R.deploy);
+  assert.ok(deploy.sessions > 0); assert.equal(deploy.allowed, 0);
+  // out: staging's release trusts the whole account, so no single role here: a line from the account itself
+  const whole = outs.find((l) => l.roleId === null);
+  assert.deepEqual([whole.allowed, whole.otherRole, whole.worst], [1, 'release', 'medium']);
+  assert.equal(n.allowedIn, 1); assert.equal(n.allowedOut, 1);
+  // a viewer who cannot see staging sees neither direction with it
+  const prodOnly = await api.spaceAccount({ id: 'x', scope_accounts: [A] }, A);
+  assert.equal(prodOnly.neighbours.length, 0);
+});

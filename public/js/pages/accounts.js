@@ -1,8 +1,11 @@
-import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR, loadEnvironments, envName, envs } from '../lib.js';
 import { session, go } from '../main.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
-const ENVIRONMENTS = ['production', 'shared', 'staging', 'development', 'sandbox'];
+// the environments set on the Configuration page; an account whose environment was removed keeps it until edited
+const envOptions = (current) => [...envs(), ...(current && !envs().some((e) => e.id === current) ? [{ id: current, name: `${current} (removed)` }] : [])]
+  .map((e) => h('option', { value: e.id, selected: e.id === current }, e.name));
+const firstEnv = () => envs()[0]?.id || 'production';
 const STATUS = { connected: 'b-green', pending: 'b-medium', error: 'b-high', planned: 'b-neutral' };
 const SOURCE_LABEL = { 'event-history': 'Event History', s3: 'S3 trail' };
 const MODE_LABEL = { assume_role: 'Assumes a role', access_key: 'IAM user key' };
@@ -58,7 +61,7 @@ export function estimate({ perDay, lookback }) {
 }
 
 const blankModel = () => ({
-  name: '', accountId: '', environment: 'production', ou: '', regions: new Set(['us-east-1', 'ap-southeast-3']),
+  name: '', accountId: '', environment: firstEnv(), ou: '', regions: new Set(['us-east-1', 'ap-southeast-3']),
   eventSource: 'event-history', lookbackDays: 90, s3: { bucket: '', prefix: '', orgId: '', region: '' }, perDay: 10000,
   authMode: 'assume_role', baseIdentity: 'system', roleName: 'CuriousMonkeyScanner', trustPrincipal: '',
   keys: { accessKeyId: '', secretAccessKey: '', sessionToken: '' }, rebuildHistory: false,
@@ -118,7 +121,7 @@ function checkAccess(root, m, { hasStored = false, keysInThisStep = true } = {})
 
 // ---------- sections ----------
 function detailsSection(m, { lockId = false } = {}) {
-  const env = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((e) => h('option', { value: e, selected: e === m.environment }, e)));
+  const env = h('select', { 'data-f': 'environment' }, envOptions(m.environment));
   env.addEventListener('change', () => { m.environment = env.value; });
   // every region the account has, not only the common ones, so any of them can be taken out
   const regions = h('div', { class: 'pill-bar', 'data-f': 'regions', tabindex: '-1' }, [...new Set([...REGIONS, ...m.regions, ...(m.excludedRegions || [])])].sort().map((r) => {
@@ -256,6 +259,7 @@ const snippetQuery = (m) => new URLSearchParams(Object.entries({ mode: m.authMod
 
 // ---------- list ----------
 export async function accountsPage(ctx) {
+  await loadEnvironments();
   const [{ items }] = await Promise.all([get('/accounts'), loadLimits()]);
   ctx.setCrumbs('Accounts');
   const can = (p) => session.user.permissions.includes(p);
@@ -271,7 +275,7 @@ function plannedCard(planned, ctx, can) {
   const remove = (a) => async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'The placeholder is deleted. Nothing changes in AWS.', confirmLabel: 'Remove', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } };
   const actions = (a) => can('accounts') && h('div', { class: 'row' }, h('a', { class: 'btn sm primary', href: `#/accounts/new?from=${a.id}` }, 'Onboard'),
     h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'), h('button', { class: 'btn sm danger', onClick: remove(a) }, 'Remove'));
-  const row = (a) => h('tr', null, h('td', null, h('b', null, a.name)), h('td', { class: 'mono small' }, a.account_id), h('td', null, a.environment), h('td', { class: 'small' }, a.ou || '—'),
+  const row = (a) => h('tr', null, h('td', null, h('b', null, a.name)), h('td', { class: 'mono small' }, a.account_id), h('td', null, envName(a.environment)), h('td', { class: 'small' }, a.ou || '—'),
     h('td', { class: 'small muted' }, a.note || '—'), h('td', { class: 'small muted nowrap' }, ago(a.created_at)), h('td', { class: 'nowrap' }, actions(a)));
   const head = h('tr', null, ...['Name', 'AWS account', 'Environment', 'OU or group', 'Note', 'Added', ''].map((t) => h('th', null, t)));
   return h('section', { class: 'card' },
@@ -282,11 +286,11 @@ function plannedCard(planned, ctx, can) {
 
 /** Add planned accounts: one with a form, or many pasted one per line. */
 function planDialog(ctx) {
-  const m = { name: '', accountId: '', environment: 'production', ou: '', note: '' };
+  const m = { name: '', accountId: '', environment: firstEnv(), ou: '', note: '' };
   const st = { many: false, text: '' };
   const body = h('div', { class: 'stack form' });
   const err = h('div', { class: 'err', role: 'alert' });
-  const env = () => { const e = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((x) => h('option', { value: x, selected: x === m.environment }, x))); e.addEventListener('change', () => { m.environment = e.value; }); return e; };
+  const env = () => { const e = h('select', { 'data-f': 'environment' }, envOptions(m.environment)); e.addEventListener('change', () => { m.environment = e.value; }); return e; };
   const draw = () => {
     const tabs = h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'How many' },
       h('button', { type: 'button', class: 'chip', 'aria-pressed': String(!st.many), onClick: () => { st.many = false; draw(); } }, 'One account'),
@@ -294,7 +298,7 @@ function planDialog(ctx) {
     if (st.many) {
       const ta = h('textarea', { 'data-f': 'text', rows: 9, class: 'mono', placeholder: '123456789012, payments-prod, production, Workloads/Prod\n210987654321, payments-stg, staging' }, st.text);
       ta.addEventListener('input', () => { st.text = ta.value; });
-      body.replaceChildren(tabs, field('One account per line', ta, 'Account ID, name, environment (production, shared, staging, development or sandbox), OU. Only the ID is required. Planned accounts already here take the new name, environment and OU; onboarded ones are left alone.'));
+      body.replaceChildren(tabs, field('One account per line', ta, `Account ID, name, environment (${envs().map((e) => e.name).join(', ')}; ${envName(firstEnv())} if left out), OU. Only the ID is required. Planned accounts already here take the new name, environment and OU; onboarded ones are left alone.`));
     } else {
       body.replaceChildren(tabs,
         field('AWS account ID', input(m, 'accountId', { 'data-f': 'accountId', inputmode: 'numeric', maxlength: '12', placeholder: '123456789012' }), 'Twelve digits, no dashes.'),
@@ -340,7 +344,7 @@ function accountCard(a, ctx, can) {
   const det = h('details', null, h('summary', { class: 'btn sm' }, 'Buckets and resources with data events'), dataBox);
   det.addEventListener('toggle', () => { if (det.open) loadData(); });
   return h('section', { class: 'card' },
-    h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${a.environment}`)),
+    h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${envName(a.environment)}`)),
       h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
         can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
         h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
@@ -393,6 +397,7 @@ const STEPS = ['Account', 'CloudTrail source', 'Access', 'Deploy and connect'];
 const STEP_OF = { name: 1, accountId: 1, environment: 1, regions: 1, eventSource: 2, lookbackDays: 2, 's3.bucket': 2, s3: 2, roleName: 3, trustPrincipal: 3, baseIdentity: 3, authMode: 3 };
 
 export async function newAccountPage(ctx) {
+  await loadEnvironments();
   const [{ items }, identity] = await Promise.all([get('/accounts'), get('/onboarding/identity').catch(() => null), loadLimits()]);
   // onboarding a planned account: its details are filled in and its ID is fixed
   const from = items.find((a) => a.id === ctx?.params?.get('from') && a.status === 'planned') || null;
@@ -482,6 +487,7 @@ export async function newAccountPage(ctx) {
 
 // ---------- edit ----------
 export async function editAccountPage(ctx, id) {
+  await loadEnvironments();
   const [a, identity] = await Promise.all([get(`/accounts/${id}`), get('/onboarding/identity').catch(() => null), loadLimits()]);
   if (a.status === 'planned') return editPlanned(a);
   const m = modelFrom(a);
@@ -543,7 +549,7 @@ export const COVERAGE_ROWS = [
 function editPlanned(a) {
   const m = { name: a.name, environment: a.environment, ou: a.ou || '', note: a.note || '' };
   const box = h('div', { class: 'card-b stack form' });
-  const env = h('select', { 'data-f': 'environment' }, ENVIRONMENTS.map((x) => h('option', { value: x, selected: x === m.environment }, x)));
+  const env = h('select', { 'data-f': 'environment' }, envOptions(m.environment));
   env.addEventListener('change', () => { m.environment = env.value; });
   box.append(field('Name', input(m, 'name', { 'data-f': 'name', maxlength: '80' })), field('AWS account ID', h('input', { value: a.account_id, disabled: true })), field('Environment', env),
     field('OU or group (optional)', input(m, 'ou', { 'data-f': 'ou', maxlength: '120' })), field('Note (optional)', input(m, 'note', { 'data-f': 'note', maxlength: '500', placeholder: 'Owner, ticket, when it should be onboarded' })));

@@ -26,3 +26,29 @@ export function related(M, sel) {
   for (const r of M.roles || []) if (rel.has(r.id) && !role) rel.add(r.cluster.id);
   return rel;
 }
+
+// Paths that come in: an outside identity to its gate, the gate to a role, the scanner, another account chaining in
+const IN_KINDS = new Set(['ext', 'extWarn', 'extHigh', 'fan', 'scan', 'in']);
+const OUT_KINDS = new Set(['out']);
+
+/**
+ * Which paths and outside identities to draw for a direction: 'both', 'in' (who can get in) or 'out' (where it can
+ * go). In one account it is relative to that account; paths inside it (roles to services) always stay. On the estate
+ * it is relative to the account picked: In is what enters it, Out is what it enters, nothing else. With no account
+ * picked, In is everything from outside your org and the scanner, Out the paths between your accounts.
+ */
+export function dirFilter(dir, M, sel) {
+  if (dir !== 'in' && dir !== 'out') return { inside: true, link: () => true, source: () => true };
+  const want = (inbound) => (dir === 'in') === inbound;
+  if (M.view === 'account') {
+    return { inside: dir === 'in', source: () => dir === 'in',
+      link: (l) => (IN_KINDS.has(l.kind) ? want(true) : OUT_KINDS.has(l.kind) ? want(false) : true) };
+  }
+  const A = M.by?.has(sel) ? sel : null;
+  if (A) {
+    const link = (l) => (l.to === A ? want(true) : l.from === A ? want(false) : false);
+    return { inside: dir === 'in', link, source: (id) => dir === 'in' && M.links.some((l) => l.from === id && l.to === A) };
+  }
+  const inbound = (l) => /^ext/.test(l.kind) || l.kind === 'scan';
+  return { inside: dir === 'in', source: () => dir === 'in', link: (l) => (inbound(l) ? want(true) : want(false)) };
+}

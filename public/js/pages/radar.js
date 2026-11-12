@@ -2,14 +2,13 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago } from '../lib.js';
+import { h, svg, get, post, num, ago, loadEnvironments, envName, envs } from '../lib.js';
 import { go } from '../main.js';
 
 const CX = 400, CY = 400;
 const SEV = { high: '#ff6b5e', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: 'DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'DEAD', cleaned: 'CLEANED' };
 const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked' };
-const ENV_ORDER = ['production', 'shared', 'staging', 'development', 'sandbox'];
 const ui = { group: 'env', chip: null };          // remembered while you move between views
 const r1 = (v) => Math.round(v * 10) / 10;
 const P = (deg, r) => { const a = ((deg - 90) * Math.PI) / 180; return [r1(CX + Math.cos(a) * r), r1(CY + Math.sin(a) * r)]; };
@@ -26,6 +25,7 @@ const short = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…
 const riskClass = (r) => ({ High: 'b-high', Medium: 'b-medium', Low: 'b-low' })[r] || 'b-neutral';
 
 export async function radarPage(ctx) {
+  await loadEnvironments();
   const view = ctx.params.get('view') || 'estate';
   const tabs = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Radar view' },
     [['estate', 'Estate'], ['account', 'Account']].map(([k, label]) => h('button', { role: 'tab', 'aria-selected': String(view === k),
@@ -166,7 +166,7 @@ async function estateView(ctx, shell) {
   function draw() {
     const cf = ui.chip ? CHIPS.find((c) => c[0] === ui.chip)[3] : null;
     const key = (a) => (ui.group === 'ou' ? a.ou || 'No OU set' : a.environment);
-    const order = ui.group === 'ou' ? [...new Set(accounts.map(key))].sort() : [...new Set(accounts.map(key))].sort((x, y) => (ENV_ORDER.indexOf(x) + 1 || 9) - (ENV_ORDER.indexOf(y) + 1 || 9));
+    const order = ui.group === 'ou' ? [...new Set(accounts.map(key))].sort() : [...new Set(accounts.map(key))].sort((x, y) => (envs().findIndex((e) => e.id === x) + 1 || 99) - (envs().findIndex((e) => e.id === y) + 1 || 99));
     const groups = order.map((k) => ({ id: k, name: k.toUpperCase(), list: accounts.filter((a) => key(a) === k) })).map((g) => ({ ...g, weight: g.list.length }));
     const secs = sectors(groups, accounts.length, 5);
     for (const s of secs) {
@@ -208,7 +208,7 @@ async function estateView(ctx, shell) {
     listEl.replaceChildren(...listed.map((a) => h('button', { class: 'rank-row', 'aria-pressed': String(sel === a), onClick: () => { sel = a; draw(); card(); } },
       h('span', { class: 'rbody' },
         h('span', { class: 'rname' }, h('span', { class: 'n' }, a.name), a.pings > 0 && pill(`${a.pings} PING${a.pings > 1 ? 'S' : ''}`, SEV[a.pingSeverity])),
-        h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${a.environment} · ${num(a.roles)} roles · ${Math.round((a.never ?? 0) * 100)}% never called${a.complete ? '' : ` · ${a.progress}% read`}`))),
+        h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${envName(a.environment)} · ${num(a.roles)} roles · ${Math.round((a.never ?? 0) * 100)}% never called${a.complete ? '' : ` · ${a.progress}% read`}`))),
       h('span', { class: 'rval' }, h('span', { class: 'mono tiny' }, kfmt(a.excess)), h('span', { class: 'mono tiny', style: `color:${headColor(a.d30)}` }, headText(a.d30))))));
   }
 
@@ -218,7 +218,7 @@ async function estateView(ctx, shell) {
     const trend = T.excess30 ? (T.excessNowComparable - T.excess30) / T.excess30 : null;
     const items = a ? F.items.filter((f) => f.account_id === a.id) : F.items;
     shell.right.replaceChildren(
-      a ? h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, `ACCOUNT · ${a.environment.toUpperCase()}`),
+      a ? h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, `ACCOUNT · ${envName(a.environment).toUpperCase()}`),
         h('div', { class: 'row', style: 'align-items:flex-start' }, h('h2', { class: 'grow', style: 'overflow-wrap:anywhere' }, a.name), !a.complete && h('span', { class: 'badge b-neutral' }, `${a.progress}% read`)),
         h('div', { class: 'tiny muted' }, [a.awsAccountId, a.ou].filter(Boolean).join(' · ')))
         : h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'ESTATE'), h('h2', null, `${num(T.accounts)} accounts · ${num(T.roles)} roles`),
@@ -326,7 +326,7 @@ async function accountView(ctx, shell) {
   shell.left.append(h('div', { class: 'stack', style: 'gap:6px' },
     h('a', { href: '#/', class: 'small' }, `← All ${''}accounts`),
     h('h2', { style: 'overflow-wrap:anywhere' }, acct.name),
-    h('div', { class: 'tiny muted' }, [acct.awsAccountId, acct.environment, acct.ou].filter(Boolean).join(' · ')),
+    h('div', { class: 'tiny muted' }, [acct.awsAccountId, envName(acct.environment), acct.ou].filter(Boolean).join(' · ')),
     !acct.complete && h('div', { class: 'tiny', style: 'color:#f6e016' }, `History ${acct.progress}% read · provisional`)),
   h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', { class: 'eyebrow' }, 'ROLES · PINGS AND RISK FIRST'), h('span', { class: 'mono tiny muted' }, String(roles.length))), search, listEl);
   shell.scene.append(svgEl,
