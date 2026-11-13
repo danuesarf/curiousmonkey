@@ -180,7 +180,7 @@ test('role detail shows who used it, with the conditions they met', async () => 
   assert.ok(acts.items.some((a) => a.action === 'ecs:UpdateService'));
 });
 
-let reviewerClient;
+let reviewerClient, auditorClient, scopedClient;
 test('RBAC: an auditor can read but not change anything; a scoped account owner sees only their account', async () => {
   const mk = async (email, role, extra = {}) => {
     const inv = await owner.post('/api/members/invite', { email, role, ...extra });
@@ -188,13 +188,13 @@ test('RBAC: an auditor can read but not change anything; a scoped account owner 
     await c.post('/api/auth/signup', { name: email, email, password: PW, invite: inv.json.link.split('invite=')[1] });
     return c;
   };
-  const auditor = await mk('aud@kbi.id', 'auditor');
+  const auditor = await mk('aud@kbi.id', 'auditor'); auditorClient = auditor;
   assert.equal((await auditor.get('/api/roles')).json.total, 20);
   assert.equal((await auditor.post('/api/accounts', { name: 'x', accountId: '999999999999' })).status, 403);
   assert.equal((await auditor.post(`/api/accounts/${accA}/scan`)).status, 403);
   assert.equal((await auditor.get('/api/audit')).status, 200);
   assert.equal((await auditor.get('/api/members')).status, 403);
-  const scoped = await mk('squad@kbi.id', 'account_owner', { scope_accounts: [accB] });
+  const scoped = await mk('squad@kbi.id', 'account_owner', { scope_accounts: [accB] }); scopedClient = scoped;
   const mine = (await scoped.get('/api/roles?limit=100')).json;
   assert.equal(mine.total, 10); assert.ok(mine.items.every((r) => r.account_id === accB));
   const other = (await owner.get(`/api/roles?accounts=${accA}&q=payments`)).json.items[0].id;
@@ -234,6 +234,75 @@ test('decisions: only valid choices per finding type; recorded with the reviewer
   assert.equal(after.decision, 'keep_scoped'); assert.equal(after.decided_by, 'Dhimas');
   const log = (await owner.get('/api/audit?action=flag.decide')).json;
   assert.ok(log.items.length >= 1);
+});
+
+test('findings inbox: one list across roles, counts per severity, filters, and the waiting count on the status bar', async () => {
+  const all = (await owner.get('/api/findings?state=all&limit=200')).json;
+  assert.ok(all.total > 0); assert.equal(all.items.length, Math.min(all.total, 200));
+  assert.ok(new Set(all.items.map((x) => x.role_id)).size > 1, 'findings from more than one role');
+  const sevRank = { high: 0, medium: 1, low: 2 };
+  assert.ok(all.items.every((x, i) => !i || sevRank[all.items[i - 1].severity] <= sevRank[x.severity]), 'most severe first');
+  assert.equal(all.severity.high + all.severity.medium + all.severity.low, all.total);
+  const one = all.items[0];
+  assert.ok(one.role_name && one.account_name && Array.isArray(one.allowed));
+  // filters
+  const high = (await owner.get('/api/findings?severity=high&state=all')).json;
+  assert.ok(high.items.every((x) => x.severity === 'high')); assert.equal(high.total, all.severity.high);
+  assert.equal(high.severity.medium, all.severity.medium, 'the severity counts ignore the severity filter');
+  const cat = all.categories[0].category;
+  assert.ok((await owner.get(`/api/findings?category=${cat}&state=all`)).json.items.every((x) => x.category === cat));
+  const inA = (await owner.get(`/api/findings?accounts=${accA}&state=all&limit=200`)).json;
+  assert.ok(inA.items.every((x) => x.account_id === accA));
+  // the one decided in the test above is not waiting; it shows under "decided"
+  const open = (await owner.get('/api/findings?limit=200')).json, decided = (await owner.get('/api/findings?state=decided&limit=200')).json;
+  assert.ok(open.items.every((x) => !x.decision)); assert.ok(decided.items.length >= 1 && decided.items.every((x) => x.decision));
+  assert.equal(open.total + decided.total, all.total);
+  assert.equal((await owner.get('/api/status')).json.findings, open.total);
+  // search finds by role name
+  const byName = (await owner.get(`/api/findings?state=all&q=${encodeURIComponent(one.role_name)}`)).json;
+  assert.ok(byName.items.length && byName.items.every((x) => x.role_name.toLowerCase().includes(one.role_name.toLowerCase()) || x.title.toLowerCase().includes(one.role_name.toLowerCase())));
+  // a member limited to account B sees only B's findings, and none of A's
+  const mine = (await scopedClient.get('/api/findings?state=all&limit=200')).json;
+  assert.ok(mine.items.every((x) => x.account_id === accB));
+  assert.equal((await new Client().get('/api/findings')).status, 401);
+});
+
+test('findings inbox: bulk decisions are all or nothing, per-kind, scoped and audited; clearing puts them back', async () => {
+  const open = (await owner.get(`/api/findings?accounts=${accA}&limit=200`)).json.items;
+  const acts = open.filter((x) => x.allowed.includes('remove')).slice(0, 2);
+  const others = open.filter((x) => x.allowed.includes('accept')).slice(0, 1);
+  assert.equal(acts.length, 2); assert.equal(others.length, 1);
+  // mixed kinds: refused, nothing written
+  const mixed = await owner.post('/api/findings/decisions', { ids: [...acts, ...others].map((x) => x.id), decision: 'remove' });
+  assert.equal(mixed.status, 400); assert.equal(mixed.json.error, 'bad_decision'); assert.match(mixed.json.message, /1 of the selected/);
+  assert.equal((await db.query('SELECT count(*)::int n FROM review_decisions WHERE flag_id = ANY($1::uuid[])', [acts.map((x) => x.id)])).rows[0].n, 0);
+  // resources belong to keep_scoped only
+  assert.equal((await owner.post('/api/findings/decisions', { ids: [acts[0].id], decision: 'remove', resources: ['arn:aws:s3:::x'] })).status, 400);
+  // no permission to decide, or not in scope: refused
+  assert.equal((await auditorClient.post('/api/findings/decisions', { ids: [acts[0].id], decision: 'remove' })).status, 403);
+  assert.equal((await scopedClient.post('/api/findings/decisions', { ids: [acts[0].id], decision: 'remove' })).status, 403);   // account owners cannot decide at all
+  const rev = await reviewerClient.post('/api/findings/decisions', { ids: [...acts.map((x) => x.id), '00000000-0000-4000-8000-000000000000'], decision: 'remove' });
+  assert.equal(rev.status, 404);
+  // the real thing
+  const ok = await reviewerClient.post('/api/findings/decisions', { ids: acts.map((x) => x.id), decision: 'remove', note: 'unused for a year' });
+  assert.equal(ok.status, 200); assert.equal(ok.json.decided, 2);
+  const rows = (await db.query('SELECT decision, note, team FROM review_decisions WHERE flag_id = ANY($1::uuid[])', [acts.map((x) => x.id)])).rows;
+  assert.equal(rows.length, 2); assert.ok(rows.every((r) => r.decision === 'remove' && r.note === 'unused for a year' && r.team === 'infrasec'));
+  const role = (await owner.get(`/api/roles/${acts[0].role_id}`)).json.flags.find((f) => f.id === acts[0].id);
+  assert.equal(role.decision, 'remove', 'the role page sees the inbox decision');
+  const log = (await owner.get('/api/audit?action=flag.decide')).json.items;
+  assert.ok(acts.every((x) => log.some((e) => e.target_id === x.id && e.detail?.bulk === true)), 'one audit entry per finding');
+  assert.ok(!(await owner.get('/api/findings?limit=200')).json.items.some((x) => acts.some((y) => y.id === x.id)), 'decided ones leave the waiting list');
+  // clear them again
+  const cl = await reviewerClient.post('/api/findings/decisions/clear', { ids: acts.map((x) => x.id) });
+  assert.equal(cl.status, 200); assert.equal(cl.json.cleared, 2);
+  assert.equal((await db.query('SELECT count(*)::int n FROM review_decisions WHERE flag_id = ANY($1::uuid[])', [acts.map((x) => x.id)])).rows[0].n, 0);
+  // a finding a newer scan resolved cannot be decided from a stale list
+  await db.query(`UPDATE flags SET status='resolved' WHERE id=$1`, [others[0].id]);
+  try {
+    const stale = await owner.post('/api/findings/decisions', { ids: [others[0].id], decision: 'accept' });
+    assert.equal(stale.status, 409); assert.equal(stale.json.error, 'resolved');
+  } finally { await db.query(`UPDATE flags SET status='open' WHERE id=$1`, [others[0].id]); }
 });
 
 test('recommend, then both teams approve a High-risk role; the export reflects approval', async () => {

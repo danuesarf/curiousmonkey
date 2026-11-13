@@ -671,3 +671,25 @@ button.tile{font:inherit;color:inherit;text-align:left;cursor:pointer}button.til
 .key-bad{color:var(--red-ink)}
 .tile-bad b{color:var(--red)}
 button.tile[aria-pressed=true]{border-color:var(--banana)}
+
+/* ---- Review · Findings inbox ---- */
+.rail a.item{position:relative}
+.rail-count{position:absolute;top:3px;right:6px;min-width:18px;height:16px;padding:0 4px;border-radius:8px;background:var(--red);color:var(--on-accent);font-family:var(--mono);font-size:10px;font-weight:600;line-height:16px;text-align:center}
+.inbox{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(360px,1fr);align-items:start}
+.inbox>div:first-child{border-right:1px solid var(--line);min-width:0}
+.inbox-detail{position:sticky;top:64px;padding:14px;max-height:calc(100vh - 80px);overflow:auto;display:flex;flex-direction:column;gap:10px}
+.inbox-detail .finding{border-top:1px solid var(--line)}
+.inbox-detail .finding a.name{color:var(--ink);font-weight:600}
+@media (max-width:1100px){.inbox{grid-template-columns:minmax(0,1fr)}.inbox>div:first-child{border-right:0}.inbox-detail{position:static;max-height:none;border-top:1px solid var(--line)}}
+.inbox-table td.cb,.inbox-table th.cb{width:34px;padding-right:0}
+.inbox-table tr.active td{background:var(--raise)}
+.inbox-table tr.active td:first-child{box-shadow:inset 3px 0 0 var(--banana)}
+.inbox-table tr.picked td{background:var(--surface)}
+.inbox-table tr.group td{background:var(--panel);padding-top:14px;border-top:1px solid var(--line)}
+.inbox-table tr.group a{text-decoration:none}
+.inbox-table .f-title{font-weight:500}
+.bulk-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--raise);position:sticky;top:52px;z-index:3}
+.bulk-bar input{flex:1 1 220px;max-width:360px;min-height:32px}
+.bulk-bar[hidden]{display:none}
+kbd{font-family:var(--mono);font-size:11px;padding:1px 5px;border:1px solid var(--edge);border-bottom-width:2px;background:var(--surface);color:var(--ink2)}
+.inbox-table .badge{white-space:nowrap}

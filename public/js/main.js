@@ -16,6 +16,7 @@ import { trustPage } from './pages/trust.js';
 import { sectorPage } from './pages/sector.js';
 import { trackPage } from './pages/track.js';
 import { unidentifiedPage } from './pages/unidentified.js';
+import { findingsPage } from './pages/findings.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -29,6 +30,7 @@ const routes = [
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
   [/^#\/roles$/, () => overview, 'roles'],
+  [/^#\/findings$/, () => findingsPage, 'findings'],
   [/^#\/users$/, () => usersPage, 'users'],
   [/^#\/users\/([\w-]+)$/, (m) => (c) => userPage(c, m[1]), 'users'],
   [/^#\/roles\/([\w-]+)\/scan$/, (m) => (c) => sectorPage(c, m[1]), 'radar', true],
@@ -67,6 +69,7 @@ const ICON = {
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
   roles: 'M4 6h16M4 12h16M4 18h10', users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
+  findings: 'M5 4h14v16H5zM8 9l2 2 4-4M8 15h8',
   admin: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
 };
 const mark = (size = 40) => svg('svg', { width: size, height: size, viewBox: '0 0 40 40', 'aria-hidden': 'true' },
@@ -170,6 +173,8 @@ document.addEventListener('click', (ev) => { if (bellOpen && !bellEl.contains(ev
 document.addEventListener('keydown', (ev) => { if (bellOpen && ev.key === 'Escape') { bellOpen = false; drawBell(); } });
 
 const statusBar = h('header', { class: 'status' });
+// open findings waiting for a decision, on the rail's Findings item; filled in by refreshStatus
+const findingsCount = h('span', { class: 'rail-count', hidden: true });
 const crumbsEl = h('span', { class: 'crumbs' });
 export function setCrumbs(...parts) { crumbsEl.replaceChildren(...parts.flatMap((p, i) => [i ? ' · ' : '', p])); }
 
@@ -178,6 +183,8 @@ export async function refreshStatus() {
   if (!state.user) return;
   try { state.status = await get('/status'); } catch { return; }
   const s = state.status;
+  findingsCount.hidden = !s.findings; findingsCount.textContent = s.findings > 999 ? '999+' : String(s.findings || '');
+  findingsCount.title = `${s.findings} finding${s.findings === 1 ? '' : 's'} waiting for a decision`;
   const C = 2 * Math.PI * 10, frac = Math.max(0, Math.min(1, s.progress / 100));
   const upTo = s.readUpTo ? new Date(s.readUpTo).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : null;
   const eta = s.etaSeconds == null ? null : s.etaSeconds < 3600 ? `about ${Math.max(1, Math.round(s.etaSeconds / 60))} min left` : `about ${Math.round(s.etaSeconds / 1800) / 2} h left`;
@@ -216,9 +223,9 @@ initTheme();
 const group = (label, ...items) => { const shown = items.filter(Boolean); return shown.length ? h('div', { class: 'rail-group', role: 'group', 'aria-label': label }, h('span', { class: 'rail-label', 'aria-hidden': 'true' }, label), shown) : null; };
 
 function shell(active, content, full) {
-  const item = (key, href, label, perm) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
-    svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label);
-  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', roles: 'Roles', users: 'IAM users', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
+    svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
+  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', roles: 'Roles', users: 'IAM users', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
@@ -226,6 +233,7 @@ function shell(active, content, full) {
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
       group('Watch', item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('users', '#/users', 'IAM users', 'view')),
+      group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount)),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),

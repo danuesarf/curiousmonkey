@@ -16,6 +16,7 @@ import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
+import { listFindings, waitingCount, decideMany, undecideMany, allowedFor, DecisionError } from '../findingsApi.js';
 import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
@@ -443,12 +444,11 @@ data.get('/roles/:id/actions', requirePerm('view'), wrap(async (req, res) => {
 }));
 
 // ---------- review decisions ----------
-const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 data.post('/flags/:id/decision', requirePerm('decide'), wrap(async (req, res) => {
   const f = (await query('SELECT * FROM flags WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
   if (!f) throw NotFound();
   const role = await roleFor(req, f.role_id);
-  const allowed = ACTION_CATS.has(f.category) ? ['keep_scoped', 'keep', 'remove'] : ['accept', 'investigate'];
+  const allowed = allowedFor(f.category);
   const b = z.object({ decision: z.enum(['keep_scoped', 'keep', 'remove', 'accept', 'investigate']), note: z.string().max(1000).optional(), resources: z.array(z.string().min(1).max(500)).max(50).optional() }).parse(req.body);
   if (!allowed.includes(b.decision)) return res.status(400).json({ error: 'bad_decision', message: `For this finding choose one of: ${allowed.join(', ')}.` });
   await query(
@@ -465,6 +465,23 @@ data.delete('/flags/:id/decision', requirePerm('decide'), wrap(async (req, res) 
   await query('DELETE FROM review_decisions WHERE flag_id=$1', [f.id]);
   await audit(req, 'flag.undecide', { type: 'flag', id: f.id });
   res.json({ ok: true });
+}));
+
+// ---------- the Findings inbox: every open finding across roles and IAM users ----------
+data.get('/findings', requirePerm('view'), wrap(async (req, res) => { res.json(await listFindings(req.user, req.query)); }));
+const decisionError = (res, e) => res.status(e.status).json({ error: e.code, message: e.message });
+data.post('/findings/decisions', requirePerm('decide'), wrap(async (req, res) => {
+  let out;
+  try { out = await decideMany(req.user, req.body); } catch (e) { if (e instanceof DecisionError) return decisionError(res, e); throw e; }
+  // one entry per finding, as the role page writes, so the audit log filters the same either way
+  for (const f of out.flags) await audit(req, 'flag.decide', { type: 'flag', id: f.id }, { role: f.role_name, category: f.category, key: f.key, decision: out.decision, bulk: out.flags.length > 1 });
+  res.json({ ok: true, decided: out.flags.length });
+}));
+data.post('/findings/decisions/clear', requirePerm('decide'), wrap(async (req, res) => {
+  let found;
+  try { found = await undecideMany(req.user, req.body); } catch (e) { if (e instanceof DecisionError) return decisionError(res, e); throw e; }
+  for (const f of found) await audit(req, 'flag.undecide', { type: 'flag', id: f.id }, { role: f.role_name, category: f.category, key: f.key, bulk: found.length > 1 });
+  res.json({ ok: true, cleared: found.length });
 }));
 
 // ---------- recommendations ----------
@@ -581,10 +598,11 @@ data.get('/status', requirePerm('view'), wrap(async (req, res) => {
   const hist = await historyFor(accounts);
   const reading = accounts.filter((a) => !hist.get(a.id).complete);
   const ids = accounts.map((a) => a.id);
-  const [eta, unk] = await Promise.all([
+  const [eta, unk, findings] = await Promise.all([
     ids.length ? query(`SELECT max((j.progress->>'etaSeconds')::int) AS eta FROM scan_jobs j JOIN scan_runs r ON r.id=j.run_id WHERE j.status='running' AND j.kind='events' AND r.account_id = ANY($1)`, [ids]) : { rows: [{}] },
     ids.length ? query(`SELECT count(DISTINCT u.raw_action)::int n FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
       WHERE u.account_id = ANY($1) AND (m.status IS NULL OR m.status='suggested' OR (m.status='unresolved' AND m.reopen_at IS NOT NULL AND m.reopen_at < now() AND u.last_seen > m.decided_at))`, [ids]) : { rows: [{ n: 0 }] },
+    waitingCount(req.user),
   ]);
   const progress = reading.length ? Math.floor(reading.reduce((s, a) => s + hist.get(a.id).progress, 0) / reading.length) : 100;
   const upTo = reading.map((a) => hist.get(a.id).readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null;
@@ -592,7 +610,7 @@ data.get('/status', requirePerm('view'), wrap(async (req, res) => {
   const fresh = accounts.filter((a) => a.status === 'connected' && hist.get(a.id).complete).map((a) => ({ a, t: hist.get(a.id).freshAt }));
   const stalest = fresh.sort((x, y) => (x.t ? +x.t : 0) - (y.t ? +y.t : 0))[0];
   res.json({ progress, complete: !reading.length, reading: reading.map((a) => ({ id: a.id, name: a.name, progress: hist.get(a.id).progress })), readUpTo: upTo,
-    etaSeconds: eta.rows[0]?.eta ?? null, unidentified: unk.rows[0]?.n ?? 0, accounts: accounts.length,
+    etaSeconds: eta.rows[0]?.eta ?? null, unidentified: unk.rows[0]?.n ?? 0, findings, accounts: accounts.length,
     freshAt: stalest?.t || null, stalest: stalest ? { id: stalest.a.id, name: stalest.a.name } : null, tailEveryMinutes: config.scanner.tailEveryMinutes, deliveryLagMinutes: config.scanner.deliveryLagMinutes });
 }));
 

@@ -1,9 +1,7 @@
-import { h, svg, get, post, api, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, toast, copy, modal, KIND, TEAM, field, searchBox, pager, tile } from '../lib.js';
-import { session, go } from '../main.js';
+import { h, svg, get, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, copy, modal, KIND, searchBox, pager, tile } from '../lib.js';
+import { session } from '../main.js';
 import { identifyControls, eventFacts, STATE } from './unidentified.js';
-
-const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
-const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
+import { findingCard } from './findings.js';
 
 export async function rolePage(ctx, id) {
   const d = await get(`/roles/${id}`);
@@ -112,28 +110,13 @@ function principalCard(p) {
 
 function findingsTab(d, ctx, openIdentify) {
   if (!d.flags.length) return h('div', { class: 'empty card' }, 'No open findings.');
-  const canDecide = session.user.permissions.includes('decide');
-  return h('div', { class: 'stack', id: 'flags' }, d.flags.map((f) => {
-    const isAct = ACTION_CATS.has(f.category);
-    const opts = isAct ? [['keep_scoped', 'Keep, scoped'], ['keep', 'Keep as is'], ['remove', 'Remove']] : [['accept', 'Accept'], ['investigate', 'Investigate']];
-    const res = h('input', { placeholder: 'Narrow to resources (comma separated ARNs)', value: (f.decided_resources || []).join(', '), 'aria-label': 'Resources to keep' });
-    const note = h('input', { placeholder: 'Note for the record', value: f.note || '', 'aria-label': 'Note' });
-    const choose = async (decision) => {
-      try { await post(`/flags/${f.id}/decision`, { decision, note: note.value || undefined, resources: decision === 'keep_scoped' && res.value ? res.value.split(',').map((s) => s.trim()).filter(Boolean) : undefined });
-        toast('Decision saved'); ctx.reload(); } catch (e) { toast(e.message, true); }
-    };
-    return h('article', { class: `finding ${f.severity}` },
-      h('div', { class: 'row' }, h('span', { class: 'badge b-neutral' }, CAT[f.category] || f.category), h('span', { class: `badge b-${f.severity}` }, f.severity), h('h3', null, f.title),
-        f.decision && h('span', { class: 'badge b-green' }, `${f.decision.replace('_', ' ')} by ${f.decided_by || 'someone'}`)),
-      h('p', null, f.reason), f.evidence && h('p', { class: 'small muted' }, f.evidence),
-      f.actions.length > 0 && h('div', { class: 'acts' }, f.actions.slice(0, 40).map((a) => h('code', null, a)), f.actions.length > 40 && h('span', { class: 'small muted' }, `+${f.actions.length - 40} more`)),
-      f.resources.length > 0 && h('p', { class: 'small mono muted' }, `Granted on: ${f.resources.slice(0, 4).join(', ')}${f.resources.length > 4 ? '…' : ''}`),
-      f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
-      f.category === 'unmapped-event' && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => openIdentify(null) }, 'Identify these event names')),
-      canDecide && h('div', { class: 'stack' }, isAct && res, note,
-        h('div', { class: 'row' }, opts.map(([v, l]) => h('button', { class: `btn sm${f.decision === v ? ' primary' : ''}`, onClick: () => choose(v) }, l)),
-          f.decision && h('button', { class: 'btn sm', onClick: async () => { await api('DELETE', `/flags/${f.id}/decision`); ctx.reload(); } }, 'Clear decision'))));
-  }));
+  // a decision updates its card in place; the rest of the page stays as it is
+  const waiting = h('span', { class: 'small muted' });
+  const count = () => { const n = d.flags.filter((f) => !f.decision).length; waiting.textContent = n ? `${n} of ${d.flags.length} waiting for a decision` : 'Every finding has a decision.'; };
+  count();
+  return h('div', { class: 'stack', id: 'flags' },
+    h('div', { class: 'row' }, waiting, h('span', { class: 'grow' }), h('a', { class: 'small', href: '#/findings' }, 'Findings on every role →')),
+    d.flags.map((f) => findingCard(f, { onIdentify: openIdentify, onDecided: () => { count(); ctx.refreshStatus(); } })));
 }
 
 function permsTab(d) {

@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **Findings inbox (Review → Findings).** Every open finding on the roles and IAM users a member can see, in one list: severity tiles that filter, type, account, roles or IAM users, *Needs a decision / Decided / All*, *My team's* (roles your review team signs off, and those both teams do) and search, all kept in the address. The selected finding's evidence and decision buttons sit beside the list, so deciding never leaves it. Tick several and decide them at once with one note, or clear their decisions. Keys: `j`/`k` move, `x` selects, `1`–`3` decide, `Esc` unselects, `/` searches. The rail shows how many findings wait for a decision. New `GET /api/findings`, `POST /api/findings/decisions` and `POST /api/findings/decisions/clear`: a bulk decision is all or nothing (every finding must be open, visible to the member and of a kind that takes the decision) and is audited once per finding as `flag.decide` with `bulk: true`. `GET /api/status` also returns `findings`, the waiting count.
 - **IAM user monitoring.** A new *IAM users* page lists every user with each access key (ID, status, age, last use, rotate or deactivate badges), console password and MFA, groups and activity, with filters and sorting; a page per user adds CloudTrail activity per key, who used it in 30 days, roles it assumed and its policies (including its groups'). Users get the same permission analysis as roles, plus findings for old, unused or duplicate keys and console access without MFA.
 - **Radar and Space: Show All | Roles | IAM users.** Users appear on both (squares in Space, their own sector on the account radar).
 - The scanner policy now includes the IAM user, access key, MFA, login profile and group reads. Without them, users are skipped with a warning and stored users are kept.
@@ -23,6 +24,7 @@
 - **Google Cloud scans failed on any project with GKE.** The scanner asked the GKE workload identity pool (`<project>.svc.id.goog`) for its providers, which Google refuses with a 400, and the whole scan stopped. Google-managed pools are now skipped, and a pool that cannot list its providers is skipped instead of failing the scan.
 
 ### Changed
+- **Deciding on a role's Findings tab updates that finding in place** instead of reloading the whole role page, and the tab says how many still wait.
 - **A grouped left rail.** The 12 flat items are now three groups: *Watch* (Radar, Space, Trust), *Investigate* (Events, Roles, IAM users) and *Admin* (Accounts, Operations, Admin). Old addresses (`#/scans`, `#/workers`, `#/members`, `#/audit`, `#/settings`, `#/accounts/<id>/unidentified`) still open and are swapped for the new ones.
 - **Operations** is one page with three tabs: *Scans*, *Workers* and *Database*. Health is split into the last two, and the workers table is no longer repeated on Scans.
 - **Admin** is one page with *Members*, *Audit log* and *Configuration* tabs; a tab shows only to people who may use it. Single sign-on group mappings moved from Members to Configuration → Single sign-on, next to the rest of the SSO setup.
