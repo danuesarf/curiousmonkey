@@ -240,6 +240,7 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
         await c.query(`DELETE FROM ${t} WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1)`, [a.id]);
       }
       // counts that would otherwise be added to again by the re-read
+      await c.query(`UPDATE iam_access_keys SET trail_first_seen=NULL, trail_last_seen=NULL, trail_calls=0, source_ips='{}' WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1)`, [a.id]);
       for (const t of ['event_coverage', 'unmapped_events', 'track_sessions']) await c.query(`DELETE FROM ${t} WHERE account_id=$1`, [a.id]);
     }
     // nosemgrep: tainted-sql-string -- column names are checked against an allowlist in setClause; values are $n parameters
