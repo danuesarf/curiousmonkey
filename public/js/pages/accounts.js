@@ -1,6 +1,6 @@
 import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR, loadEnvironments, envName, envs, paint } from '../lib.js';
 import { session, go } from '../main.js';
-import { gcpSection } from './gcp.js';
+import { gcpSection, cloudTabs } from './gcp.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
 // the environments set on the Configuration page; an account whose environment was removed keeps it until edited
@@ -261,16 +261,19 @@ const snippetQuery = (m) => new URLSearchParams(Object.entries({ mode: m.authMod
 // ---------- list ----------
 export async function accountsPage(ctx) {
   await loadEnvironments();
+  // AWS and Google Cloud on one page, switched by a tab; members limited to some AWS accounts see AWS only
+  const tabs = !session.user.scope_accounts;
+  if (tabs && ctx.params.get('cloud') === 'gcp') { ctx.setCrumbs('Accounts', 'Google Cloud'); return h('div', { class: 'stack-lg' }, cloudTabs('gcp', '#/accounts'), await gcpSection(ctx)); }
   const [{ items }] = await Promise.all([get('/accounts'), loadLimits()]);
   ctx.setCrumbs('Accounts');
   const can = (p) => session.user.permissions.includes(p);
   const live = items.filter((a) => a.status !== 'planned'), planned = items.filter((a) => a.status === 'planned');
   return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS'), h('h1', null, 'Cloud accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
+    tabs && cloudTabs('aws', '#/accounts'),
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS · AWS'), h('h1', null, 'AWS accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
       can('accounts') && h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => planDialog(ctx) }, 'Add planned account'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account'))),
     live.length ? live.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'),
-    planned.length > 0 && plannedCard(planned, ctx, can),
-    await gcpSection(ctx));
+    planned.length > 0 && plannedCard(planned, ctx, can));
 }
 
 function plannedCard(planned, ctx, can) {

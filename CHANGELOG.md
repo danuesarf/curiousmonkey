@@ -20,6 +20,7 @@
 - **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
 
 ### Changed
+- **Accounts: AWS | Google Cloud tabs.** Google Cloud connections moved from the bottom of the Accounts page to their own tab there, where they are connected and edited. The Roles page's Google Cloud tab links to it instead of offering its own *Connect* button.
 - **Space, easier to read.** The right-hand panel now leads with one sentence, the key numbers, then who can get in (from outside your org and from your other accounts, separately) and where it goes. With nothing picked it shows an overview and what to check first. The legend is folded away.
 - **Windows instead of leaving the page.** Anything in Space that used to navigate away (calls, a role, the trust map, sessions) opens in a window over Space, marked with a window icon; it is loaded when opened and dropped when closed. Entries under "who can get in" and "where it goes" open the sessions or trust behind them.
 - **A bell in the top bar** lists what needs a look in the last 24 hours, on every page.

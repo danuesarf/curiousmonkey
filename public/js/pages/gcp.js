@@ -18,9 +18,10 @@ const shortRole = (r) => String(r).replace(/^roles\//, '').replace(/^(projects|o
 const where = (r) => (r.resourceType === 'organization' ? 'Organization' : r.resourceType === 'folder' ? `Folder ${r.resource.split('/')[1]}` : r.resourceType === 'project' ? `Project ${r.project}` : 'This service account');
 const nameOf = (x) => x.email || x.origin?.label || x.member;
 
-/** AWS | Google Cloud, above the Roles page. */
-export const cloudTabs = (current) => h('div', { class: 'tabs cloud-tabs', role: 'tablist', 'aria-label': 'Cloud' },
-  [['aws', 'AWS', '#/roles'], ['gcp', 'Google Cloud', '#/roles?cloud=gcp']].map(([k, l, href]) => h('a', { role: 'tab', href, 'aria-selected': current === k ? 'true' : 'false' }, l)));
+/** AWS | Google Cloud, above the Roles and Accounts pages. */
+export const cloudTabs = (current, base = '#/roles') => h('div', { class: 'tabs cloud-tabs', role: 'tablist', 'aria-label': 'Cloud' },
+  [['aws', 'AWS', base], ['gcp', 'Google Cloud', `${base}?cloud=gcp`]].map(([k, l, href]) => h('a', { role: 'tab', href, 'aria-selected': current === k ? 'true' : 'false' }, l)));
+export const GCP_CONNECTIONS = '#/accounts?cloud=gcp';
 
 // ---------------------------------------------------------------- Accounts page: Google Cloud connections
 export async function gcpSection(ctx) {
@@ -28,7 +29,7 @@ export async function gcpSection(ctx) {
   try { r = await get('/gcp/connections'); } catch { return null; }          // members limited to accounts: not shown
   await loadEnvironments();
   return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head', style: 'margin-top:12px' }, h('div', null, h('div', { class: 'eyebrow' }, 'GOOGLE CLOUD'), h('h2', null, 'Google Cloud organizations and projects'),
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS · GOOGLE CLOUD'), h('h1', null, 'Google Cloud organizations and projects'),
       h('p', { class: 'muted' }, 'Read-only: IAM policies, service accounts, keys and workload identity federation. Who can do what and where they can come from; audit logs are not read yet.')),
     can('accounts') && h('a', { class: 'btn primary', href: '#/gcp/new' }, 'Connect Google Cloud')),
     r.items.length ? r.items.map((c) => connectionCard(c, ctx)) : h('div', { class: 'card empty' }, 'No Google Cloud connected yet.'));
@@ -75,7 +76,7 @@ export async function gcpConnectPage(ctx, id = null) {
   const existing = editing ? (await get('/gcp/connections')).items.find((x) => x.id === id) : null;
   if (editing && !existing) return h('div', { class: 'empty' }, 'That connection no longer exists.');
   const envList = await loadEnvironments();
-  ctx.setCrumbs(h('a', { href: '#/accounts' }, 'Accounts'), editing ? `Edit ${existing.name}` : 'Connect Google Cloud');
+  ctx.setCrumbs(h('a', { href: GCP_CONNECTIONS }, 'Accounts · Google Cloud'), editing ? `Edit ${existing.name}` : 'Connect Google Cloud');
   const m = { name: existing?.name || '', scopeType: existing?.scopeType || 'organization', scopeId: existing?.scopeId || '', environment: existing?.environment || envList[0].id,
     authMode: existing?.authMode || 'wif', home: '', projectNumber: existing?.wif?.projectNumber || '', poolId: existing?.wif?.poolId || 'curious-monkey', providerId: existing?.wif?.providerId || 'aws-scanner',
     serviceAccount: existing?.wif?.serviceAccount || '', key: '' };
@@ -130,7 +131,7 @@ export async function gcpConnectPage(ctx, id = null) {
       h('section', { class: 'card' }, h('div', { class: 'card-b stack' }, err, result,
         h('div', { class: 'row' },
           h('button', { class: 'btn', type: 'button', onClick: test }, 'Test connection'), h('span', { class: 'spacer' }),
-          h('a', { class: 'btn', href: '#/accounts' }, 'Cancel'),
+          h('a', { class: 'btn', href: GCP_CONNECTIONS }, 'Cancel'),
           h('button', { class: 'btn primary', type: 'button', onClick: save }, editing ? 'Save changes' : 'Connect and scan')))));
     refreshCmds();
   }
@@ -150,7 +151,7 @@ export async function gcpConnectPage(ctx, id = null) {
     try {
       if (editing) { await api('PATCH', `/gcp/connections/${id}`, body()); toast('Saved'); }
       else { await post('/gcp/connections', body()); toast('Connected. The first scan starts within 30 seconds.'); }
-      go('#/accounts');
+      go(GCP_CONNECTIONS);
     } catch (x) { err.textContent = x.message; e.target.disabled = false; }
   }
   draw();
@@ -179,7 +180,7 @@ export async function gcpRolesTab(ctx) {
     count.textContent = `${num(r.total)} identities`;
     if (first) { first = false; drawFilters(r); drawTiles(r); }
     list.replaceChildren(r.items.length ? table(r.items) : h('div', { class: 'empty' }, r.total === 0 && !F.q && !F.kinds.size && !F.risks.size && !F.source && !F.project
-      ? h('div', null, 'No Google Cloud identities yet. ', can('accounts') && h('a', { href: '#/gcp/new' }, 'Connect Google Cloud')) : 'Nothing matches these filters.'),
+      ? h('div', null, 'No Google Cloud identities yet. ', can('accounts') ? h('span', null, 'Connect an organization or project on ', h('a', { href: GCP_CONNECTIONS }, 'Accounts → Google Cloud'), '.') : 'An admin connects Google Cloud on the Accounts page.') : 'Nothing matches these filters.'),
     r.total > 25 && h('div', { class: 'pager' }, h('span', { class: 'small muted' }, `Page ${F.page} of ${Math.ceil(r.total / 25)}`),
       h('button', { class: 'btn sm', disabled: F.page <= 1, onClick: () => { F.page--; load(); } }, 'Previous'),
       h('button', { class: 'btn sm', disabled: F.page * 25 >= r.total, onClick: () => { F.page++; load(); } }, 'Next')));
@@ -237,7 +238,7 @@ export async function gcpRolesTab(ctx) {
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ROLES · GOOGLE CLOUD'), h('h1', null, 'Google Cloud identities'),
       h('p', { class: 'muted' }, 'Service accounts, people, groups and federated identities: what IAM lets them do, and where they can come from. Read from IAM policies; activity is not read yet, so nothing here says what was actually used.')),
-    h('div', { class: 'actions' }, can('accounts') && h('a', { class: 'btn', href: '#/gcp/new' }, 'Connect Google Cloud'))),
+    can('accounts') && h('div', { class: 'actions' }, h('a', { class: 'btn', href: GCP_CONNECTIONS }, 'Connections'))),
     tiles, h('section', { class: 'card' }, chips, list));
 }
 

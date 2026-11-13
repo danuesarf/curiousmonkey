@@ -893,7 +893,7 @@ export async function spacePage(ctx) {
           items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${x.gcpEmail.split('@')[0]} → ${x.awsRole}`, meta: x.awsAccountName, pick: l.id, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
         ...(fromOut.length ? [{ title: 'From outside your organization', items: fromOut.map((x) => ({ label: x.label, icon: x.kind, meta: x.sub, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id })) }] : []),
         { title: 'Service accounts', hint: 'Riskiest first. Click one for what it can do and who can become it.', items: p.accounts.filter((a) => !a.managed).map(sa), empty: 'None.' }],
-      actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts']] };
+      actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts?cloud=gcp']] };
   }
   // roles an outside identity can enter, readable: permission-set names, what was flagged, whether it was used
   function roleItems(edges, ids) {
