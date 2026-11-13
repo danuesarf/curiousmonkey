@@ -57,8 +57,9 @@ export async function runEvents(ctx) {
     return { skipped: 'up to date' };
   }
 
-  const roleRows = (await query(`SELECT arn, name, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
-  const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.map((r) => [r.name, r])) };
+  const roleRows = (await query(`SELECT arn, name, id, kind, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
+  // IAM users are found by ARN only: a user and a role may share a name
+  const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.filter((r) => r.kind !== 'iam-user').map((r) => [r.name, r])) };
   const listCache = new Map();
   const t0 = Date.now();
   let rate = null;                                             // seconds per slice, smoothed
@@ -133,14 +134,14 @@ export async function runEvents(ctx) {
 
 /** Count what happens to every event, so nothing is dropped without a trace. */
 export function coverage(evs, roles) {
-  const k = { events: evs.length, assume_events: 0, role_calls: 0, recovered_role: 0, other_role: 0, not_role: 0, no_permission: 0, unmapped: 0, no_resources: 0 };
+  const k = { events: evs.length, assume_events: 0, role_calls: 0, user_calls: 0, recovered_role: 0, other_role: 0, not_role: 0, no_permission: 0, unmapped: 0, no_resources: 0 };
   const unmapped = new Map();
   for (const e of evs) {
     if (e.type === 'ignore') { k.not_role++; continue; }
     const role = roleOf(e, roles);
     if (!role) { k.other_role++; continue; }
     if (e.type === 'assume') { k.assume_events++; continue; }
-    k.role_calls++;
+    if (e.userCall) k.user_calls++; else k.role_calls++;
     if (!e.roleArn) k.recovered_role++;
     if (e.noPermission) { k.no_permission++; continue; }
     if (!e.mapped && e.action) {

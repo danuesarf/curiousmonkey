@@ -10,6 +10,7 @@ import { auditPage } from './pages/audit.js';
 import { opsPage } from './pages/ops.js';
 import { radarPage } from './pages/radar.js';
 import { gcpConnectPage, gcpPrincipalPage } from './pages/gcp.js';
+import { usersPage, userPage } from './pages/users.js';
 import { spacePage } from './pages/space.js';
 import { eventsPage } from './pages/events.js';
 import { trustPage } from './pages/trust.js';
@@ -31,6 +32,8 @@ const routes = [
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
   [/^#\/roles$/, () => overview, 'roles'],
+  [/^#\/users$/, () => usersPage, 'users'],
+  [/^#\/users\/([\w-]+)$/, (m) => (c) => userPage(c, m[1]), 'users'],
   [/^#\/roles\/([\w-]+)\/scan$/, (m) => (c) => sectorPage(c, m[1]), 'radar', true],
   [/^#\/roles\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'roles'],
   [/^#\/roles\/([\w-]+)$/, (m) => (c) => rolePage(c, m[1]), 'roles'],
@@ -57,7 +60,7 @@ const ICON = {
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
-  roles: 'M4 6h16M4 12h16M4 18h10', scans: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
+  roles: 'M4 6h16M4 12h16M4 18h10', users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', scans: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
   members: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6s7 2 7 6M17 11a3 3 0 1 0 0-6M22 20c0-3-2-5-4-5', audit: 'M6 3h9l4 4v14H6zM9 12h7M9 16h7M9 8h3',
   workers: 'M5 5h14v6H5zM5 13h14v6H5zM8 8h.01M8 16h.01M12 8h4M12 16h4',
   settings: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
@@ -209,13 +212,13 @@ initTheme();
 function shell(active, content, full) {
   const item = (key, href, label, perm) => (!perm || can(perm)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label);
-  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', roles: 'Roles', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration', workers: 'Health' }[active] || '');
+  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', roles: 'Roles', users: 'IAM users', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration', workers: 'Health' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
-      item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('scans', '#/scans', 'Scans', 'ops'), item('workers', '#/workers', 'Health', 'ops'),
+      item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('users', '#/users', 'IAM users', 'view'), item('scans', '#/scans', 'Scans', 'ops'), item('workers', '#/workers', 'Health', 'ops'),
       item('accounts', '#/accounts', 'Accounts', 'view'), item('members', '#/members', 'Members', 'members'), item('audit', '#/audit', 'Audit', 'audit'), item('settings', '#/settings', 'Config', 'settings'),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),

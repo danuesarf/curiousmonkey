@@ -252,7 +252,8 @@ data.patch('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
 data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
   const p = [];
   const r = await query(`
-    SELECT a.*, (SELECT count(*)::int FROM roles WHERE account_id=a.id AND deleted_at IS NULL) AS roles,
+    SELECT a.*, (SELECT count(*)::int FROM roles WHERE account_id=a.id AND deleted_at IS NULL AND kind <> 'iam-user') AS roles,
+           (SELECT count(*)::int FROM roles WHERE account_id=a.id AND deleted_at IS NULL AND kind = 'iam-user') AS iam_users,
       (SELECT count(*)::int FROM data_event_sources WHERE account_id=a.id) AS data_event_sources,
       (SELECT json_build_object('id', id, 'status', status, 'trigger', trigger, 'created_at', created_at, 'finished_at', finished_at, 'error', error)
          FROM scan_runs WHERE account_id=a.id AND trigger <> 'tail' ORDER BY created_at DESC LIMIT 1) AS last_run,
@@ -368,7 +369,7 @@ data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
   const q = req.query;
   if (q.q) add('(r.name ILIKE ? OR r.arn ILIKE ?)', `%${String(q.q).slice(0, 100)}%`);
   if (csv(q.accounts).length) add('r.account_id = ANY(?::uuid[])', csv(q.accounts).filter((x) => uuid.safeParse(x).success));
-  if (csv(q.kinds).length) add('r.kind = ANY(?)', csv(q.kinds));
+  if (csv(q.kinds).length) add('r.kind = ANY(?)', csv(q.kinds)); else where.push("r.kind <> 'iam-user'");
   if (csv(q.risks).length) add('r.risk = ANY(?)', csv(q.risks));
   if (csv(q.teams).length) add('r.reviewer_team = ANY(?)', csv(q.teams));
   if (q.unconfirmed === '1') where.push('r.unconfirmed_count > 0');
@@ -537,9 +538,10 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 }));
 
 // ---- radar v3 ----
-data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user))));
+const whoOf = (req) => (['roles', 'users'].includes(req.query.who) ? req.query.who : 'all');
+data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user, whoOf(req)))));
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
-  const r = await accountRadar(req.user, uuid.parse(req.params.id)); if (!r) throw NotFound(); res.json(r);
+  const r = await accountRadar(req.user, uuid.parse(req.params.id), whoOf(req)); if (!r) throw NotFound(); res.json(r);
 }));
 // ---------- event history: the calls kept per role session ----------
 const EventsQ = z.object({
@@ -564,7 +566,7 @@ data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
   res.send(eventsCsv(r.items));
 }));
 // Space is worked out at most every few seconds per viewer scope and kept warm while someone is looking (src/cache.js)
-data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}`, () => spaceEstate(req.user)))));
+data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}${whoOf(req) === 'all' ? '' : `:${whoOf(req)}`}`, () => spaceEstate(req.user, whoOf(req))))));
 // what needs a look in the last 24 hours, for the bell in the top bar: the estate's flagged events, from the same
 // remembered answer as Space (worked out at most once a minute when only the bell asks)
 data.get('/space/flags', requirePerm('view'), wrap(async (req, res) => {
@@ -574,7 +576,7 @@ data.get('/space/flags', requirePerm('view'), wrap(async (req, res) => {
 }));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
-  const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}`, () => spaceAccount(req.user, id)); if (!r) throw NotFound(); res.json(r);
+  const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => spaceAccount(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
 }));
 data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   const accountId = req.query.account ? uuid.parse(req.query.account) : null;
@@ -640,8 +642,8 @@ data.get('/overview', requirePerm('view'), wrap(async (req, res) => {
   const [tot, byKind, queue, accounts] = await Promise.all([
     query(`SELECT count(*)::int roles, coalesce(sum(r.granted_count),0)::int granted, coalesce(sum(r.used_count),0)::int used, coalesce(sum(r.unused_count),0)::int unused,
                   coalesce(sum(r.unconfirmed_count),0)::int unconfirmed, count(*) FILTER (WHERE r.risk='High')::int high, count(*) FILTER (WHERE r.risk='Medium')::int medium, count(*) FILTER (WHERE r.risk='Low')::int low
-             FROM roles r WHERE r.deleted_at IS NULL AND ${sc}`, p),
-    query(`SELECT r.kind, count(*)::int n FROM roles r WHERE r.deleted_at IS NULL AND ${sc} GROUP BY r.kind`, p),
+             FROM roles r WHERE r.deleted_at IS NULL AND r.kind <> 'iam-user' AND ${sc}`, p),
+    query(`SELECT r.kind, count(*)::int n FROM roles r WHERE r.deleted_at IS NULL AND r.kind <> 'iam-user' AND ${sc} GROUP BY r.kind`, p),
     query(`SELECT r.reviewer_team AS team, count(*)::int roles, count(*) FILTER (WHERE r.requires_both)::int both,
                   coalesce(sum((SELECT count(*) FROM flags f WHERE f.role_id=r.id AND f.status='open' AND NOT EXISTS (SELECT 1 FROM review_decisions d WHERE d.flag_id=f.id))),0)::int AS undecided
              FROM roles r WHERE r.deleted_at IS NULL AND ${sc} GROUP BY 1`, p),

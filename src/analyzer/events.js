@@ -42,7 +42,16 @@ export function parseEvent(rec) {
   }
   const roleArn = issuerRoleArn(rec);
   const roleName = roleArn ? null : issuerRoleName(rec);
-  if (!roleArn && !roleName) return { ...base, type: 'ignore', why: 'not-role', eventSource: rec.eventSource };
+  // an IAM user calling with its own credentials (an access key, or a console session): attributed to the user
+  const userArn = !roleArn && !roleName && rec.userIdentity?.type === 'IAMUser' ? rec.userIdentity.arn || null : null;
+  if (!roleArn && !roleName && !userArn) return { ...base, type: 'ignore', why: 'not-role', eventSource: rec.eventSource };
+  if (userArn) {
+    const m = mapEvent(rec.eventSource, rec.eventName);
+    return { ...base, type: 'api', roleArn: userArn, roleName: null, userCall: true, action: m.action, mapped: m.mapped, noPermission: !!m.none,
+      identityType: 'IAMUser', paramKeys: Object.keys(rec.requestParameters || {}).slice(0, 12), eventSource: rec.eventSource, eventName: rec.eventName,
+      accessKeyId: rec.userIdentity.accessKeyId || null, console: !!rec.userIdentity.sessionContext || !/^AKIA/.test(rec.userIdentity.accessKeyId || ''),
+      sessionName: null, resources: (rec.resources || []).map((r) => r.ARN).filter(Boolean), passedRoles: findPassedRoles(rec, null) };
+  }
   const m = mapEvent(rec.eventSource, rec.eventName);
   const resources = (rec.resources || []).map((r) => r.ARN).filter(Boolean);
   return {

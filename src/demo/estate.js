@@ -8,6 +8,7 @@ export const MANAGED = {
   'arn:aws:iam::aws:policy/ReadOnlyAccess': P([A(['ec2:Describe*', 'ecs:Describe*', 'ecs:List*', 'eks:Describe*', 'eks:List*', 'cloudformation:List*', 'cloudformation:Describe*', 'cloudwatch:Get*', 'logs:Describe*'])]),
   'arn:aws:iam::aws:policy/aws-service-role/AmazonECSServiceRolePolicy': P([A(['ec2:Describe*', 'elasticloadbalancing:Describe*', 'elasticloadbalancing:RegisterTargets', 'elasticloadbalancing:DeregisterTargets'])]),
   'arn:aws:iam::aws:policy/PowerUserAccess': P([{ Effect: 'Allow', NotAction: ['iam:*', 'organizations:*', 'account:*'], Resource: '*' }]),
+  'arn:aws:iam::aws:policy/AdministratorAccess': P([A('*')]),
 };
 
 // IAM Identity Center: every account gets its own AWSSSO_<id>_DO_NOT_DELETE provider, all issued by the one
@@ -125,4 +126,35 @@ export function buildEstate(acct) {
       advisor: { s3: 0 } },
   ];
   return roles.map((r) => ({ ...r, arn: arn(r.name, r.path) }));
+}
+
+// IAM users: long-lived identities with access keys and console passwords. Each one shows something worth watching:
+// an old CI key still in daily use, an admin who signs in to the console (with MFA), a reporting key nobody has used
+// in years, and (staging only) a vendor with a console password and no MFA.
+const keyId = (acct, user, n) => `AKIA${crypto.createHash('sha1').update(`${acct}${user}${n}`).digest('hex').slice(0, 16).toUpperCase()}`;
+export function buildUsers(acct) {
+  const arn = (name) => `arn:aws:iam::${acct}:user/${name}`;
+  const users = [
+    { name: 'ci-legacy', createdDaysAgo: 700, groups: [],
+      inline: [{ name: 'deploy', document: P([A(['ecr:GetAuthorizationToken', 'ecr:PutImage', 'ecr:BatchCheckLayerAvailability', 'ecs:UpdateService', 'ecs:DescribeServices', 'ecs:RegisterTaskDefinition']), A('iam:PassRole', `arn:aws:iam::${acct}:role/payments-task-exec`)]) }],
+      attached: [],
+      keys: [{ id: keyId(acct, 'ci-legacy', 1), status: 'Active', createdDaysAgo: 420, lastUsedHoursAgo: 1, service: 'ecr' }, { id: keyId(acct, 'ci-legacy', 2), status: 'Inactive', createdDaysAgo: 650, lastUsedHoursAgo: 24 * 400, service: 'ecs' }],
+      usage: [{ key: 1, src: 'ecr.amazonaws.com', name: 'GetAuthorizationToken', hours: [2, 8, 14, 20] }, { key: 1, src: 'ecs.amazonaws.com', name: 'DescribeServices', hours: [2, 8, 14, 20] }] },
+    { name: 'snapshot-bot', createdDaysAgo: 120, groups: [],
+      inline: [{ name: 'snapshots', document: P([A(['ec2:CreateSnapshot', 'ec2:DescribeVolumes', 'ec2:DescribeSnapshots', 'ec2:DeleteSnapshot'])]) }], attached: [],
+      keys: [{ id: keyId(acct, 'snapshot-bot', 1), status: 'Active', createdDaysAgo: 40, lastUsedHoursAgo: 3, service: 'ec2' }],
+      usage: [{ key: 1, src: 'ec2.amazonaws.com', name: 'DescribeVolumes', hours: [1, 13] }, { key: 1, src: 'ec2.amazonaws.com', name: 'CreateSnapshot', hours: [1] }] },
+    { name: 'old-reporting', createdDaysAgo: 900, groups: [],
+      inline: [{ name: 'metrics', document: P([A(['cloudwatch:GetMetricData', 'cloudwatch:ListMetrics'])]) }], attached: [],
+      keys: [{ id: keyId(acct, 'old-reporting', 1), status: 'Active', createdDaysAgo: 800, lastUsedHoursAgo: null }], usage: [] },
+  ];
+  if (acct === '111111111111') users.push({ name: 'alice.admin', createdDaysAgo: 500, groups: ['Admins'], inline: [], attached: [],
+    groupPolicies: { Admins: { attached: ['arn:aws:iam::aws:policy/AdministratorAccess'], inline: [] } },
+    password: { createdDaysAgo: 500, lastUsedDaysAgo: 3 }, mfa: [{ serial: `arn:aws:iam::${acct}:mfa/alice.admin`, type: 'virtual' }], keys: [], usage: [] });
+  if (acct === '222222222222') users.push({ name: 'vendor-sync', createdDaysAgo: 260, groups: ['Vendors'], inline: [], attached: [],
+    groupPolicies: { Vendors: { attached: ['arn:aws:iam::aws:policy/ReadOnlyAccess'], inline: [] } },
+    password: { createdDaysAgo: 260, lastUsedDaysAgo: 140 }, mfa: [],
+    keys: [{ id: keyId(acct, 'vendor-sync', 1), status: 'Active', createdDaysAgo: 200, lastUsedHoursAgo: 5, service: 'ec2' }],
+    usage: [{ key: 1, src: 'ec2.amazonaws.com', name: 'DescribeInstances', hours: [4, 16] }] });
+  return users.map((u) => ({ ...u, arn: arn(u.name), userId: `AIDA${crypto.createHash('sha1').update(`${acct}${u.name}`).digest('hex').slice(0, 17).toUpperCase()}` }));
 }

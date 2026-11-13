@@ -86,12 +86,23 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   const daily = new Map(), resources = new Map(), passed = new Map();
   const pkey = (pr) => pr.id || pr.ref;
 
+  const userKeys = new Map();                           // 'user|access key' -> CloudTrail use of an IAM user's key
   const handleCall = (role, e, { action = e.action, resources: res = e.resources, childKey = null } = {}) => {
-    let pr = e.accessKeyId ? keyOwner.get(e.accessKeyId) : null;
+    let pr = e.accessKeyId && !e.userCall ? keyOwner.get(e.accessKeyId) : null;
+    if (e.userCall) {
+      // an IAM user: who called is the access key itself (or the console), not a session
+      const k = e.accessKeyId && !e.console ? e.accessKeyId : null;
+      pr = ensure(role, k ? { key: `key:${k}`, kind: 'access-key', display: `access key ${k}` } : { key: 'console', kind: 'console', display: 'console or temporary credentials' }, e,
+        k ? 'access key' : 'password sign-in', { type: 'IAMUser', arn: role.arn, accessKeyId: e.accessKeyId || null });
+      if (k) {
+        const uk = `${role.id}|${k}`, u = userKeys.get(uk) || { role: role.id, key: k, first: e.time, last: e.time, n: 0, ips: new Set() };
+        u.n++; if (e.time < u.first) u.first = e.time; if (e.time > u.last) u.last = e.time; if (e.ip && u.ips.size < 20) u.ips.add(e.ip); userKeys.set(uk, u);
+      }
+    }
     if (!pr) pr = ensure(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, 'unknown (started before the window)', {});
     else if (pr.id) { const s = seenAgg.get(pr.id) || { first: e.time, last: e.time }; if (e.time < s.first) s.first = e.time; if (e.time > s.last) s.last = e.time; seenAgg.set(pr.id, s); }
     else { const x = P.get(pr.ref); if (e.time < x.first) x.first = e.time; if (e.time > x.last) x.last = e.time; }
-    if (e.time.getTime() >= keepFrom && e.accessKeyId) {
+    if (e.time.getTime() >= keepFrom && e.accessKeyId && !e.userCall) {         // IAM users' calls are counted, not kept one by one
       callRows.push({ key: e.accessKeyId, role, pr, e, action, resources: res || [], childKey });
     }
     if (!action) return;                                // no IAM permission involved (console sign-in)
@@ -174,6 +185,16 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
     }
   }
   const resolve = (pr) => pr.id || idOf.get(pr.ref);
+  if (userKeys.size) {
+    const U = [...userKeys.values()];
+    await c.query(
+      `INSERT INTO iam_access_keys(role_id, key_id, trail_first_seen, trail_last_seen, trail_calls, source_ips)
+       SELECT r, k, f, l, n, ARRAY(SELECT jsonb_array_elements_text(ip::jsonb)) FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::timestamptz[], $5::int[], $6::text[]) AS t(r, k, f, l, n, ip)
+       ON CONFLICT (role_id, key_id) DO UPDATE SET trail_first_seen=LEAST(iam_access_keys.trail_first_seen, EXCLUDED.trail_first_seen),
+         trail_last_seen=GREATEST(iam_access_keys.trail_last_seen, EXCLUDED.trail_last_seen), trail_calls=iam_access_keys.trail_calls + EXCLUDED.trail_calls,
+         source_ips=(SELECT ARRAY(SELECT DISTINCT unnest(iam_access_keys.source_ips || EXCLUDED.source_ips) LIMIT 20))`,
+      [U.map((u) => u.role), U.map((u) => u.key), U.map((u) => u.first), U.map((u) => u.last), U.map((u) => u.n), U.map((u) => J([...u.ips]))]);
+  }
 
   if (assumeAgg.size) {
     const A = [...assumeAgg.entries()];

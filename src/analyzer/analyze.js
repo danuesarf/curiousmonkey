@@ -97,7 +97,8 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     flags.push({ category: 'trust-wildcard', key: f.key, title: 'Broad trust policy', actions: [], resources: [], reason: f.reason, evidence: null,
       suggestion: 'Restrict the trust policy to the specific principals that use this role.', suggestedResources: [], severity: f.severity, decisionKind: 'other' });
   }
-  for (const p of activity.principals || []) {
+  // an IAM user has no trust policy: what calls as it is its own keys or console, never an unexpected principal
+  for (const p of role.kind === 'iam-user' ? [] : activity.principals || []) {
     if (p.trust && !p.trust.matched && p.kind !== 'service') {
       flags.push({ category: 'external-principal', key: p.key, title: `Unexpected principal ${p.display}`, actions: [], resources: [],
         reason: 'This principal assumed the role but no trust statement names it directly.', evidence: p.via,

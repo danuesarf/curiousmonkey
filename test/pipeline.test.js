@@ -32,7 +32,7 @@ async function drain() {
   throw new Error('queue did not drain');
 }
 const totals = async (acc) => (await db.query(
-  `SELECT sum(d.count)::int AS calls, count(DISTINCT d.action)::int AS actions FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=$1`, [acc])).rows[0];
+  `SELECT sum(d.count)::int AS calls, count(DISTINCT d.action)::int AS actions FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=$1 AND r.kind <> 'iam-user'`, [acc])).rows[0];   // users differ per demo account
 const role = async (acc, name) => (await db.query(`SELECT * FROM roles WHERE account_id=$1 AND name=$2`, [acc, name])).rows[0];
 
 let A;
@@ -41,8 +41,10 @@ test('a full scan inventories roles of every kind and records who used them', as
   const run = await q.enqueueRun(A);
   await drain();
   assert.equal((await q.runDetail(run)).run.status, 'succeeded');
-  const roles = (await db.query(`SELECT name, kind FROM roles WHERE account_id=$1 ORDER BY name`, [A])).rows;
+  const all = (await db.query(`SELECT name, kind FROM roles WHERE account_id=$1 ORDER BY name`, [A])).rows;
+  const roles = all.filter((r) => r.kind !== 'iam-user');
   assert.equal(roles.length, 10);
+  assert.deepEqual(all.filter((r) => r.kind === 'iam-user').map((r) => r.name), ['alice.admin', 'ci-legacy', 'old-reporting', 'snapshot-bot']);
   assert.equal(roles.find((r) => r.name === 'AWSServiceRoleForECS').kind, 'service-linked');
   assert.equal(roles.find((r) => r.name.startsWith('AWSReservedSSO_')).kind, 'identity-center');
   const t = await totals(A);

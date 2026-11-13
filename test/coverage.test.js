@@ -39,7 +39,9 @@ test('an event without sessionIssuer is still tied to its role by name', () => {
   const signin = ev.parseEvent({ eventID: '4', eventTime: '2026-11-01T00:00:00Z', eventSource: 'signin.amazonaws.com', eventName: 'ConsoleLogin',
     userIdentity: { type: 'AssumedRole', arn: 'arn:aws:sts::111111111111:assumed-role/data-etl/s' } });
   const cov = sev.coverage([e, user, odd, signin], { ...roles, byArn: new Map([['arn:aws:iam::111111111111:role/data-etl', { id: 'x' }]]) });
-  assert.deepEqual({ ...cov.k }, { events: 4, assume_events: 0, role_calls: 3, recovered_role: 2, other_role: 0, not_role: 1, no_permission: 1, unmapped: 1, no_resources: 2 });
+  // an IAM user's call is now kept for that user; one not inventoried (yet) counts as another identity
+  assert.equal(user.type, 'api'); assert.equal(user.userCall, true); assert.equal(user.roleArn, 'arn:aws:iam::1:user/bob');
+  assert.deepEqual({ ...cov.k }, { events: 4, assume_events: 0, role_calls: 3, user_calls: 0, recovered_role: 2, other_role: 1, not_role: 0, no_permission: 1, unmapped: 1, no_resources: 2 });
   const u = [...cov.unmapped.values()][0];
   assert.equal(u.raw, 'newsvc:DoThing2031_01_01'); assert.deepEqual(u.keys, ['secretThing']);   // parameter names only
   assert.doesNotMatch(JSON.stringify(u), /value-not-kept/);

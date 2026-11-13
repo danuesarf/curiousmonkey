@@ -21,6 +21,81 @@ async function limited(items, n, fn) {
   return out;
 }
 
+// a managed policy document: AWS-managed ones are cached for a week (they are the same in every account)
+async function managedDoc(gw, a) {
+  const cached = a.awsManaged ? (await query(
+    `SELECT document FROM managed_policy_cache WHERE arn=$1 AND fetched_at > now() - interval '7 days' ORDER BY fetched_at DESC LIMIT 1`, [a.arn])).rows[0] : null;
+  if (cached) return { ...a, document: cached.document };
+  const m = await gw.getManagedPolicy(a.arn);
+  await query(`INSERT INTO managed_policy_cache(arn, version_id, document) VALUES ($1,$2,$3) ON CONFLICT (arn, version_id) DO UPDATE SET fetched_at=now()`,
+    [a.arn, m.versionId, JSON.stringify(m.document)]);
+  return { ...a, document: m.document };
+}
+async function savePolicies(c, roleId, docs) {
+  await c.query(`DELETE FROM role_policies WHERE role_id=$1 AND NOT (kind||':'||name = ANY($2))`, [roleId, docs.map((d) => `${d.kind}:${d.name}`)]);
+  for (const d of docs) {
+    const hash = docHash(d.document);
+    await c.query(
+      `INSERT INTO role_policies(role_id, kind, name, arn, aws_managed, document, doc_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       ON CONFLICT (role_id, kind, name) DO UPDATE SET arn=EXCLUDED.arn, aws_managed=EXCLUDED.aws_managed, document=EXCLUDED.document, doc_hash=EXCLUDED.doc_hash`,
+      [roleId, d.kind, d.name, d.arn, d.aws, JSON.stringify(d.document), hash]);
+    await c.query(`INSERT INTO policy_history(role_id, kind, name, doc_hash, document) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+      [roleId, d.kind, d.name, hash, JSON.stringify(d.document)]);
+  }
+}
+
+/**
+ * IAM users, stored as roles of kind 'iam-user' so everything that analyses roles analyses them. Returns the ARNs
+ * seen, or null when the scanner role cannot list users (created before it could): stored users are then kept.
+ */
+export async function inventoryUsers(ctx, account, gw) {
+  if (!gw.listUsers) return null;
+  let users;
+  try { users = await gw.listUsers(); } catch (e) {
+    if (!/AccessDenied|not authorized/i.test(`${e.name} ${e.message}`)) throw e;
+    ctx.log('cannot read IAM users: add iam:ListUsers, iam:GetUser, iam:ListAccessKeys, iam:GetAccessKeyLastUsed, iam:ListMFADevices, iam:GetLoginProfile, iam:ListGroupsForUser and the user and group policy reads to the scanner role', null, 'warn');
+    return null;
+  }
+  await ctx.progress({ phase: 'users', total: users.length, done: 0 });
+  let done = 0;
+  await limited(users, 4, async (u) => {
+    const [detail, pol] = await Promise.all([gw.getUserDetail(u.name), gw.getUserPolicies(u.name)]);
+    const docs = [...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document }))];
+    for (const a of pol.attached) { const m = await managedDoc(gw, a); docs.push({ kind: 'managed', name: m.name, arn: m.arn, aws: m.awsManaged, document: m.document }); }
+    for (const g of pol.groups || []) {
+      for (const p of g.inline) docs.push({ kind: 'group', name: `${g.group}/${p.name}`, arn: null, aws: false, document: p.document });
+      for (const a of g.attached) { const m = await managedDoc(gw, a); docs.push({ kind: 'group', name: `${g.group}/${m.name}`, arn: m.arn, aws: m.awsManaged, document: m.document }); }
+    }
+    const lastKey = detail.keys.map((k) => k.lastUsed).filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
+    const lastUsed = [lastKey, u.passwordLastUsed].filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
+    const lastRegion = lastKey ? detail.keys.find((k) => k.lastUsed === lastKey)?.region || null : null;
+    await tx(async (c) => {
+      const row = (await c.query(
+        `INSERT INTO roles(account_id, arn, name, path, kind, trust_policy, tags, created_in_aws, last_used_at, last_used_region, inline_count, attached_count, aws_id, deleted_at)
+         VALUES ($1,$2,$3,$4,'iam-user',NULL,$5,$6,$7,$8,$9,$10,$11,NULL)
+         ON CONFLICT (account_id, arn) DO UPDATE SET tags=EXCLUDED.tags, kind='iam-user', last_used_at=EXCLUDED.last_used_at, last_used_region=EXCLUDED.last_used_region,
+           inline_count=EXCLUDED.inline_count, attached_count=EXCLUDED.attached_count, aws_id=COALESCE(EXCLUDED.aws_id, roles.aws_id), deleted_at=NULL
+         RETURNING id`,
+        [account.id, u.arn, u.name, u.path || '/', JSON.stringify(detail.tags || {}), u.createDate, lastUsed, lastRegion,
+         docs.filter((d) => d.kind === 'inline').length, docs.filter((d) => d.kind !== 'inline').length, u.userId || null])).rows[0];
+      await savePolicies(c, row.id, docs);
+      await c.query(
+        `INSERT INTO iam_user_details(role_id, user_id, password_enabled, password_created, password_last_used, mfa, groups, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+         ON CONFLICT (role_id) DO UPDATE SET user_id=EXCLUDED.user_id, password_enabled=EXCLUDED.password_enabled, password_created=EXCLUDED.password_created,
+           password_last_used=EXCLUDED.password_last_used, mfa=EXCLUDED.mfa, groups=EXCLUDED.groups, updated_at=now()`,
+        [row.id, u.userId || null, !!detail.password, detail.password?.created || null, u.passwordLastUsed || null, JSON.stringify(detail.mfa || []), detail.groups || []]);
+      for (const k of detail.keys) await c.query(
+        `INSERT INTO iam_access_keys(role_id, key_id, status, created_at, last_used_at, last_used_service, last_used_region, deleted_at) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL)
+         ON CONFLICT (role_id, key_id) DO UPDATE SET status=EXCLUDED.status, created_at=EXCLUDED.created_at, last_used_at=EXCLUDED.last_used_at,
+           last_used_service=EXCLUDED.last_used_service, last_used_region=EXCLUDED.last_used_region, deleted_at=NULL`,
+        [row.id, k.id, k.status, k.created, k.lastUsed, k.service, k.region]);
+      await c.query(`UPDATE iam_access_keys SET deleted_at=now(), status='Deleted' WHERE role_id=$1 AND deleted_at IS NULL AND NOT (key_id = ANY($2))`, [row.id, detail.keys.map((k) => k.id)]);
+    });
+    await ctx.progress({ done: ++done });
+  });
+  return users.map((u) => u.arn);
+}
+
 export async function runInventory(ctx) {
   let account, gw;
   try {
@@ -49,15 +124,7 @@ export async function runInventory(ctx) {
     const detail = await gw.getRoleDetail(r.name);
     const pol = await gw.getRolePolicies(r.name);
     const managed = [];
-    for (const a of pol.attached) {
-      const cached = a.awsManaged ? (await query(
-        `SELECT document FROM managed_policy_cache WHERE arn=$1 AND fetched_at > now() - interval '7 days' ORDER BY fetched_at DESC LIMIT 1`, [a.arn])).rows[0] : null;
-      if (cached) { managed.push({ ...a, document: cached.document }); continue; }
-      const m = await gw.getManagedPolicy(a.arn);
-      await query(`INSERT INTO managed_policy_cache(arn, version_id, document) VALUES ($1,$2,$3) ON CONFLICT (arn, version_id) DO UPDATE SET fetched_at=now()`,
-        [a.arn, m.versionId, JSON.stringify(m.document)]);
-      managed.push({ ...a, document: m.document });
-    }
+    for (const a of pol.attached) managed.push(await managedDoc(gw, a));
     const kind = roleKind(r.name, r.path);
     await tx(async (c) => {
       const row = (await c.query(
@@ -74,22 +141,15 @@ export async function runInventory(ctx) {
         ...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document })),
         ...managed.map((p) => ({ kind: 'managed', name: p.name, arn: p.arn, aws: p.awsManaged, document: p.document })),
       ];
-      await c.query(`DELETE FROM role_policies WHERE role_id=$1 AND NOT (kind||':'||name = ANY($2))`, [row.id, docs.map((d) => `${d.kind}:${d.name}`)]);
-      for (const d of docs) {
-        const hash = docHash(d.document);
-        await c.query(
-          `INSERT INTO role_policies(role_id, kind, name, arn, aws_managed, document, doc_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)
-           ON CONFLICT (role_id, kind, name) DO UPDATE SET arn=EXCLUDED.arn, aws_managed=EXCLUDED.aws_managed, document=EXCLUDED.document, doc_hash=EXCLUDED.doc_hash`,
-          [row.id, d.kind, d.name, d.arn, d.aws, JSON.stringify(d.document), hash]);
-        await c.query(`INSERT INTO policy_history(role_id, kind, name, doc_hash, document) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
-          [row.id, d.kind, d.name, hash, JSON.stringify(d.document)]);
-      }
+      await savePolicies(c, row.id, docs);
     });
     seen.push(r.arn);
     await ctx.progress({ done: ++done });
   });
   // roles that disappeared keep their history but stop being analysed
-  await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, seen]);
+  await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND kind <> 'iam-user' AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, seen]);
+  const userArns = await inventoryUsers(ctx, account, gw);
+  if (userArns) await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND kind = 'iam-user' AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, userArns]);
 
   // SAML providers and who issues for them: tells IAM Identity Center instances apart. A scanner role created before
   // iam:ListSAMLProviders / iam:GetSAMLProvider were part of its policy cannot read them: keep what is stored and say so.
@@ -122,5 +182,5 @@ export async function runInventory(ctx) {
     }
   });
   await query(`UPDATE cloud_accounts SET status='connected', status_detail=NULL WHERE id=$1`, [account.id]);
-  return { roles: roles.length, dataEventSources: found.length };
+  return { roles: roles.length, users: userArns ? userArns.length : null, dataEventSources: found.length };
 }

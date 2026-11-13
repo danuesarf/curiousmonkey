@@ -100,7 +100,15 @@ export const TONE_COLOR = { good: '#6fe3b0', warn: '#f0b45a', bad: '#ff5a4f' };
 export const num = (n) => Number(n || 0).toLocaleString('en-US');
 export const TEAM = { infrasec: 'Infrastructure Security', infosec: 'Information Security' };
 export const ROLE_LABEL = { owner: 'Owner', admin: 'Admin', reviewer: 'Security reviewer', account_owner: 'Account owner', auditor: 'Auditor' };
-export const KIND = { custom: 'Custom', 'service-linked': 'Service-linked', 'identity-center': 'Identity Center' };
+/** Which identities a view shows: all, roles only or IAM users only. Kept in the URL as ?who=. */
+export const WHO = [['all', 'All'], ['roles', 'Roles'], ['users', 'IAM users']];
+export const whoOf = (params) => (['roles', 'users'].includes(params.get('who')) ? params.get('who') : 'all');
+export const whoQs = (who, sep = '?') => (who === 'all' ? '' : `${sep}who=${who}`);
+export function whoControl(who, onPick, label = 'Show') {
+  return h('div', { class: 'stack', style: 'gap:6px' }, h('h2', { class: 'eyebrow' }, label),
+    h('div', { class: 'rtabs', role: 'radiogroup', 'aria-label': 'Which identities' }, WHO.map(([k, l]) => h('button', { role: 'radio', 'aria-checked': String(who === k), title: k === 'users' ? 'Only IAM users: long-lived access keys and console passwords' : k === 'roles' ? 'Only IAM roles' : 'Roles and IAM users', onClick: () => onPick(k) }, l))));
+}
+export const KIND = { custom: 'Custom', 'service-linked': 'Service-linked', 'identity-center': 'Identity Center', 'iam-user': 'IAM user' };
 export const riskBadge = (r) => h('span', { class: `badge b-${String(r).toLowerCase()}` }, r);
 export const teamBadge = (t, both) => h('span', { class: 'badge b-neutral' }, both ? 'Both teams' : TEAM[t] || t);
 export function usageBar(used, unused, unconf) {

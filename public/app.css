@@ -663,3 +663,8 @@ button.tile{font:inherit;color:inherit;text-align:left;cursor:pointer}button.til
 .perm-list{max-height:320px;overflow:auto;columns:2;column-gap:24px}
 .perm-list li{break-inside:avoid;padding:1px 0}
 .sp-plane{font:600 13px var(--mono);letter-spacing:.18em}
+/* IAM users */
+.key-line{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}
+.key-bad{color:var(--red-ink)}
+.tile-bad b{color:var(--red)}
+button.tile[aria-pressed=true]{border-color:var(--banana)}

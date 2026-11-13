@@ -2,13 +2,13 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint } from '../lib.js';
+import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs } from '../lib.js';
 import { go } from '../main.js';
 
 const CX = 400, CY = 400;
 const SEV = { high: '#ff6b5e', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: 'DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'DEAD', cleaned: 'CLEANED' };
-const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked' };
+const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked', 'iam-user': 'IAM users' };
 const ui = { group: 'env', chip: null };          // remembered while you move between views
 const r1 = (v) => Math.round(v * 10) / 10;
 const P = (deg, r) => { const a = ((deg - 90) * Math.PI) / 180; return [r1(CX + Math.cos(a) * r), r1(CY + Math.sin(a) * r)]; };
@@ -29,9 +29,12 @@ export async function radarPage(ctx) {
   const view = ctx.params.get('view') || 'estate';
   const tabs = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Radar view' },
     [['estate', 'Estate'], ['account', 'Account']].map(([k, label]) => h('button', { role: 'tab', 'aria-selected': String(view === k),
-      onClick: () => go(k === 'estate' ? '#/' : `#/?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}`) }, label)));
+      onClick: () => go(k === 'estate' ? `#/${whoQs(whoOf(ctx.params))}` : `#/?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}${whoQs(whoOf(ctx.params), '&')}`) }, label)));
   const shell = { left: h('aside', { class: 'left' }), scene: h('div', { class: 'scene' }), right: h('aside', { class: 'right' }) };
-  shell.left.append(tabs);
+  const who = whoOf(ctx.params);
+  const withWho = (k) => { const p = new URLSearchParams(ctx.params); if (k === 'all') p.delete('who'); else p.set('who', k); go(`#/?${p}`); };
+  shell.left.append(tabs, whoControl(who, withWho));
+  ctx.who = who;
   const page = h('div', { class: 'stack radar-page radar3', style: 'gap:0' }, h('div', { class: 'scene-layout radar-layout' }, shell.left, shell.scene, shell.right));
   if (view === 'account') await accountView(ctx, shell);
   else await estateView(ctx, shell);
@@ -150,7 +153,7 @@ function feedList(items, seenAt, onPick) {
 // ---------------------------------------------------------------- estate
 async function estateView(ctx, shell) {
   ctx.setCrumbs('Radar', 'Estate');
-  const [E, F] = await Promise.all([get('/radar/estate'), get('/changes')]);
+  const [E, F] = await Promise.all([get(`/radar/estate${whoQs(ctx.who)}`), get('/changes')]);
   post('/changes/seen').catch(() => {});
   const accounts = E.accounts;
   if (!accounts.length) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet. ', h('a', { href: '#/accounts/new' }, 'Connect an AWS account'))); return; }
@@ -254,12 +257,12 @@ async function estateView(ctx, shell) {
 async function accountView(ctx, shell) {
   let id = ctx.params.get('account');
   if (!id) {
-    const E = await get('/radar/estate');
+    const E = await get(`/radar/estate${whoQs(ctx.who)}`);
     const pick = E.accounts.slice().sort((x, y) => y.pings - x.pings || y.excess - x.excess)[0];
     if (!pick) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet.')); return; }
     id = pick.id;
   }
-  const [D, F] = await Promise.all([get(`/radar/account/${id}`), get(`/changes?account=${id}`)]);
+  const [D, F] = await Promise.all([get(`/radar/account/${id}${whoQs(ctx.who)}`), get(`/changes?account=${id}`)]);
   const acct = D.account, roles = D.roles;
   ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), acct.name);
   for (const r of roles) r.d30 = drift(r.never, r.never30 ?? r.never7);

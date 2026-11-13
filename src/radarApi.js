@@ -16,17 +16,20 @@ async function pastShares(daysAgo, accountIds) {
   return new Map(rows.map((r) => [r.account_id, { never: share(r.un, r.g), excess: num(r.g) - num(r.u) }]));
 }
 
-export async function estate(user) {
+/** Which identities: everything (default), roles only, or IAM users only. */
+export const whoSql = (who, col = 'r.kind') => (who === 'roles' ? `${col} <> 'iam-user'` : who === 'users' ? `${col} = 'iam-user'` : 'TRUE');
+
+export async function estate(user, who = 'all') {
   const p = [];
   const accts = (await query(
     `SELECT a.*, count(r.id)::int AS roles, coalesce(sum(r.granted_count),0)::bigint AS granted, coalesce(sum(r.used_count),0)::bigint AS used,
             coalesce(sum(r.unused_count),0)::bigint AS unused, count(r.id) FILTER (WHERE r.risk='High')::int AS high,
             count(r.id) FILTER (WHERE EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open'))::int AS unidentified
-       FROM cloud_accounts a LEFT JOIN roles r ON r.account_id=a.id AND r.deleted_at IS NULL
+       FROM cloud_accounts a LEFT JOIN roles r ON r.account_id=a.id AND r.deleted_at IS NULL AND ${whoSql(who)}
       WHERE ${scopeSql(user, 'a.id', p)} AND a.status <> 'planned' GROUP BY a.id ORDER BY a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
   const [act, d7, d30, pings, hist] = await Promise.all([
-    ids.length ? query(`SELECT r.account_id, sum(d.count)::bigint AS n FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE d.day >= current_date - 1 AND r.account_id = ANY($1) GROUP BY 1`, [ids]) : { rows: [] },
+    ids.length ? query(`SELECT r.account_id, sum(d.count)::bigint AS n FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE d.day >= current_date - 1 AND r.account_id = ANY($1) AND ${whoSql(who)} GROUP BY 1`, [ids]) : { rows: [] },
     pastShares(7, ids), pastShares(30, ids),
     ids.length ? query(`SELECT account_id, count(*)::int AS n, min(CASE severity WHEN 'high' THEN 0 WHEN 'warn' THEN 1 WHEN 'info' THEN 2 ELSE 3 END) AS worst
                           FROM changes WHERE at > now() - interval '7 days' AND account_id = ANY($1) GROUP BY 1`, [ids]) : { rows: [] },
@@ -59,7 +62,7 @@ export async function estate(user) {
   };
 }
 
-export async function accountRadar(user, accountId) {
+export async function accountRadar(user, accountId, who = 'all') {
   if (!inScope(user, accountId)) return null;
   const a = (await query('SELECT * FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
   if (!a) return null;
@@ -73,7 +76,7 @@ export async function accountRadar(user, accountId) {
        LEFT JOIN LATERAL (SELECT granted, unused FROM role_snapshots s WHERE s.role_id=r.id AND s.day <= current_date - 30 ORDER BY day DESC LIMIT 1) s30 ON true
        LEFT JOIN LATERAL (SELECT granted, unused FROM role_snapshots s WHERE s.role_id=r.id AND s.day <= current_date - 7 ORDER BY day DESC LIMIT 1) s7 ON true
        LEFT JOIN (SELECT role_id, min(day) AS first FROM role_snapshots GROUP BY role_id) fs ON fs.role_id=r.id
-      WHERE r.account_id=$1 AND r.deleted_at IS NULL`, [accountId])).rows;
+      WHERE r.account_id=$1 AND r.deleted_at IS NULL AND ${whoSql(who)}`, [accountId])).rows;
   const firstDay = (await query('SELECT min(day) AS d FROM role_snapshots WHERE account_id=$1', [accountId])).rows[0].d;
   const pings = (await query(`SELECT role_id, kind, severity FROM changes WHERE account_id=$1 AND role_id IS NOT NULL AND at > now() - interval '7 days' ORDER BY at DESC`, [accountId])).rows;
   const pingBy = new Map(); for (const pg of pings) if (!pingBy.has(pg.role_id)) pingBy.set(pg.role_id, pg);

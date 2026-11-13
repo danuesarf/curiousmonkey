@@ -40,6 +40,7 @@ export async function rolePage(ctx, id) {
     unmappedFlag && h('div', { class: 'unk-box' }, h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'),
       h('span', { class: 'grow small' }, 'Some calls by this role use event names that are not identified yet. Those services stay unconfirmed — nothing in them will be removed until each name is settled.'),
       h('button', { class: 'btn sm amber', onClick: () => openIdentify(null) }, 'Identify'))),
+    r.kind === 'iam-user' && h('div', { class: 'alert' }, 'This is an IAM user. Its access keys, console sign-in and MFA are on ', h('a', { href: `#/users/${r.id}` }, 'its IAM user page'), '.'),
     r.kind === 'identity-center' && h('div', { class: 'alert warn' }, `This role comes from the Identity Center permission set "${r.permission_set}". Changes belong in the permission set, not on the role.`),
     h('section', { class: 'tiles' },
       tile('Granted', num(r.granted_count), `${r.inline_count} inline, ${r.attached_count} attached`),

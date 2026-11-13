@@ -1,3 +1,4 @@
+import { whoSql } from './radarApi.js';
 // Data for Space: the estate as a tilted plane (accounts as clouds of role stars, identities outside the org off its
 // edge, paths between them above it), and one account (roles clustered by the service they call most, services as
 // towers). Everything replays the last 24 hours, hour by hour.
@@ -132,7 +133,7 @@ async function events(where, p, start) {
   return rows.map((c) => ({ id: `c${c.id}`, kind: c.kind, severity: c.severity, title: c.title, detail: c.detail, at: c.at, hour: bucketOf(c.at, start), accountId: c.account_id, roleId: c.role_id, roleName: c.role_name }));
 }
 
-export async function spaceEstate(user) {
+export async function spaceEstate(user, who = 'all') {
   const p = [];
   const accts = (await query(`SELECT a.id, a.name, a.account_id, a.environment, a.ou, a.status, a.note FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', p)} ORDER BY a.environment, a.ou NULLS LAST, a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
@@ -146,7 +147,7 @@ export async function spaceEstate(user) {
              FROM roles r
              LEFT JOIN (SELECT role_id, sum(count) c7, sum(count) FILTER (WHERE day >= current_date - 1) c1
                           FROM activity_daily WHERE day >= current_date - 6 GROUP BY role_id) t ON t.role_id=r.id
-            WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL`, [ids]),
+            WHERE r.account_id = ANY($1) AND r.deleted_at IS NULL AND ${whoSql(who)}`, [ids]),
     hourlyByAccount(ids, start),
     // account to account: every role or IAM user in one of your accounts that entered a role in another, over 90 days
     query(`SELECT p.id, p.key, p.kind, p.sessions_count, p.first_seen, p.last_seen, r.id AS role_id, r.name AS role_name, r.account_id AS dst
@@ -198,7 +199,7 @@ export async function spaceEstate(user) {
         roles: x.roles.length, active: active.length, cold, high: x.roles.filter((r) => r.risk === 'High').length,
         calls7: x.roles.reduce((s, r) => s + num(r.calls7), 0), calls24h: x.roles.reduce((s, r) => s + num(r.calls24h), 0),
         // the busiest roles are drawn one by one; the rest of the active ones are counted
-        stars: active.slice(0, per).map((r) => ({ id: r.id, name: r.name, calls7: num(r.calls7), risk: r.risk })),
+        stars: active.slice(0, per).map((r) => ({ id: r.id, name: r.name, calls7: num(r.calls7), risk: r.risk, kind: r.kind })),
         hourly: x.hourly,
       };
     }),
@@ -213,7 +214,7 @@ export async function spaceEstate(user) {
 
 const svcOf = (action) => String(action).split(':')[0];
 
-export async function spaceAccount(user, accountId) {
+export async function spaceAccount(user, accountId, who = 'all') {
   if (!inScope(user, accountId)) return null;
   const a = (await query('SELECT id, name, account_id, environment, ou FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
   if (!a) return null;
@@ -221,10 +222,10 @@ export async function spaceAccount(user, accountId) {
   const [roles, acts, hourly, chains, ev] = await Promise.all([
     // cold: no allowed call stored, ever. One index probe per role, not a sum over every role's history.
     query(`SELECT r.id, r.name, r.kind, r.risk, EXISTS (SELECT 1 FROM activity_daily d WHERE d.role_id = r.id AND d.count > 0) AS used
-             FROM roles r WHERE r.account_id=$1 AND r.deleted_at IS NULL`, [accountId]),
+             FROM roles r WHERE r.account_id=$1 AND r.deleted_at IS NULL AND ${whoSql(who)}`, [accountId]),
     // calls per role per action over 7 days, so each role has its services
     query(`SELECT d.role_id, d.action, sum(d.count)::bigint AS n, sum(d.error_count)::bigint AS denied FROM activity_daily d JOIN roles r ON r.id=d.role_id
-            WHERE r.account_id=$1 AND d.day >= current_date - 6 GROUP BY 1, 2`, [accountId]),
+            WHERE r.account_id=$1 AND d.day >= current_date - 6 AND ${whoSql(who)} GROUP BY 1, 2`, [accountId]),
     hourlyByRole(accountId, start),
     // role chaining in and out over 7 days. Two halves so each uses an index: sessions here and their parents (by key),
     // and this account's sessions and their children (by parent key). A parent lives at most 36 h before its child.

@@ -80,8 +80,9 @@ export async function readTrail({ ctx, account, gw, decode = decodeTrailFile, no
     .map((c) => ({ region: c.region, from: c.lastKey ? fileTimeFromKey(c.lastKey) : T(c.afterTime) + 1, afterKey: c.lastKey, to: limit + 1 }));
 
   const wasComplete = await accountComplete(account.id);
-  const roleRows = (await query(`SELECT arn, name, id, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
-  const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.map((r) => [r.name, r])) };
+  const roleRows = (await query(`SELECT arn, name, id, kind, trust_policy FROM roles WHERE account_id=$1 AND deleted_at IS NULL`, [account.id])).rows;
+  // IAM users are found by ARN only: a user and a role may share a name
+  const roles = { byArn: new Map(roleRows.map((r) => [r.arn, r])), byName: new Map(roleRows.filter((r) => r.kind !== 'iam-user').map((r) => [r.name, r])) };
   const st = { t0: Date.now(), events: 0, files: 0, bytes: 0, lastProvisional: Date.now(), preApplied: new Set(), oldSeen: new Set(), prevOldSeen: new Set() };
 
   if (backRanges.length) {

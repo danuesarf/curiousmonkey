@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- **IAM user monitoring.** A new *IAM users* page lists every user with each access key (ID, status, age, last use, rotate or deactivate badges), console password and MFA, groups and activity, with filters and sorting; a page per user adds CloudTrail activity per key, who used it in 30 days, roles it assumed and its policies (including its groups'). Users get the same permission analysis as roles, plus findings for old, unused or duplicate keys and console access without MFA.
+- **Radar and Space: Show All | Roles | IAM users.** Users appear on both (squares in Space, their own sector on the account radar).
+- The scanner policy now includes the IAM user, access key, MFA, login profile and group reads. Without them, users are skipped with a warning and stored users are kept.
 - **Google Cloud (permissions only).** Connect an organization, folder or project with workload identity federation from the app's own AWS role or a service account key; generated `gcloud` commands, a test before saving, daily scans. Every identity's roles inherited down the hierarchy, its combined permissions, who can become each service account (keys, impersonation, actAs, key creation, GKE, federation) and findings (basic roles, IAM admin, mass impersonation, old keys, default service accounts with Editor, outside users, public grants, pools with no condition). Audit logs are not read yet.
 - **Roles: AWS | Google Cloud tabs** on one page, and a page per Google identity with what it can do, where it comes from, who it can become and its paths to AWS.
 - **Space: two fields.** AWS and Google Cloud on two planes with the same environment zones, and arcs where one cloud can sign in to the other (red when any AWS role can). Projects and cross-cloud paths have their own panels; AWS accounts list their Google Cloud paths.

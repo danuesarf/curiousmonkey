@@ -11,6 +11,9 @@ export const SCANNER_ALLOW = [
   'iam:GenerateServiceLastAccessedDetails', 'iam:GetServiceLastAccessedDetails', 'cloudtrail:LookupEvents', 'cloudtrail:DescribeTrails',
   'cloudtrail:GetEventSelectors', 'cloudtrail:ListEventDataStores', 'organizations:DescribeOrganization',
   'iam:ListSAMLProviders', 'iam:GetSAMLProvider',   // which IdP, or IAM Identity Center instance, each SAML provider is
+  // IAM users: their policies (and their groups'), access key metadata and last use, console password and MFA
+  'iam:ListUsers', 'iam:GetUser', 'iam:ListAccessKeys', 'iam:GetAccessKeyLastUsed', 'iam:ListMFADevices', 'iam:GetLoginProfile', 'iam:ListGroupsForUser',
+  'iam:ListUserPolicies', 'iam:GetUserPolicy', 'iam:ListAttachedUserPolicies', 'iam:ListGroupPolicies', 'iam:GetGroupPolicy', 'iam:ListAttachedGroupPolicies',
 ];
 const DENY_DATA = [
   'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:Scan', 'secretsmanager:GetSecretValue',

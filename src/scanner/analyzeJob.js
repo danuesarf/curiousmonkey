@@ -5,6 +5,7 @@ import { loadMappings, translate, applyBuiltins } from '../analyzer/mappings.js'
 import { COMPANIONS } from '../analyzer/actionNames.js';
 import { snapshotAndDiff } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
+import { userFindings, withUserRisk } from '../analyzer/users.js';
 
 const DAY = 864e5;
 
@@ -29,11 +30,15 @@ export async function analyzeRole(role, windowStart, now = new Date(), maps = nu
       actions.set(a, prev ? { count: prev.count + r.count, lastSeen: prev.lastSeen > r.last ? prev.lastSeen : r.last } : { count: r.count, lastSeen: r.last });
     }
   }
-  return analyze({
+  const out = analyze({
     role, policies: pol.rows, boundaryDoc: boundary.rows[0]?.document || null, windowStart, now,
     activity: { actions, unmappedServices, passroles: pass.rows, principals },
     advisor: adv.rows,
   });
+  if (role.kind !== 'iam-user') return out;
+  // an IAM user's credentials count as much as its permissions
+  const [d, k] = await Promise.all([query('SELECT * FROM iam_user_details WHERE role_id=$1', [role.id]), query('SELECT * FROM iam_access_keys WHERE role_id=$1', [role.id])]);
+  return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime() }));
 }
 
 export async function persistAnalysis(roleId, r) {

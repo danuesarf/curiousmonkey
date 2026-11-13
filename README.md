@@ -117,6 +117,18 @@ The daily scan (`SCAN_AT`, 01:00 `SCAN_TZ`) reads everything: roles, policies, A
 
 CloudTrail delivers events 5 to 15 minutes late and reads hold back `SCAN_DELIVERY_LAG_MINUTES` (15), so data is at best about 15 minutes behind. An interval shorter than about 5 minutes only adds AWS calls.
 
+## IAM users
+
+IAM users are watched alongside roles. **IAM users** in the rail lists every user with each access key on its own line: the key ID, Active or Inactive, its age, when and where it was last used, and badges when it should be rotated (older than 90 days) or deactivated (never used, or not in 90 days). Secret keys are never readable, here or in AWS; only their IDs are shown. The list also shows console passwords and MFA, groups, calls in the last 7 days and the findings behind the risk level, with filters for old keys, unused keys, two active keys, console without MFA and inactive users.
+
+A user's page adds the keys' CloudTrail activity (calls, first and last seen, source IPs), who used it in the last 30 days (each key, and console or temporary sessions separately), the roles it assumed, and its own and its groups' policies. **Permission analysis** is the same page as for a role: granted, used, never used.
+
+Radar and Space have a **Show: All | Roles | IAM users** switch. Users are drawn as squares in Space and sit in their own sector on the account radar.
+
+Risk adds to the usual permission findings: an active key older than 90 days, a key never used or idle for 90 days, two active keys, a console password without MFA or never used, and console access alongside keys.
+
+The scanner reads users with `iam:ListUsers`, `iam:ListAccessKeys`, `iam:GetAccessKeyLastUsed`, `iam:ListMFADevices`, `iam:GetLoginProfile`, `iam:ListGroupsForUser`, `iam:ListUserPolicies`, `iam:GetUserPolicy`, `iam:ListAttachedUserPolicies` and the group policy reads; these are in the generated scanner policy. A scanner role without them keeps working: users are skipped with a warning in Scan activity, and users already stored are kept until they can be listed again.
+
 ## Space
 
 `#/space` shows the estate as a tilted plane, replayed hour by hour over the last 24 hours (WIB).

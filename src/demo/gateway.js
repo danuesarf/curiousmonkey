@@ -3,7 +3,7 @@
 // de-duplication logic be tested honestly.
 import crypto from 'node:crypto';
 import { gzipSync } from 'node:zlib';
-import { buildEstate, MANAGED, samlProvidersOf } from './estate.js';
+import { buildEstate, buildUsers, MANAGED, samlProvidersOf } from './estate.js';
 import { trailDayPrefix } from '../aws/trailKeys.js';
 
 const h32 = (s) => parseInt(crypto.createHash('sha1').update(s).digest('hex').slice(0, 8), 16);
@@ -18,9 +18,18 @@ export function demoGateway(account) {
   const estate = buildEstate(acct);
   const region0 = account.regions[0];
 
+  const users = buildUsers(acct);
   function eventsForHour(hourStart, region) {
     const out = [];
     if (region !== region0) return out;
+    // IAM users calling with their long-lived access keys: no session, no AssumeRole
+    for (const u of users) for (const x of u.usage) {
+      if (!x.hours.includes(new Date(hourStart).getUTCHours())) continue;
+      const t = hourStart + 9 * 60000 + (h32(`${u.name}${x.name}${hourStart}`) % 600000);
+      out.push({ eventID: uuid(`${u.name}|${x.name}|${hourStart}`), eventTime: new Date(t).toISOString(), eventSource: x.src, eventName: x.name, awsRegion: region0,
+        sourceIPAddress: u.name === 'vendor-sync' ? '198.51.100.24' : '10.20.0.31', userAgent: 'demo',
+        userIdentity: { type: 'IAMUser', principalId: u.userId, arn: u.arn, accountId: acct, accessKeyId: u.keys[x.key - 1].id, userName: u.name }, requestParameters: {} });
+    }
     const day = new Date(hourStart).getUTCDay();
     for (const role of estate) {
       for (const pr of role.principals) {
@@ -101,6 +110,26 @@ export function demoGateway(account) {
     async listRoles() {
       return estate.map((r) => ({ arn: r.arn, name: r.name, path: r.path, createDate: new Date(demoNow() - 400 * DAY), trustPolicy: r.trust, boundaryArn: null }));
     },
+    async listUsers() {
+      return users.map((u) => ({ arn: u.arn, name: u.name, path: '/', userId: u.userId, createDate: new Date(demoNow() - u.createdDaysAgo * DAY),
+        passwordLastUsed: u.password?.lastUsedDaysAgo != null ? new Date(demoNow() - u.password.lastUsedDaysAgo * DAY) : null }));
+    },
+    async getUserDetail(name) {
+      const u = users.find((x) => x.name === name);
+      return {
+        tags: { owner: 'platform' }, groups: u.groups,
+        password: u.password ? { created: new Date(demoNow() - u.password.createdDaysAgo * DAY) } : null,
+        mfa: (u.mfa || []).map((m) => ({ ...m, enabled: new Date(demoNow() - 400 * DAY) })),
+        keys: u.keys.map((k) => ({ id: k.id, status: k.status, created: new Date(demoNow() - k.createdDaysAgo * DAY),
+          lastUsed: k.lastUsedHoursAgo == null ? null : new Date(demoNow() - k.lastUsedHoursAgo * HOUR), service: k.lastUsedHoursAgo == null ? null : k.service, region: k.lastUsedHoursAgo == null ? null : region0 })),
+      };
+    },
+    async getUserPolicies(name) {
+      const u = users.find((x) => x.name === name);
+      const att = (a) => ({ arn: a, name: a.split('/').pop(), awsManaged: a.startsWith('arn:aws:iam::aws:') });
+      return { inline: u.inline, attached: u.attached.map(att),
+        groups: Object.entries(u.groupPolicies || {}).map(([group, g]) => ({ group, inline: g.inline, attached: g.attached.map(att) })) };
+    },
     async getRoleDetail(name) {
       const r = estate.find((x) => x.name === name);
       const used = r.lastUsedDaysAgo != null ? new Date(demoNow() - r.lastUsedDaysAgo * DAY) : r.usage.length ? new Date(demoNow() - 2 * HOUR) : null;
@@ -116,6 +145,7 @@ export function demoGateway(account) {
     },
     async getAdvisor(roleArn) {
       const r = estate.find((x) => x.arn === roleArn);
+      if (!r) { const u = users.find((x) => x.arn === roleArn); return u ? [...new Set(u.usage.map((x) => x.src.split('.')[0]))].map((service) => ({ service, lastAuthenticated: new Date(demoNow() - 3 * HOUR) })) : []; }
       return Object.entries(r.advisor || {}).map(([service, d]) => ({ service, lastAuthenticated: d == null ? null : new Date(demoNow() - d * DAY) }));
     },
     async lookupEventsPage({ region, start, end, token }) {
