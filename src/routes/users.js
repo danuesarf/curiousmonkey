@@ -101,8 +101,9 @@ users.get('/iam-users/:id', requirePerm('view'), wrap(async (req, res) => {
                   coalesce(sum(d.error_count) FILTER (WHERE d.day >= current_date - 29), 0)::bigint AS denied30
              FROM principals p LEFT JOIN activity_daily d ON d.principal_id = p.id WHERE p.role_id=$1 GROUP BY p.id ORDER BY p.last_seen DESC NULLS LAST`, [id]),
     // roles this user assumed: it is the caller there
-    (() => { const rp = [`user:${u.arn}`]; return query(`SELECT r.id, r.name, a.name AS account_name, p.sessions_count, p.last_seen FROM principals p JOIN roles r ON r.id = p.role_id JOIN cloud_accounts a ON a.id = r.account_id
-            WHERE p.key = $1 AND r.deleted_at IS NULL AND ${scopeSql(req.user, 'r.account_id', rp)} ORDER BY p.last_seen DESC NULLS LAST LIMIT 50`, rp); })(),
+    (() => { const rp = [`user:${u.arn}`]; const where = ['p.key = $1', 'r.deleted_at IS NULL', scopeSql(req.user, 'r.account_id', rp)];
+      return query(`SELECT r.id, r.name, a.name AS account_name, p.sessions_count, p.last_seen FROM principals p JOIN roles r ON r.id = p.role_id JOIN cloud_accounts a ON a.id = r.account_id
+            WHERE ${where.join(' AND ')} ORDER BY p.last_seen DESC NULLS LAST LIMIT 50`, rp); })(),
   ]);
   res.json({ ...u, policies: pol.rows, callers: who.rows.map((x) => ({ ...x, calls30: Number(x.calls30), denied30: Number(x.denied30) })), assumes: roles.rows });
 }));
