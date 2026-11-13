@@ -185,7 +185,7 @@ export async function trustPage(ctx) {
     const el = href ? h('a', { class: 'tm-item', href }, ...kids) : h('button', { class: 'tm-item', onClick }, ...kids);
     return { el, text: `${label} ${meta || ''}` };
   };
-  const roleItem = (r) => item({ label: r.role, worst: r.worst, href: `#/roles/${r.roleId}?tab=policies`,
+  const roleItem = (r) => item({ label: r.role, worst: r.worst, href: `#/identities/${r.roleId}?tab=policies`,
     meta: [r.findings.filter((f) => f.severity !== 'info').map((f) => f.title).slice(0, 2).join(' · ') || (r.conditions ? `${plural(r.conditions, 'condition')}` : 'no conditions'),
       r.sessions ? `${num(r.sessions)} sessions · last ${ago(r.lastSeen)}` : r.iamLastUsed ? `IAM last used ${ago(r.iamLastUsed)}` : 'never used'].join(' · '), badge: sevBadge(r.worst) });
   const head = (eyebrow, title, sub, worst) => h('div', { class: 'tm-side-h' },
@@ -282,7 +282,7 @@ export async function trustPage(ctx) {
       !rows.length ? h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, sel && m.truncated ? 'Not among the loaded rows. Use “Show only this” in the sidebar.' : 'Nothing here.'))
         : h('div', { class: 'tm-ways' }, slice.map((e) => h('div', { class: 'tm-way' },
           h('span', { class: 'tm-dot', style: `background:${DOT[e.worst]}`, title: e.worst }),
-          h('div', { class: 'tm-way-role' }, h('a', { href: `#/roles/${e.roleId}?tab=policies`, class: 'name' }, e.role),
+          h('div', { class: 'tm-way-role' }, h('a', { href: `#/identities/${e.roleId}?tab=policies`, class: 'name' }, e.role),
             h('div', { class: 'tiny muted' }, `${e.account} · ${e.awsAccountId} · ${e.sid || `statement ${e.statement + 1}`}`)),
           h('div', { class: 'tm-way-from' }, h('div', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${e.group}` }, SHORT[e.group] || e.group), h('span', { class: 'tm-ell' }, e.source)),
             h('div', { class: 'mono tiny muted tm-ell', title: e.principal }, e.principal)),

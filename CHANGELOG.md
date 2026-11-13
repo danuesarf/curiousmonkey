@@ -21,9 +21,12 @@
 - **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
 
 ### Fixed
+- **Session replay did not light the calls as it played.** A name clash in the Track view (since the shared colour helper moved to `lib.js`) stopped the replay with an error.
 - **Google Cloud scans failed on any project with GKE.** The scanner asked the GKE workload identity pool (`<project>.svc.id.goog`) for its providers, which Google refuses with a 400, and the whole scan stopped. Google-managed pools are now skipped, and a pool that cannot list its providers is skipped instead of failing the scan.
 
 ### Changed
+- **One identity page.** A role, an IAM user and a Google Cloud identity open on the same page, `#/identities/<id>`, with tabs: *Overview*, *Activity*, *Permissions*, *Credentials*, *Policies and trust* and *Findings* (tabs that do not apply are left out). The Sector scan is the top of *Permissions* and filters the action list when a sector is clicked; a role's sessions are listed on *Activity* and replay in a window; an IAM user's keys and console sign-in are its *Credentials* tab instead of a second page. The header has one primary action, *Recommend least-privilege policy*. The tab is kept in the address.
+- **Identities in the rail.** *Roles* and *IAM users* are one item, *Identities*, with a *Roles | IAM users | Google Cloud* switch at the top of the list. Old addresses (`#/roles`, `#/roles/<id>`, `#/roles/<id>/scan`, `#/roles/<id>/recommendation`, `#/users`, `#/users/<id>`, `#/gcp/principals/<id>`, `#/roles?cloud=gcp`) still open, with their filters.
 - **Deciding on a role's Findings tab updates that finding in place** instead of reloading the whole role page, and the tab says how many still wait.
 - **A grouped left rail.** The 12 flat items are now three groups: *Watch* (Radar, Space, Trust), *Investigate* (Events, Roles, IAM users) and *Admin* (Accounts, Operations, Admin). Old addresses (`#/scans`, `#/workers`, `#/members`, `#/audit`, `#/settings`, `#/accounts/<id>/unidentified`) still open and are swapped for the new ones.
 - **Operations** is one page with three tabs: *Scans*, *Workers* and *Database*. Health is split into the last two, and the workers table is no longer repeated on Scans.

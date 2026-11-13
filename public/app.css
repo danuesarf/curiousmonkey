@@ -693,3 +693,9 @@ button.tile[aria-pressed=true]{border-color:var(--banana)}
 .bulk-bar[hidden]{display:none}
 kbd{font-family:var(--mono);font-size:11px;padding:1px 5px;border:1px solid var(--edge);border-bottom-width:2px;background:var(--surface);color:var(--ink2)}
 .inbox-table .badge{white-space:nowrap}
+
+/* ---- one identity page ---- */
+.sector-page.embedded{min-height:0;height:620px;grid-template-rows:minmax(0,1fr)}
+.sector-page.embedded>aside{max-height:none}
+.sector-page.embedded .scene{min-height:0}
+@media (max-width:1200px){.sector-page.embedded{height:auto;grid-template-rows:none}.sector-page.embedded .scene{min-height:520px}}

@@ -99,7 +99,7 @@ The portal opens on a **radar** with two views:
 
 **What changed** comes from two tables. After each final analysis of a fully read account, every role gets a daily snapshot (`role_snapshots`); trails and trends compare against them, so they appear after 7 and 30 days. The same step records changes (`changes`): permissions grew (or reached admin level), trimmed, first denied calls, went 90 days without calls, new roles, new unidentified event names. A caller seen entering a role for the first time is recorded while events are read. Nothing is recorded during an account's first read, when everything would look new. The feed marks what arrived since you last looked. In demo mode, `node src/cli.js demo-history` invents 35 days of snapshots and a few changes so this can be seen at once.
 
-- **Sector scan** cuts one role into rings (access level) and sectors (service). Lit dots were called, amber dots are unconfirmed, dim dots were never called.
+- **Sector scan** (the top of an identity's *Permissions* tab) cuts one role into rings (access level) and sectors (service). Lit dots were called, amber dots are unconfirmed, dim dots were never called.
 - **Track** replays one role session call by call. Each session is a lane. When a session assumes another role (role chaining), the call is drawn as a jump into a new lane for the new session, linked by access key. Chains across connected accounts are linked too. Sessions in accounts you can't see are counted, not shown. Session replays are kept for `SESSION_RETENTION_DAYS` (default 30). Space opens the same replay over the map: a role's sessions are listed in its sidebar (click one to replay it), and **Track sessions** on a role, an account or an account-to-account path lists theirs.
 
 ### Results while history is still loading
@@ -117,11 +117,26 @@ The daily scan (`SCAN_AT`, 01:00 `SCAN_TZ`) reads everything: roles, policies, A
 
 CloudTrail delivers events 5 to 15 minutes late and reads hold back `SCAN_DELIVERY_LAG_MINUTES` (15), so data is at best about 15 minutes behind. An interval shorter than about 5 minutes only adds AWS calls.
 
+## Identities
+
+**Identities** in the rail (`#/identities`) is one list with a switch at the top: *Roles*, *IAM users* and *Google Cloud*. Each keeps its own filters in the address.
+
+Whatever you open, a role, an IAM user or a Google Cloud identity, lands on one page (`#/identities/<id>`) with tabs; the tab is in the address (`?tab=`), so a link opens it:
+
+- **Overview:** the numbers, why it has its risk level, who got in, and its paths to the other cloud.
+- **Activity:** calls per day for 90 days, who assumed it with the conditions they met, and its sessions. Picking a session replays it call by call in a window (Track).
+- **Permissions:** the sector scan on top, then services and every action with its status. Clicking a sector filters the list under it.
+- **Credentials** (IAM users, Google service accounts): access keys, console sign-in and MFA; for Google Cloud, keys and everything that can run as it.
+- **Policies and trust:** the documents.
+- **Findings:** the same cards as the Findings inbox, decided in place.
+
+Tabs that do not apply are left out (Google Cloud has no Activity: its audit logs are not read). Old addresses (`#/roles`, `#/roles/<id>`, `#/roles/<id>/scan`, `#/users`, `#/users/<id>`, `#/gcp/principals/<id>`) open the new ones.
+
 ## IAM users
 
-IAM users are watched alongside roles. **IAM users** in the rail lists every user with each access key on its own line: the key ID, Active or Inactive, its age, when and where it was last used, and badges when it should be rotated (older than 90 days) or deactivated (never used, or not in 90 days). Secret keys are never readable, here or in AWS; only their IDs are shown. The list also shows console passwords and MFA, groups, calls in the last 7 days and the findings behind the risk level, with filters for old keys, unused keys, two active keys, console without MFA and inactive users.
+IAM users are watched alongside roles. **Identities → IAM users** lists every user with each access key on its own line: the key ID, Active or Inactive, its age, when and where it was last used, and badges when it should be rotated (older than 90 days) or deactivated (never used, or not in 90 days). Secret keys are never readable, here or in AWS; only their IDs are shown. The list also shows console passwords and MFA, groups, calls in the last 7 days and the findings behind the risk level, with filters for old keys, unused keys, two active keys, console without MFA and inactive users.
 
-A user's page adds the keys' CloudTrail activity (calls, first and last seen, source IPs), who used it in the last 30 days (each key, and console or temporary sessions separately), the roles it assumed, and its own and its groups' policies. **Permission analysis** is the same page as for a role: granted, used, never used.
+A user opens on the same identity page as a role, with a *Credentials* tab. It adds the keys' CloudTrail activity (calls, first and last seen, source IPs), who used it in the last 30 days (each key, and console or temporary sessions separately), the roles it assumed, and its own and its groups' policies. **Permission analysis** is the same page as for a role: granted, used, never used.
 
 Radar and Space have a **Show: All | Roles | IAM users** switch. Users are drawn as squares in Space and sit in their own sector on the account radar.
 
@@ -197,7 +212,7 @@ Connect a Google Cloud organization, folder or project on the Accounts page, *Go
 - **Sign-in:** workload identity federation from this app's own AWS role (recommended: no Google secret is stored; the provider's attribute condition pins it to that one role), or a service account key (stored encrypted). The page generates the `gcloud` commands: a custom role `curiousMonkeyReader` with 18 read permissions (`roles/iam.securityReviewer`, `roles/browser` and `roles/iam.workloadIdentityPoolViewer` for a folder, which cannot hold custom roles), the reader service account, and the pool and AWS provider. *Test connection* signs in and reads the scope before saving.
 - **Scans:** a worker reads each due connection every 24 hours (*Scan now* to run it sooner). Each scan replaces the previous snapshot in one transaction; a failed scan keeps the last good one and retries in an hour.
 - **Analysis:** roles are inherited down the hierarchy and their permissions combined. For every service account it lists who can become it: key holders, Token Creator and similar (impersonation), Service Account User (`actAs`), key creators, GKE workload identity and federated identities. Findings: Owner and Editor, the right to change IAM policy, impersonating every service account in a project or folder, old or never-expiring keys, the default compute service account with Editor, users outside your domain, `allUsers`, bindings to deleted identities, and federation pools with no attribute condition. Group membership is not expanded and IAM conditions are shown but not evaluated.
-- **Roles page:** an *AWS | Google Cloud* tab. The Google Cloud tab lists identities riskiest first, filtered by kind, risk, project and way in (keys, federated, from AWS, impersonated, GKE). One identity shows what it can do (each role, where it is granted, how many projects it reaches, the full permission list), where it can come from, who it can become, and its paths to and from AWS.
+- **Identities page:** a *Google Cloud* list beside *Roles* and *IAM users*. It lists identities riskiest first, filtered by kind, risk, project and way in (keys, federated, from AWS, impersonated, GKE). One identity shows what it can do (each role, where it is granted, how many projects it reaches, the full permission list), where it can come from, who it can become, and its paths to and from AWS.
 - **Across clouds:** AWS roles that can act in Google Cloud (an AWS provider plus a binding to `attribute.aws_role` or the whole account), and AWS roles that trust a Google service account (`accounts.google.com` with its unique ID in `:sub`, `:aud` or `:oaud`). Both show on the AWS role's page and the Google identity's page, and the Trust map names the service account.
 - **Space:** with Google Cloud connected, the estate shows two fields. AWS is the green plane at the back and Google Cloud the blue plane in front, with the same environment zones. A project is a ring and each service account a dot, higher the more it can do and red when it is high risk. Blue arcs between the planes are paths between the clouds; a red arc means any role in that AWS account can use it. Click a project or an arc for the details.
 - **Environments:** a project lands in the environment set for it on the Accounts page, otherwise its `env`/`environment` label, otherwise the connection's default.

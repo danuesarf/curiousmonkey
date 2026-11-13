@@ -64,7 +64,7 @@ export async function eventsPage(ctx) {
         h('a', { class: 'btn sm', href: `#/events?${qs({ session: x.session_id, q: '' })}` }, 'Only this session'),
         x.source_ip && h('a', { class: 'btn sm', href: `#/events?${qs({ q: `ip:${x.source_ip}`, session: '' })}` }, 'Same IP'),
         h('a', { class: 'btn sm', href: `#/events?${qs({ q: `action:${x.event_source.split('.')[0]}:${x.event_name}` })}` }, 'Same event'),
-        h('a', { class: 'btn sm', href: `#/roles/${x.role_id}` }, 'Open role')))));
+        h('a', { class: 'btn sm', href: `#/identities/${x.role_id}` }, 'Open role')))));
   };
   const rowOf = (x) => {
     let open = null;

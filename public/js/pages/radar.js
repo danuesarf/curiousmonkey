@@ -318,8 +318,8 @@ async function accountView(ctx, shell) {
       statGrid([['granted', num(r.granted), '#e3efe8'], ['excess', num(r.excess), '#f0b45a'], ['never called', `${Math.round(r.never * 100)}%`, '#8fb5a1'], ['calls, last 24 h', num(r.calls24h), '#6fe3b0']]),
       h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · 30 DAYS'),
         spark([r.never30, r.never7, r.never], headColor(r.d30)) || h('p', { class: 'tiny muted' }, 'No trail yet: snapshots start once the account is fully read.')),
-      h('a', { class: 'btn primary', href: `#/roles/${r.id}/scan` }, 'Sector scan'),
-      h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/roles/${r.id}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/track?role=${r.id}` }, 'Track a session')),
+      h('a', { class: 'btn primary', href: `#/identities/${r.id}?tab=permissions` }, 'Sector scan'),
+      h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/identities/${r.id}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/track?role=${r.id}` }, 'Track a session')),
       h('section', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, items.length ? 'CHANGES TO THIS ROLE' : `CHANGES IN ${acct.name.toUpperCase()}`),
         feedList(items.length ? items : F.items, F.seenAt, (f) => { const x = roles.find((y) => y.id === f.role_id); if (x) { sel = x; draw(); list(); card(); } })));
   }

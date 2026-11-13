@@ -1,19 +1,17 @@
 import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint } from './lib.js';
 import { theme, setTheme, initTheme } from './theme.js';
 import * as authPages from './pages/auth.js';
-import { overview } from './pages/overview.js';
-import { rolePage } from './pages/role.js';
+import { identitiesPage } from './pages/overview.js';
+import { identityPage } from './pages/identity.js';
 import { recommendationPage } from './pages/recommendation.js';
 import { accountsPage, newAccountPage, editAccountPage } from './pages/accounts.js';
 import { adminPage, adminTabs } from './pages/admin.js';
 import { operationsPage } from './pages/operations.js';
 import { radarPage } from './pages/radar.js';
 import { gcpConnectPage, gcpPrincipalPage } from './pages/gcp.js';
-import { usersPage, userPage } from './pages/users.js';
 import { spacePage } from './pages/space.js';
 import { eventsPage } from './pages/events.js';
 import { trustPage } from './pages/trust.js';
-import { sectorPage } from './pages/sector.js';
 import { trackPage } from './pages/track.js';
 import { unidentifiedPage } from './pages/unidentified.js';
 import { findingsPage } from './pages/findings.js';
@@ -29,17 +27,14 @@ const routes = [
   [/^#\/space$/, () => spacePage, 'space', true],
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
-  [/^#\/roles$/, () => overview, 'roles'],
   [/^#\/findings$/, () => findingsPage, 'findings'],
-  [/^#\/users$/, () => usersPage, 'users'],
-  [/^#\/users\/([\w-]+)$/, (m) => (c) => userPage(c, m[1]), 'users'],
-  [/^#\/roles\/([\w-]+)\/scan$/, (m) => (c) => sectorPage(c, m[1]), 'radar', true],
-  [/^#\/roles\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'roles'],
-  [/^#\/roles\/([\w-]+)$/, (m) => (c) => rolePage(c, m[1]), 'roles'],
+  [/^#\/identities$/, () => identitiesPage, 'identities'],
+  [/^#\/identities\/gcp\/([\w-]+)$/, (m) => (c) => gcpPrincipalPage(c, m[1]), 'identities'],
+  [/^#\/identities\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'identities'],
+  [/^#\/identities\/([\w-]+)$/, (m) => (c) => identityPage(c, m[1]), 'identities'],
   [/^#\/accounts\/new$/, () => newAccountPage, 'accounts'],
   [/^#\/gcp\/new$/, () => (c) => gcpConnectPage(c), 'accounts'],
   [/^#\/gcp\/([\w-]+)\/edit$/, (m) => (c) => gcpConnectPage(c, m[1]), 'accounts'],
-  [/^#\/gcp\/principals\/([\w-]+)$/, (m) => (c) => gcpPrincipalPage(c, m[1]), 'roles'],
   [/^#\/unidentified$/, () => unidentifiedPage, 'accounts'],
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
@@ -52,10 +47,25 @@ const MOVED = [
   [/^#\/scans$/, () => '#/operations/scans'], [/^#\/workers$/, () => '#/operations/workers'],
   [/^#\/members$/, () => '#/admin/members'], [/^#\/audit$/, () => '#/admin/audit'], [/^#\/settings$/, () => '#/admin/config'],
   [/^#\/accounts\/([\w-]+)\/(?:coverage|unidentified)$/, (m) => `#/unidentified?account=${m[1]}`],
+  // roles, IAM users and Google Cloud identities are one list and one page now
+  [/^#\/roles$/, (m, q) => { const gcp = q.get('cloud') === 'gcp'; q.delete('cloud'); return gcp ? '#/identities?type=gcp' : '#/identities'; }],
+  [/^#\/users$/, () => '#/identities?type=users'],
+  [/^#\/roles\/([\w-]+)$/, (m) => `#/identities/${m[1]}`],
+  [/^#\/roles\/([\w-]+)\/scan$/, (m) => `#/identities/${m[1]}?tab=permissions`],
+  [/^#\/roles\/([\w-]+)\/recommendation$/, (m) => `#/identities/${m[1]}/recommendation`],
+  [/^#\/users\/([\w-]+)$/, (m) => `#/identities/${m[1]}?tab=credentials`],
+  [/^#\/gcp\/principals\/([\w-]+)$/, (m) => `#/identities/gcp/${m[1]}`],
 ];
+/** Where an old address lives now, or null. `to` gets the old query to read or change; what is left of it is carried over (the new address's own keys win). */
 const movedTo = (hash) => {
   const [path, qs] = String(hash).split('?');
-  for (const [re, to] of MOVED) { const m = path.match(re); if (m) { const dest = to(m); return qs ? `${dest}${dest.includes('?') ? '&' : '?'}${qs}` : dest; } }
+  for (const [re, to] of MOVED) {
+    const m = path.match(re); if (!m) continue;
+    const q = new URLSearchParams(qs || ''), [dest, own] = to(m, q).split('?');
+    for (const [k, v] of new URLSearchParams(own || '')) q.set(k, v);
+    const rest = q.toString();
+    return rest ? `${dest}?${rest}` : dest;
+  }
   return null;
 };
 
@@ -68,7 +78,7 @@ const ICON = {
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
-  roles: 'M4 6h16M4 12h16M4 18h10', users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
+  identities: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
   findings: 'M5 4h14v16H5zM8 9l2 2 4-4M8 15h8',
   admin: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
 };
@@ -225,14 +235,14 @@ const group = (label, ...items) => { const shown = items.filter(Boolean); return
 function shell(active, content, full) {
   const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
-  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', roles: 'Roles', users: 'IAM users', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
       group('Watch', item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
-      group('Investigate', item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('users', '#/users', 'IAM users', 'view')),
+      group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
       group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount)),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },

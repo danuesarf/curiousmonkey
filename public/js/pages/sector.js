@@ -1,8 +1,8 @@
-// Sector scan: one role cut two ways.
+// Sector scan: one identity cut two ways. Shown on top of the identity page's Permissions tab.
 //   rings   = access level (List on the inside, Permissions management on the rim)
 //   sectors = AWS service, sized by how many of its permissions the role holds
 //   dots    = permissions; lit = called, amber = unconfirmed, dim = never called
-import { h, svg, get, num, ago, fmtDate, riskBadge, r1 } from '../lib.js';
+import { h, svg, get, num, ago, fmtDate, r1 } from '../lib.js';
 
 const LEVELS = ['List', 'Read', 'Write', 'Tagging', 'Permissions management', 'Unknown'];
 const REASON = {
@@ -10,10 +10,10 @@ const REASON = {
   'before-window': 'Older than the history read', 'service-unknown': 'Service used, action not visible', 'unmapped-event': 'Event name not identified yet',
 };
 
-export async function sectorPage(ctx, roleId) {
+/** The dish for one role or IAM user. `onService(name | null)` is told when a sector is picked or dropped (null for the folded "other" sector too). */
+export async function sectorView(roleId, { onService = () => {} } = {}) {
   const d = await get(`/roles/${roleId}/sector`);
   const role = d.role, hist = d.history || { complete: true, progress: 100 };
-  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), h('a', { href: `#/roles/${role.id}` }, role.name), 'Sector scan');
 
   // services: biggest first, the tail folded into "other"
   const bySvc = new Map();
@@ -56,7 +56,7 @@ export async function sectorPage(ctx, roleId) {
     });
     for (const s of svcs) {
       const hot = st.svc === s.service;
-      const g = svg('g', { style: 'cursor:pointer', onClick: () => { st.svc = hot ? null : s.service; draw(); readout(); } });
+      const g = svg('g', { style: 'cursor:pointer', onClick: () => { st.svc = hot ? null : s.service; draw(); readout(); onService(st.svc && !s.other ? st.svc : null); } });
       g.append(svg('path', { d: arc(s.a0, s.a1, R0, R1), fill: hot ? 'rgba(246,224,22,.06)' : 'transparent', stroke: '#16392a' }));
       levels.forEach((lv, i) => {
         const c = s.cells[lv]; if (!c) return;
@@ -119,19 +119,16 @@ export async function sectorPage(ctx, roleId) {
           : h('p', { class: 'tiny muted' }, 'Nothing called in this slice in the history read so far.')),
       unc.length > 0 && h('section', { class: 'stack' }, h('div', { class: 'eyebrow', style: 'color:#f0b45a' }, 'UNCONFIRMED · WHY'),
         unc.slice(0, 8).map((u) => h('div', { class: 'row' }, h('span', { class: 'tiny grow' }, `${u.service} · ${REASON[u.reason] || u.reason || 'Unknown'}`), h('span', { class: 'mono tiny muted' }, num(u.n)),
-          u.reason === 'unmapped-event' && h('a', { class: 'unk-tag', href: `#/roles/${role.id}?identify=` }, 'Identify')))),
+          u.reason === 'unmapped-event' && h('a', { class: 'unk-tag', href: `#/identities/${role.id}?identify=` }, 'Identify')))),
       d.denied.length > 0 && h('section', { class: 'stack' }, h('div', { class: 'eyebrow', style: 'color:#ff5a4f' }, 'DENIED'),
-        d.denied.slice(0, 6).map((x) => h('div', { class: 'row' }, h('span', { class: 'mono tiny grow' }, x.action), h('span', { class: 'mono tiny', style: 'color:#ff5a4f' }, num(x.n))))),
-      h('div', { class: 'stack', style: 'margin-top:auto' }, h('a', { class: 'btn primary', href: `#/roles/${role.id}/recommendation` }, 'Open recommendation'),
-        h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/track?role=${role.id}` }, 'Track a session'), h('a', { class: 'btn sm grow', href: `#/roles/${role.id}` }, 'Role details'))));
+        d.denied.slice(0, 6).map((x) => h('div', { class: 'row' }, h('span', { class: 'mono tiny grow' }, x.action), h('span', { class: 'mono tiny', style: 'color:#ff5a4f' }, num(x.n))))));
   }
 
   draw(); readout();
-  return h('div', { class: 'scene-layout sector-page' },
+  return h('div', { class: 'scene-layout sector-page embedded' },
     h('aside', { class: 'left' },
-      h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'SECTOR SCAN'), h('h2', null, role.name), h('div', { class: 'row' }, riskBadge(role.risk), h('span', { class: 'tiny muted' }, role.account))),
       h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'SLICE BY ACCESS LEVEL'), slices),
-      h('p', { class: 'tiny muted' }, 'Click a sector to read one service. Drag to turn the dish.')),
+      h('p', { class: 'tiny muted' }, 'Rings are access levels, sectors are services. Click a sector to read one service and filter the list below. Drag to turn the dish.')),
     h('div', { class: 'scene' }, stage,
       h('div', { class: 'hud' }, h('div', { class: 'hot' }, `● SECTOR SCAN${hist.complete ? '' : ' · FILLING IN'}`), h('div', null, `${svcs.length} SERVICES · ${levels.length} ACCESS LEVELS`)),
       h('div', { class: 'legend' }, h('span', null, legendDot('#f6e016', 7), 'Called'), h('span', null, legendDot('#f0b45a', 6), 'Unconfirmed'), h('span', null, legendDot('#5f8c73', 4), 'Never called'))),

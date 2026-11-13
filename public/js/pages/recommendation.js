@@ -12,7 +12,7 @@ export async function recommendationPage(ctx, roleId) {
     try { await post(`/roles/${roleId}/recommend`, { instruction: instruction.value || undefined, useAi }); ctx.reload(); } catch (x) { toast(x.message, true); b.disabled = false; b.textContent = useAi ? 'Draft with AI' : 'Draft with rules only'; }
   };
   const canRec = session.user.permissions.includes('recommend');
-  ctx.setCrumbs(h('a', { href: '#/roles' }, 'Roles'), h('a', { href: `#/roles/${roleId}` }, r.name), 'Recommendation');
+  ctx.setCrumbs(h('a', { href: '#/identities' }, 'Identities'), h('a', { href: `#/identities/${roleId}` }, r.name), 'Recommendation');
   const hist = d.history || { complete: true };
   const provBanner = !hist.complete && h('div', { class: 'provisional' }, h('b', null, `PROVISIONAL · ${hist.progress}% OF HISTORY READ`),
     h('span', null, 'This draft is built from the history read so far. Calls in the unread part may still need permissions it removes, so it cannot be approved until history is complete.'));
@@ -59,7 +59,7 @@ export async function recommendationPage(ctx, roleId) {
 function heldTile(held, roleId) {
   return h('div', { class: 'tile warn' }, h('span', { class: 'small', style: 'color:#f0b45a' }, 'Held back · unidentified'), h('b', null, num(held.count)),
     h('span', { class: 'tiny muted' }, `kept in ${held.services.slice(0, 3).join(', ')}${held.services.length > 3 ? '…' : ''} until event names are settled`),
-    h('a', { class: 'tiny', href: `#/roles/${roleId}?identify=` }, 'Identify them'));
+    h('a', { class: 'tiny', href: `#/identities/${roleId}?identify=` }, 'Identify them'));
 }
 
 async function exportIt(rec, format) {

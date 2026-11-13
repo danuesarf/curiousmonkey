@@ -172,7 +172,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
     const counter = h('span', { class: 'mono tiny muted' });
     controls.replaceChildren(playBtn, h('button', { class: 'btn sm', onClick: () => { pause(); seek(-1); play(); } }, 'Restart'), speedSel, scrub, counter);
 
-    function paint() {
+    function repaint() {
       shown.forEach((s, i) => {
         const done = i <= pos; const c = s.denied ? '#ff5a4f' : laneColor(s.lane);
         segEls[i].lit.setAttribute('opacity', done ? 0.9 : 0);
@@ -183,9 +183,9 @@ export async function trackView({ role: roleId = null, account = null, from = nu
       shown.forEach((s, i) => s.calls.forEach((ci) => { const r = rowFor.get(ci); if (r) { r.classList.toggle('past', i <= pos); r.classList.toggle('future', i > pos); } }));
       scrub.value = pos; counter.textContent = `${Math.max(0, pos + 1)} / ${shown.length}`;
     }
-    function seek(i) { pos = Math.max(-1, Math.min(shown.length - 1, i)); comet.setAttribute('opacity', 0); tail.setAttribute('opacity', 0); paint(); }
+    function seek(i) { pos = Math.max(-1, Math.min(shown.length - 1, i)); comet.setAttribute('opacity', 0); tail.setAttribute('opacity', 0); repaint(); }
     function land(i) {
-      const s = shown[i]; pos = i; paint();
+      const s = shown[i]; pos = i; repaint();
       if (!reduced()) {
         const c = s.denied ? '#ff5a4f' : (s.jumpTo != null ? '#8ec5ff' : laneColor(s.lane));
         for (const [delay, max] of [[0, 26], [160, 40]]) {
@@ -266,9 +266,9 @@ export async function trackView({ role: roleId = null, account = null, from = nu
           l.parentLane != null ? h('span', { class: 'muted' }, `from lane ${l.parentLane + 1}`) : h('span', { class: 'muted' }, i === 0 ? 'start' : 'parent not in view'),
           l.id !== sel.id && h('button', { class: 'btn sm', onClick: () => { current = { ...current, id: l.id }; drawList(); load(); } }, 'Focus')))),
       nodeBox,
-      h('div', { class: 'row', style: 'margin-top:auto' }, h('a', { class: 'btn sm grow', href: `#/roles/${sel.roleId}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/roles/${sel.roleId}/scan` }, 'Sector scan')));
+      h('div', { class: 'row', style: 'margin-top:auto' }, h('a', { class: 'btn sm grow', href: `#/identities/${sel.roleId}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/identities/${sel.roleId}?tab=permissions` }, 'Sector scan')));
     if (shown[0]) pick(shown[0]);
-    paint();
+    repaint();
     if (!reduced()) setTimeout(() => play(), 400);
   }
 

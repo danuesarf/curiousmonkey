@@ -1,7 +1,8 @@
-// Google Cloud pages: connecting an organization, folder or project; the Roles page's Google Cloud tab; one identity.
+// Google Cloud pages: connecting an organization, folder or project; the Identities page's Google Cloud list; one identity.
 // Permissions only for now: who can do what, and where they can come from. No audit logs are read.
 import { h, get, post, api, num, ago, fmtDate, toast, copy, riskBadge, confirmDialog, loadEnvironments, envName, tile, pager, searchBox, syncUrl, urlSet } from '../lib.js';
 import { session, go } from '../main.js';
+import { identityShell, section } from './identity.js';
 
 const SEV = { high: 'b-high', medium: 'b-medium', low: 'b-low', info: 'b-neutral' };
 const VIA = { key: 'Key', wif: 'Federation', gke: 'GKE workload', token: 'Impersonation', actAs: 'Act as', 'key-create': 'Can mint keys' };
@@ -19,7 +20,7 @@ const where = (r) => (r.resourceType === 'organization' ? 'Organization' : r.res
 const nameOf = (x) => x.email || x.origin?.label || x.member;
 
 /** AWS | Google Cloud, above the Roles and Accounts pages. */
-export const cloudTabs = (current, base = '#/roles') => h('div', { class: 'tabs cloud-tabs', role: 'tablist', 'aria-label': 'Cloud' },
+export const cloudTabs = (current, base = '#/accounts') => h('div', { class: 'tabs cloud-tabs', role: 'tablist', 'aria-label': 'Cloud' },
   [['aws', 'AWS', base], ['gcp', 'Google Cloud', `${base}?cloud=gcp`]].map(([k, l, href]) => h('a', { role: 'tab', href, 'aria-selected': current === k ? 'true' : 'false' }, l)));
 export const GCP_CONNECTIONS = '#/accounts?cloud=gcp';
 
@@ -55,7 +56,7 @@ function connectionCard(c, ctx) {
     h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, c.name), h('span', { class: `badge ${STATUS[c.status]}` }, c.scanning ? 'scanning' : c.status), h('span', { class: 'small muted mono' }, `${scope} · ${envName(c.environment)}`)),
       h('div', { class: 'row' },
         can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { const r = await post(`/gcp/connections/${c.id}/scan`); toast(r.message); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
-        h('a', { class: 'btn sm', href: '#/roles?cloud=gcp' }, 'Identities'),
+        h('a', { class: 'btn sm', href: '#/identities?type=gcp' }, 'Identities'),
         h('a', { class: 'btn sm', href: '#/space' }, 'Space'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/gcp/${c.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${c.name}?`, message: 'Curious Monkey forgets this connection and everything read from it. Nothing changes in Google Cloud; delete the reader service account and pool there yourself.', confirmLabel: 'Remove', danger: true })) { await api('DELETE', `/gcp/connections/${c.id}`); ctx.reload(); } } }, 'Remove'))),
@@ -163,8 +164,8 @@ export async function gcpConnectPage(ctx, id = null) {
 const F = { q: '', kinds: new Set(), risks: new Set(), source: '', project: '', hideManaged: true, sort: 'risk', page: 1 };   // kept when you come back by the tab link
 const URL_KEYS = ['q', 'kinds', 'risks', 'source', 'project', 'hideManaged', 'sort', 'page'];
 export async function gcpRolesTab(ctx) {
-  ctx.setCrumbs('Roles', 'Google Cloud');
-  // every filter is in the address (#/roles?cloud=gcp&risks=High&source=key), so links from Space and elsewhere, reloads and Back open the same list
+  ctx.setCrumbs('Identities', 'Google Cloud');
+  // every filter is in the address (#/identities?type=gcp&risks=High&source=key), so links from Space and elsewhere, reloads and Back open the same list
   const P = ctx.params;
   if (URL_KEYS.some((k) => P.has(k))) Object.assign(F, { q: P.get('q') || '', kinds: urlSet(P, 'kinds'), risks: urlSet(P, 'risks'), project: P.get('project') || '', source: P.get('source') || '',
     hideManaged: P.get('hideManaged') !== '0', sort: P.get('sort') || 'risk', page: Math.max(1, Number(P.get('page')) || 1) });
@@ -179,7 +180,7 @@ export async function gcpRolesTab(ctx) {
   const chips = h('div', { class: 'filters' });
   async function load() {
     let r;
-    syncUrl({ cloud: 'gcp', q: F.q, kinds: F.kinds, risks: F.risks, source: F.source, project: F.project, hideManaged: F.hideManaged ? '' : '0', sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
+    syncUrl({ type: 'gcp', q: F.q, kinds: F.kinds, risks: F.risks, source: F.source, project: F.project, hideManaged: F.hideManaged ? '' : '0', sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
     try { r = await get(`/gcp/principals?${qs()}`); } catch (x) { list.replaceChildren(h('div', { class: 'alert bad' }, x.message)); return; }
     count.textContent = `${num(r.total)} identities`;
     if (first) { first = false; drawFilters(r); drawTiles(r); }
@@ -227,7 +228,7 @@ export async function gcpRolesTab(ctx) {
   };
   const table = (items) => h('div', { class: 'scroll' }, h('table', null,
     h('thead', null, h('tr', null, h('th', null, 'Identity'), h('th', null, 'Risk'), h('th', null, 'Can do'), h('th', null, 'Ways in'), h('th', null, 'Findings'))),
-    h('tbody', null, items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/gcp/principals/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/gcp/principals/${x.id}`); } },
+    h('tbody', null, items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/identities/gcp/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/identities/gcp/${x.id}`); } },
       h('td', null, h('div', { class: 'name' }, nameOf(x)), h('div', { class: 'tiny muted' }, [x.kindLabel, x.project, x.name, x.managed ? 'Google-managed' : null, x.disabled ? 'disabled' : null].filter(Boolean).join(' · '))),
       h('td', null, riskBadge(x.risk)),
       h('td', { class: 'nowrap small' }, `${num(x.permissions)} permissions`, h('div', { class: 'tiny muted' }, `${x.roles} role${x.roles === 1 ? '' : 's'} · ${x.reach.length} project${x.reach.length === 1 ? '' : 's'}`)),
@@ -237,7 +238,7 @@ export async function gcpRolesTab(ctx) {
   drawFilters(null); load();
   ctx.onLeave(() => search?.cancel());
   return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ROLES · GOOGLE CLOUD'), h('h1', null, 'Google Cloud identities'),
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IDENTITIES · GOOGLE CLOUD'), h('h1', null, 'Google Cloud identities'),
       h('p', { class: 'muted' }, 'Service accounts, people, groups and federated identities: what IAM lets them do, and where they can come from. Read from IAM policies; activity is not read yet, so nothing here says what was actually used.')),
     can('accounts') && h('div', { class: 'actions' }, h('a', { class: 'btn', href: GCP_CONNECTIONS }, 'Connections'))),
     tiles, h('section', { class: 'card' }, chips, list));
@@ -246,8 +247,7 @@ export async function gcpRolesTab(ctx) {
 // ---------------------------------------------------------------- one identity
 export async function gcpPrincipalPage(ctx, id) {
   const p = await get(`/gcp/principals/${id}`);
-  ctx.setCrumbs(h('a', { href: '#/roles?cloud=gcp' }, 'Google Cloud'), nameOf(p));
-  const section = (title, sub, ...kids) => h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('div', null, h('h2', null, title), sub && h('p', { class: 'muted small' }, sub))), h('div', { class: 'card-b stack' }, ...kids));
+  ctx.setCrumbs(h('a', { href: '#/identities?type=gcp' }, 'Identities'), 'Google Cloud', nameOf(p));
   const findings = p.reasons.length ? h('ul', { class: 'plain stack', style: 'gap:8px' }, p.reasons.map((r) => h('li', null, h('span', { class: `badge ${SEV[r.severity]}` }, r.severity), ' ', h('b', null, r.title), h('div', { class: 'small muted' }, r.detail))))
     : h('p', { class: 'muted' }, 'Nothing stands out.');
 
@@ -270,7 +270,7 @@ export async function gcpPrincipalPage(ctx, id) {
 
   // the AWS side
   const awsRow = (l, dir) => h('tr', null,
-    h('td', null, l.awsRoleId ? h('a', { href: `#/roles/${l.awsRoleId}` }, l.awsRole) : l.awsRole || h('b', null, 'any role')),
+    h('td', null, l.awsRoleId ? h('a', { href: `#/identities/${l.awsRoleId}` }, l.awsRole) : l.awsRole || h('b', null, 'any role')),
     h('td', { class: 'small' }, l.awsAccountName || 'not connected', h('div', { class: 'tiny muted mono' }, l.awsAccountId)),
     h('td', { class: 'small' }, dir === 'in' ? (l.via === 'direct' ? `holds ${l.grant} itself` : `becomes this service account (${shortRole(l.grant || '')})`) : `trusts it in statement ${l.statement + 1}`),
     h('td', null, l.broad ? h('span', { class: 'badge b-high' }, 'whole account') : null));
@@ -298,16 +298,30 @@ export async function gcpPrincipalPage(ctx, id) {
     permBox);
   const becomes = p.becomes.length ? section('Who it can become', 'Service accounts this identity can impersonate, act as or mint keys for. Their permissions are effectively its permissions too.',
     h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, h('th', null, 'Service account'), h('th', null, 'Risk'), h('th', null, 'How'))),
-      h('tbody', null, p.becomes.map((b) => h('tr', { class: 'link', onClick: () => go(`#/gcp/principals/${b.id}`) }, h('td', null, h('div', { class: 'name' }, b.email), h('div', { class: 'tiny muted' }, b.project)), h('td', null, riskBadge(b.risk)),
+      h('tbody', null, p.becomes.map((b) => h('tr', { class: 'link', onClick: () => go(`#/identities/gcp/${b.id}`) }, h('td', null, h('div', { class: 'name' }, b.email), h('div', { class: 'tiny muted' }, b.project)), h('td', null, riskBadge(b.risk)),
         h('td', null, b.via.map((v) => `${VIA[v.via] || v.via} (${shortRole(v.role)})`).join(', '))))))))
     : null;
 
-  return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, `GOOGLE CLOUD · ${p.kindLabel.toUpperCase()}`), h('h1', { class: 'break' }, nameOf(p)),
-      h('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap' }, riskBadge(p.risk), p.project && h('span', { class: 'badge b-neutral' }, p.project), p.environment && h('span', { class: 'badge b-neutral' }, envName(p.environment)),
-        p.uniqueId && h('span', { class: 'small muted mono', title: 'The ID AWS trust policies use for this service account' }, `unique ID ${p.uniqueId}`), p.managed && h('span', { class: 'badge b-neutral' }, 'Google-managed'), p.disabled && h('span', { class: 'badge b-high' }, 'disabled')),
-      p.name && h('p', { class: 'muted' }, p.name), p.kind !== 'serviceAccount' && p.kind !== 'federated' && h('p', { class: 'mono small muted break' }, p.member)),
-    h('div', { class: 'actions' }, h('a', { class: 'btn', href: '#/space' }, 'See in Space'))),
-    section('Findings', `From the last scan of ${p.connection?.name || 'its connection'}${p.connection?.last_scan_at ? `, ${ago(p.connection.last_scan_at)}` : ''}.`, findings),
-    comesFrom, aws, roles, becomes);
+  // the same frame as an AWS identity; activity is not read for Google Cloud, so there is no Activity tab
+  const keys = p.sources.filter((x) => x.via === 'key').flatMap((x) => x.keys || []);
+  const waysIn = p.kind === 'serviceAccount' || p.kind === 'federated';
+  return identityShell(ctx, {
+    path: `#/identities/gcp/${p.id}`,
+    eyebrow: `GOOGLE CLOUD · ${p.kindLabel.toUpperCase()}`,
+    name: nameOf(p),
+    badges: [riskBadge(p.risk), p.project && h('span', { class: 'badge b-neutral' }, p.project), p.environment && h('span', { class: 'badge b-neutral' }, envName(p.environment)),
+      p.uniqueId && h('span', { class: 'small muted mono', title: 'The ID AWS trust policies use for this service account' }, `unique ID ${p.uniqueId}`), p.managed && h('span', { class: 'badge b-neutral' }, 'Google-managed'), p.disabled && h('span', { class: 'badge b-high' }, 'disabled')],
+    sub: [p.name && h('p', { class: 'muted' }, p.name), p.kind !== 'serviceAccount' && p.kind !== 'federated' && h('p', { class: 'mono small muted break' }, p.member)],
+    actions: [h('a', { class: 'btn', href: '#/space' }, 'In Space')],
+    notices: [h('p', { class: 'small muted' }, 'Read from IAM policies. Google Cloud activity is not read yet, so nothing here says what was actually used.')],
+    tabs: [
+      ['overview', 'Overview', () => h('div', { class: 'stack-lg' },
+        h('section', { class: 'tiles' }, tile('Permissions', num(p.permissions), `across ${p.roles.length} role${p.roles.length === 1 ? '' : 's'}`), tile('Reaches', num(p.reach.length), `project${p.reach.length === 1 ? '' : 's'}`),
+          waysIn && tile('Ways in', num(p.sources.filter((x) => !x.wide).length), `${num(p.sources.filter((x) => x.wide).length)} more through wider roles`), p.kind === 'serviceAccount' && tile('Keys', num(keys.length), keys.length ? 'user-managed, long-lived' : 'none'),
+          tile('Can become', num(p.becomes.length), 'service accounts')),
+        section('Why this risk level', `From the last scan of ${p.connection?.name || 'its connection'}${p.connection?.last_scan_at ? `, ${ago(p.connection.last_scan_at)}` : ''}.`, findings), aws)],
+      ['permissions', 'Permissions', () => h('div', { class: 'stack-lg' }, roles, becomes)],
+      waysIn && ['credentials', p.kind === 'federated' ? 'Where it comes from' : 'Credentials and ways in', () => h('div', { class: 'stack-lg' }, comesFrom)],
+    ].filter(Boolean),
+  }).el;
 }

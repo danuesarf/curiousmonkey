@@ -650,8 +650,8 @@ export async function spacePage(ctx) {
       const into = l.dir === 'aws-gcp';
       const items = l.pairs.map((x) => into
         ? { label: `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : `${x.grant} on ${x.gcpProject}`}`, meta: [x.via === 'direct' ? 'holds roles itself' : 'becomes the service account', `pool ${x.pool}`, x.conditions.length ? `when ${x.conditions[0]}` : 'no condition'].join(' · '),
-          tone: x.broad ? 'bad' : null, window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY', href: !x.gcpPrincipal && x.awsRoleId ? `#/roles/${x.awsRoleId}` : null }
-        : { label: `${x.gcpEmail ? x.gcpEmail.split('@')[0] : x.uniqueId} → ${x.awsRole}`, meta: `trusted by unique ID ${x.uniqueId} in statement ${x.statement + 1}`, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' });
+          tone: x.broad ? 'bad' : null, window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY', href: !x.gcpPrincipal && x.awsRoleId ? `#/identities/${x.awsRoleId}` : null }
+        : { label: `${x.gcpEmail ? x.gcpEmail.split('@')[0] : x.uniqueId} → ${x.awsRole}`, meta: `trusted by unique ID ${x.uniqueId} in statement ${x.statement + 1}`, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' });
       const broad = l.pairs.filter((x) => x.broad).length;
       return { eyebrow: into ? 'ACROSS CLOUDS · AWS → GOOGLE CLOUD' : 'ACROSS CLOUDS · GOOGLE CLOUD → AWS', title: `${a} → ${b}`, swatch: l.kind === 'xcloudHigh' ? RED : GCP, round: true,
         sub: into ? `${l.pairs.length} way${l.pairs.length === 1 ? '' : 's'} for AWS identities to act in Google Cloud through workload identity federation` : `${l.pairs.length} AWS role${l.pairs.length === 1 ? '' : 's'} trusting a Google service account`,
@@ -659,14 +659,14 @@ export async function spacePage(ctx) {
         summary: into ? (broad ? `The pool has no attribute condition, so every role and user in ${a} can use ${broad === 1 ? 'one of these' : `${broad} of these`}. Pin it to the role that needs it.` : 'Each is pinned to one AWS role.')
           : 'Code running as these service accounts can get an AWS session in the role, with no AWS key.',
         rows: [], lists: [{ title: into ? 'AWS role → Google Cloud identity' : 'Service account → AWS role', items }],
-        actions: into ? [['Identities from AWS', '#/roles?cloud=gcp&source=aws', true]] : [['Trust map', `#/trust?q=${encodeURIComponent('provider:google')}`, true]] };
+        actions: into ? [['Identities from AWS', '#/identities?type=gcp&source=aws', true]] : [['Trust map', `#/trust?q=${encodeURIComponent('provider:google')}`, true]] };
     }
     if (/^ext/.test(l.kind) && l.gcp) {
       const src = M.sources.find((x) => x.id === l.from), g = M.by.get(l.to);
       return { eyebrow: 'GOOGLE CLOUD · FROM OUTSIDE', title: `${a} → ${b}`, sub: src.sub, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
         tags: l.kind === 'extHigh' ? [{ t: '⚠ ANY IDENTITY', c: RED }] : l.kind === 'extWarn' ? [{ t: 'OUTSIDE YOUR DOMAIN', c: WARN }] : [], rows: [],
-        lists: [{ title: `In ${g.name}`, items: (src.targets.find((t) => t.accountId === l.to)?.roles || []).map((pid) => ({ label: gcpName(pid), window: `#/gcp/principals/${pid}`, winTitle: gcpName(pid), winEyebrow: 'GOOGLE CLOUD · IDENTITY' })) }],
-        actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(g.name)}`, true]] };
+        lists: [{ title: `In ${g.name}`, items: (src.targets.find((t) => t.accountId === l.to)?.roles || []).map((pid) => ({ label: gcpName(pid), window: `#/identities/gcp/${pid}`, winTitle: gcpName(pid), winEyebrow: 'GOOGLE CLOUD · IDENTITY' })) }],
+        actions: [['Identities', `#/identities?type=gcp&project=${encodeURIComponent(g.name)}`, true]] };
     }
     if (/^ext/.test(l.kind)) {
       const s = M.sources.find((x) => x.id === l.from), edges = l.edges || [];
@@ -685,14 +685,14 @@ export async function spacePage(ctx) {
         tags: l.kind === 'extHigh' ? [{ t: '⚠ RISKY TRUST', c: RED }] : l.kind === 'extWarn' ? [{ t: 'LOOSE TRUST', c: WARN }] : [],
         rows: rows.length ? rows : [row('Trust', s.findings.join('; ') || 'nothing flagged')],
         lists: edges.length > 1 ? [{ title: 'Roles it can enter', items: roleItems(edges, []) }] : [],
-        actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/roles/${edges[0].roleId}`]] : [])] };
+        actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/identities/${edges[0].roleId}`]] : [])] };
     }
     if (l.kind === 'scan') {
       const t = l.target, acct = M.view === 'estate' ? M.by.get(t.accountId) : M.account;
       return { eyebrow: 'CURIOUS MONKEY · SCANNER', title: `Curious Monkey → ${acct?.name || b}`, sub: `reads it through ${t.role}`, swatch: CM, round: true, tags: [],
         rows: [row('Scanner role', t.role), row('Signed in', t.sessions ? `${num(t.sessions)} times in 90 days, last ${ago(t.lastSeen)}` : 'not seen in CloudTrail yet'),
           row('Today', t.hours.length ? t.hours.map(hourLabel).join(', ') : 'no sign-in in the last 24 h'), row('Last scan', t.lastScan ? ago(t.lastScan) : 'never')],
-        actions: [['Open role', `#/roles/${t.roleId}`, true], ['Its calls', `#/events?account=${t.accountId}&role=${t.roleId}&range=24h`]] };
+        actions: [['Open role', `#/identities/${t.roleId}`, true], ['Its calls', `#/events?account=${t.accountId}&role=${t.roleId}&range=24h`]] };
     }
     if (l.kind === 'chain' || l.kind === 'new') {
       const who = [];
@@ -700,12 +700,12 @@ export async function spacePage(ctx) {
       const top = l.roles[0];
       return { eyebrow: l.kind === 'new' ? 'ACCOUNT TO ACCOUNT · FIRST SEEN TODAY' : 'ACCOUNT TO ACCOUNT', title: `${a} → ${b}`, sub: `${num(l.sessions)} sessions in 90 days · last ${ago(l.lastSeen)}`, swatch: l.kind === 'new' ? '#fff' : ENV[M.by.get(l.from).env].base, round: true,
         tags: l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : [],
-        lists: [{ title: 'Who entered what', items: l.roles.map((r) => ({ label: `${pretty(r.caller).label} → ${pretty(r.role).label}`, meta: `last ${ago(r.lastSeen)}`, value: `${num(r.sessions)}`, href: `#/roles/${r.roleId}` })) }],
+        lists: [{ title: 'Who entered what', items: l.roles.map((r) => ({ label: `${pretty(r.caller).label} → ${pretty(r.role).label}`, meta: `last ${ago(r.lastSeen)}`, value: `${num(r.sessions)}`, href: `#/identities/${r.roleId}` })) }],
         rows: [...who, row('Today', l.today ? `${num(l.today)} session${l.today === 1 ? '' : 's'} at ${l.hours.map((x) => hourLabel(x)).join(', ')} WIB` : 'nothing today')],
-        actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ['Track sessions', () => openTrack(top ? { role: top.roleId } : { account: l.to }, top ? `${top.role} in ${b}` : b)], ...(top ? [['Role', `#/roles/${top.roleId}`]] : [])] };
+        actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ['Track sessions', () => openTrack(top ? { role: top.roleId } : { account: l.to }, top ? `${top.role} in ${b}` : b)], ...(top ? [['Role', `#/identities/${top.roleId}`]] : [])] };
     }
     if (l.kind === 'denied') return { eyebrow: 'REFUSED CALLS', title: `${a} → ${b}`, sub: '7 days', swatch: RED, round: true, tags: [{ t: `⚠ ${num(l.denied)} DENIED`, c: RED }],
-      rows: [row('What it means', `${num(l.denied)} calls from ${a} to ${b} were refused by IAM. A missing permission, or something trying what it should not.`, 'bad')], actions: [['Open role', `#/roles/${l.from}`, true]] };
+      rows: [row('What it means', `${num(l.denied)} calls from ${a} to ${b} were refused by IAM. A missing permission, or something trying what it should not.`, 'bad')], actions: [['Open role', `#/identities/${l.from}`, true]] };
     if (l.kind === 'in' || l.kind === 'out') return { eyebrow: 'ROLE CHAINING · 7 DAYS', title: `${a} → ${b}`, sub: 'between this account and a neighbour', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
     if (l.kind === 'use1') return { eyebrow: 'CALLS · 7 DAYS', title: `${a} → ${b}`, sub: '', swatch: '#9cc7b4', round: true, tags: [], rows: [], actions: [] };
     return null;
@@ -730,7 +730,7 @@ export async function spacePage(ctx) {
             items: M.gcp.xlinks.map((l) => ({ label: `${nameOf(l.from)} → ${nameOf(l.to)}`, meta: l.pairs.map((x) => (l.dir === 'aws-gcp' ? `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'direct'}` : `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`)).join(' · '),
               tone: l.kind === 'xcloudHigh' ? 'bad' : null, pick: l.id })), empty: 'No path between the clouds.' }] : []),
           { title: `Accounts with high-risk ${noun}`, items: live.filter((g) => g.high).sort((a, b) => b.high - a.high).slice(0, 6).map((g) => ({ label: g.name, icon: 'account', meta: `${ENV[g.env].name} · ${num(g.roles)} ${noun}`, value: `${g.high} high`, tone: 'bad', pick: g.id })), empty: `No account has a high-risk one.` }],
-        actions: [['Trust map', '#/trust', true], ['All roles', '#/roles'], ['All calls', '#/events']] };
+        actions: [['Trust map', '#/trust', true], ['All roles', '#/identities'], ['All calls', '#/events']] };
     }
     const denied = M.roles.filter((r) => r.denied7).sort((a, b) => b.denied7 - a.denied7);
     return { eyebrow: `OVERVIEW · ${ENV[M.account.environment]?.name.toUpperCase() || ''}`, title: M.account.name, sub: `${M.account.awsAccountId} · click anything on the map for its details`, swatch: ENV[M.account.environment]?.base || '#2a8a5c', closable: false, tags: [],
@@ -755,7 +755,7 @@ export async function spacePage(ctx) {
         rows: [...sc.identities.slice(0, 3).map((x) => row('Identity', x.replace(/^arn:aws[a-z-]*:iam::/, ''))),
           row('Signs in to', `${sc.targets.length} account${sc.targets.length === 1 ? '' : 's'}`),
           row('This hour', `${sc.targets.filter((t) => t.hours.includes(st.hour)).length} of them`)],
-        lists: [{ title: 'Where it reads', items: [...sc.targets].sort((a, b) => b.sessions - a.sessions).map((t) => ({ label: acctName(t.accountId), meta: `${pretty(t.role).label} · ${t.sessions ? `last ${ago(t.lastSeen)}` : 'no sign-in seen yet'}`, value: num(t.sessions), pick: linkOf(t), href: linkOf(t) ? null : `#/roles/${t.roleId}` })), empty: 'no scanner role found' }],
+        lists: [{ title: 'Where it reads', items: [...sc.targets].sort((a, b) => b.sessions - a.sessions).map((t) => ({ label: acctName(t.accountId), meta: `${pretty(t.role).label} · ${t.sessions ? `last ${ago(t.lastSeen)}` : 'no sign-in seen yet'}`, value: num(t.sessions), pick: linkOf(t), href: linkOf(t) ? null : `#/identities/${t.roleId}` })), empty: 'no scanner role found' }],
         actions: [['Workers', '#/operations/workers', true], ['Accounts', '#/accounts']] };
     }
     if (M.view === 'estate' && isGcp(id) && M.by.has(id)) return projectDetail(M.by.get(id));
@@ -774,7 +774,7 @@ export async function spacePage(ctx) {
         const today = g.hourly.reduce((n, x) => n + x.sessions, 0), risky = fromOut.filter((o) => o.x.risk === 'high').length;
         const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
         return { eyebrow: `ACCOUNT · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base,
-          tags: [...(g.high ? [{ t: `⚠ ${g.high} HIGH-RISK ROLE${g.high === 1 ? '' : 'S'}`, c: RED, href: `#/roles?accounts=${g.id}&risks=High` }] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
+          tags: [...(g.high ? [{ t: `⚠ ${g.high} HIGH-RISK ROLE${g.high === 1 ? '' : 'S'}`, c: RED, href: `#/identities?accounts=${g.id}&risks=High` }] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
           summary: `${plural(fromOut.length, 'identity', 'identities')} from outside your org${risky ? ` (${risky} with risky trust)` : ''} and ${ins.length} of your other accounts can get in. It reaches ${plural(outs.length, 'other account')}.`,
           stats: [{ k: 'Roles', v: num(g.roles) }, { k: 'Never called', v: num(g.cold), tone: g.roles && g.cold / g.roles > 0.5 ? 'warn' : null, hint: g.roles ? `${Math.round((100 * g.cold) / g.roles)}% of its roles` : '' },
             { k: 'High risk', v: num(g.high), tone: g.high ? 'bad' : null }, { k: 'Calls · 7 d', v: kfmt(g.calls7) }, { k: 'Sessions · 24 h', v: num(today) }, { k: 'Ways in', v: num(fromOut.length + ins.length), tone: risky ? 'bad' : null }],
@@ -794,8 +794,8 @@ export async function spacePage(ctx) {
             ...(M.gcp ? [{ title: 'Google Cloud', hint: 'Where roles here can act in Google Cloud, and which Google service accounts can sign in here.',
               items: M.links.filter((l) => /^xcloud/.test(l.kind) && (l.from === g.id || l.to === g.id)).flatMap((l) => l.pairs.map((x) => (l.dir === 'aws-gcp'
                 ? { label: `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : `${x.gcpProject} (direct)`}`, meta: `in ${x.gcpProject}${x.broad ? ' · the pool has no condition' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
-                  window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }
-                : { label: `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`, meta: `from ${x.gcpProject}`, pick: l.id, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))),
+                  window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }
+                : { label: `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`, meta: `from ${x.gcpProject}`, pick: l.id, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))),
               empty: 'No path to or from Google Cloud.' }] : [])],
           actions: [['Zoom in', `#/space?view=account&account=${g.id}${whoQs(who, '&')}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
@@ -805,7 +805,7 @@ export async function spacePage(ctx) {
       return { eyebrow: `GOOGLE CLOUD · ${s.group === 'oidc' ? 'FEDERATED' : s.group === 'public' ? 'PUBLIC' : 'OUTSIDE YOUR DOMAIN'}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
         tags: s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag('OUTSIDE', WARN)] : [], rows: [],
         lists: [{ title: 'Projects it can get into', items: s.targets.map((t) => ({ label: M.by.get(t.accountId)?.name || t.accountId, meta: `${t.roles.length} identit${t.roles.length === 1 ? 'y' : 'ies'}`, pick: t.accountId })) }],
-        actions: s.principal ? [['Open identity', `#/gcp/principals/${s.principal}`, true]] : [['Federated identities', '#/roles?cloud=gcp&source=wif', true]] };
+        actions: s.principal ? [['Open identity', `#/identities/gcp/${s.principal}`, true]] : [['Federated identities', '#/identities?type=gcp&source=wif', true]] };
     }
     if (s) {
       const items = M.view === 'estate'
@@ -830,7 +830,7 @@ export async function spacePage(ctx) {
       const chained = st.dir === 'out' ? [] : way('in'), goes = st.dir === 'in' ? [] : way('out');
       const isUser = r.kind === 'iam-user';
       return { eyebrow: `${isUser ? 'IAM USER' : 'ROLE'} · ${r.cluster.label.toUpperCase()}`, title: p.label, sub: p.kind ? `${p.kind} · ${r.name}` : `${M.account.name} · ${M.account.awsAccountId}`, swatch: ENV[r.cluster.env].base, round: true,
-        tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/roles/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
+        tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/identities/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
         summary: `${r.calls7 ? `Called ${kfmt(r.calls7)} times this week into ${r.services.length} service${r.services.length === 1 ? '' : 's'}.` : 'Quiet this week.'} ${callers.length + chained.length} can enter it${goes.length ? `; it can go on to ${goes.length} role${goes.length === 1 ? '' : 's'} elsewhere` : ''}.`,
         stats: [{ k: 'Calls · 7 d', v: kfmt(r.calls7) }, { k: 'Refused', v: num(r.denied7 || 0), tone: r.denied7 ? 'bad' : null }, { k: 'Can enter it', v: num(callers.length + chained.length), tone: callers.some((c) => c.tone === 'bad') ? 'bad' : null }],
         rows: [],
@@ -838,8 +838,8 @@ export async function spacePage(ctx) {
           ...(st.dir === 'out' ? [] : [{ title: 'Entered by', items: [...callers, ...chained], empty: 'only callers inside this account' }]),
           ...(st.dir === 'in' ? [] : [{ title: 'Can go to', items: goes, empty: 'no role in your other accounts trusts it' }]),
           { title: 'Sessions · click to replay', items: sessionItems(r.id, p.label), empty: sessions.get(r.id) === 'loading' ? 'Loading…' : 'No sessions recorded in the last 30 days' }],
-        actions: isUser ? [['Keys and sign-in', `#/users/${r.id}`, true], ['Permission analysis', `#/roles/${r.id}`]]
-          : [['Open role', `#/roles/${r.id}`, true], ['Its calls', `#/events?role=${r.id}&range=7d`], ['Track sessions', () => openTrack({ role: r.id }, p.label)]] };
+        actions: isUser ? [['Keys and sign-in', `#/identities/${r.id}?tab=credentials`, true], ['Permission analysis', `#/identities/${r.id}?tab=permissions`]]
+          : [['Open role', `#/identities/${r.id}`, true], ['Its calls', `#/events?role=${r.id}&range=7d`], ['Track sessions', () => openTrack({ role: r.id }, p.label)]] };
     }
     const t = M.towers.find((x) => x.id === id);
     if (t) {
@@ -854,7 +854,7 @@ export async function spacePage(ctx) {
       const here = (l) => (l.roleId && M.byRole.get(l.roleId) ? pretty(M.byRole.get(l.roleId).name).label : l.roleId ? 'a role here' : `${M.account.name} (whole account)`);
       const item = (l) => ({ label: l.dir === 'in' ? `${l.otherRole || n.name} → ${here(l)}` : `${here(l)} → ${l.otherRole || 'a role there'}`,
         meta: [l.sessions ? `used · ${num(l.sessions)} sessions in 7 days` : null, l.allowed ? `allowed by ${l.allowed} trust statement${l.allowed === 1 ? '' : 's'}` : 'not in a trust policy (seen chaining)', l.allowed && !l.sessions ? 'not used in 7 days' : null].filter(Boolean).join(' · '),
-        value: l.sessions ? String(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: l.roleId && M.byRole.has(l.roleId) ? l.roleId : null, href: l.roleId && !M.byRole.has(l.roleId) ? `#/roles/${l.roleId}` : null });
+        value: l.sessions ? String(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: l.roleId && M.byRole.has(l.roleId) ? l.roleId : null, href: l.roleId && !M.byRole.has(l.roleId) ? `#/identities/${l.roleId}` : null });
       const ins = n.links.filter((l) => l.dir === 'in'), outs = n.links.filter((l) => l.dir === 'out');
       return { eyebrow: 'YOUR OTHER ACCOUNT', title: n.name, sub: `${n.awsAccountId || ''}${n.sessions ? ` · ${num(n.sessions)} chained sessions in 7 days` : ' · no chaining seen in 7 days'}`, swatch: ENV[n.env].base, tags: [], rows: [],
         lists: [
@@ -877,9 +877,9 @@ export async function spacePage(ctx) {
     const fromOut = M.sources.filter((x) => x.gcp && x.targets.some((t) => t.accountId === g.id));
     const broad = ins.some((l) => l.kind === 'xcloudHigh');
     const sa = (a) => ({ label: a.email.split('@')[0], meta: [a.reasons[0]?.title, a.keys ? `${a.keys} key${a.keys === 1 ? '' : 's'}` : null, ...(a.sources.aws || []).map((x) => `from ${x}`), `${num(a.permissions)} permissions`].filter(Boolean).join(' · '),
-      tone: a.risk === 'High' ? 'bad' : a.risk === 'Medium' ? 'warn' : null, window: `#/gcp/principals/${a.id}`, winTitle: a.email, winEyebrow: 'GOOGLE CLOUD · SERVICE ACCOUNT' });
+      tone: a.risk === 'High' ? 'bad' : a.risk === 'Medium' ? 'warn' : null, window: `#/identities/gcp/${a.id}`, winTitle: a.email, winEyebrow: 'GOOGLE CLOUD · SERVICE ACCOUNT' });
     return { eyebrow: `GOOGLE CLOUD PROJECT · ${ENV[g.env].name.toUpperCase()}`, title: p.projectId, sub: p.name !== p.projectId ? p.name : `project ${p.number}`, swatch: ENV[g.env].base,
-      tags: [...(p.risky ? [{ t: `⚠ ${p.risky} HIGH-RISK SERVICE ACCOUNT${p.risky === 1 ? '' : 'S'}`, c: RED, href: `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}` }] : []), ...(broad ? [tag('⚠ ANY AWS ROLE CAN GET IN', RED)] : [])],
+      tags: [...(p.risky ? [{ t: `⚠ ${p.risky} HIGH-RISK SERVICE ACCOUNT${p.risky === 1 ? '' : 'S'}`, c: RED, href: `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}` }] : []), ...(broad ? [tag('⚠ ANY AWS ROLE CAN GET IN', RED)] : [])],
       summary: `${plural(p.accounts.length, 'service account')}${p.keys ? `, ${plural(p.keys, 'user-managed key')}` : ''}. ${ins.length ? `${plural(ins.reduce((n, l) => n + l.pairs.length, 0), 'way')} in from AWS` : 'Nothing from AWS gets in'}${outs.length ? `; it reaches ${plural(outs.length, 'AWS account')}` : ''}${fromOut.length ? `; ${plural(fromOut.length, 'identity', 'identities')} from outside your organization` : ''}.`,
       stats: [{ k: 'Service accounts', v: num(p.accounts.length) }, { k: 'High risk', v: num(p.risky), tone: p.risky ? 'bad' : null }, { k: 'Keys', v: num(p.keys), tone: p.keys ? 'warn' : null },
         { k: 'From AWS', v: num(ins.reduce((n, l) => n + l.pairs.length, 0)), tone: broad ? 'bad' : null }, { k: 'Into AWS', v: num(outs.reduce((n, l) => n + l.pairs.length, 0)) }, { k: 'From outside', v: num(fromOut.length), tone: fromOut.some((x) => x.risk === 'high') ? 'bad' : null }],
@@ -887,12 +887,12 @@ export async function spacePage(ctx) {
       lists: [
         { title: 'From AWS · into this project', hint: 'AWS roles that can become a service account here, or hold roles here, through workload identity federation.',
           items: ins.flatMap((l) => l.pairs.map((x) => ({ label: `${x.awsAccountName} · ${x.awsRole || 'any role'}`, meta: `→ ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'holds roles directly'}${x.broad ? ' · no condition on the pool' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
-            window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }))), empty: 'No AWS identity can get in.' },
+            window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }))), empty: 'No AWS identity can get in.' },
         { title: 'Into AWS · from this project', hint: 'AWS roles whose trust policy accepts a service account here.',
-          items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${x.gcpEmail.split('@')[0]} → ${x.awsRole}`, meta: x.awsAccountName, pick: l.id, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
+          items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${x.gcpEmail.split('@')[0]} → ${x.awsRole}`, meta: x.awsAccountName, pick: l.id, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
         ...(fromOut.length ? [{ title: 'From outside your organization', items: fromOut.map((x) => ({ label: x.label, icon: x.kind, meta: x.sub, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id })) }] : []),
         { title: 'Service accounts', hint: 'Riskiest first. Click one for what it can do and who can become it.', items: p.accounts.filter((a) => !a.managed).map(sa), empty: 'None.' }],
-      actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts?cloud=gcp']] };
+      actions: [['Identities', `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts?cloud=gcp']] };
   }
   // roles an outside identity can enter, readable: permission-set names, what was flagged, whether it was used
   function roleItems(edges, ids) {
@@ -901,9 +901,9 @@ export async function spacePage(ctx) {
       if (seen.has(e.roleId)) continue; seen.add(e.roleId);
       const p = pretty(e.role), drawn = M.byRole?.get(e.roleId);
       out.push({ label: p.label, meta: [e.findings.length ? `⚠ ${e.findings[0].title}` : null, e.sessions ? `used ${num(e.sessions)}×, last ${ago(e.lastSeen)}` : 'never used', drawn ? drawn.cluster.label : null].filter(Boolean).join(' · '),
-        tone: e.worst === 'high' ? 'bad' : null, pick: drawn ? e.roleId : null, href: drawn ? null : `#/roles/${e.roleId}` });
+        tone: e.worst === 'high' ? 'bad' : null, pick: drawn ? e.roleId : null, href: drawn ? null : `#/identities/${e.roleId}` });
     }
-    for (const rid of ids) if (!seen.has(rid)) { seen.add(rid); const x = M.byRole?.get(rid); out.push({ label: x ? pretty(x.name).label : 'a role', pick: x ? rid : null, href: x ? null : `#/roles/${rid}` }); }
+    for (const rid of ids) if (!seen.has(rid)) { seen.add(rid); const x = M.byRole?.get(rid); out.push({ label: x ? pretty(x.name).label : 'a role', pick: x ? rid : null, href: x ? null : `#/identities/${rid}` }); }
     return out.sort((a, b) => (a.tone === 'bad' ? 0 : 1) - (b.tone === 'bad' ? 0 : 1) || a.label.localeCompare(b.label));
   }
   // The right-hand panel, top to bottom: what it is, one sentence on what matters, the numbers, what you can do,

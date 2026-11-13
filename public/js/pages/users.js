@@ -1,5 +1,5 @@
 // IAM users: long-lived credentials. Every access key with its ID, status, age and last use; console passwords and MFA;
-// groups; what each key did. A user's permission analysis is the same as a role's (Roles page, "Permissions" tab).
+// groups; what each key did. One user opens on the identity page (identity.js), which mounts userParts() below.
 import { h, get, num, ago, fmtDate, fmtDay, riskBadge, envName, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { go } from '../main.js';
 
@@ -21,9 +21,9 @@ function keyLine(k, rules) {
 }
 
 export async function usersPage(ctx) {
-  ctx.setCrumbs('IAM users');
+  ctx.setCrumbs('Identities', 'IAM users');
   await loadEnvironments();
-  // every filter is in the address: #/users?accounts=<id>,<id>&flag=oldKey. (`account=` from older links still works.)
+  // every filter is in the address: #/identities?type=users&accounts=<id>,<id>&flag=oldKey. (`account=` from older links still works.)
   const P = ctx.params;
   if (URL_KEYS.some((k) => P.has(k))) {
     const ids = urlSet(P, 'accounts'); if (P.get('account')) ids.add(P.get('account'));
@@ -35,7 +35,7 @@ export async function usersPage(ctx) {
   const qs = () => new URLSearchParams({ sort: F.sort, limit: '25', offset: String((F.page - 1) * 25), ...(F.q ? { q: F.q } : {}), ...(F.accounts.size ? { accounts: [...F.accounts].join(',') } : {}), ...(F.risk ? { risk: F.risk } : {}), ...(F.flag ? { flag: F.flag } : {}) });
   const set = (p) => { Object.assign(F, p, { page: 1 }); load(); };
   async function load() {
-    syncUrl({ q: F.q, accounts: F.accounts, risk: F.risk, flag: F.flag, sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
+    syncUrl({ type: 'users', q: F.q, accounts: F.accounts, risk: F.risk, flag: F.flag, sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
     const r = await get(`/iam-users?${qs()}`);
     count.textContent = `${num(r.total)} users`;
     const t = r.totals;
@@ -64,7 +64,7 @@ export async function usersPage(ctx) {
   }
   const table = (items, rules) => h('div', { class: 'scroll' }, h('table', { class: 'users-table' },
     h('thead', null, h('tr', null, h('th', null, 'User'), h('th', null, 'Risk'), h('th', null, 'Access keys · ID, status, age, last use'), h('th', null, 'Console'), h('th', null, 'Activity'), h('th', null, 'Findings'))),
-    h('tbody', null, items.map((u) => h('tr', { class: 'link', tabindex: '0', onClick: (e) => { if (!e.target.closest('a')) go(`#/users/${u.id}`); }, onKeydown: (e) => { if (e.key === 'Enter') go(`#/users/${u.id}`); } },
+    h('tbody', null, items.map((u) => h('tr', { class: 'link', tabindex: '0', onClick: (e) => { if (!e.target.closest('a')) go(`#/identities/${u.id}?tab=credentials`); }, onKeydown: (e) => { if (e.key === 'Enter') go(`#/identities/${u.id}?tab=credentials`); } },
       h('td', null, h('div', { class: 'name' }, u.name), h('div', { class: 'tiny muted' }, `${u.account.name} · ${u.account.awsAccountId} · ${envName(u.account.environment)}`),
         u.groups.length ? h('div', { class: 'tiny muted' }, `groups: ${u.groups.join(', ')}`) : null),
       h('td', null, riskBadge(u.risk)),
@@ -77,15 +77,14 @@ export async function usersPage(ctx) {
   load();
   ctx.onLeave(() => { search.cancel(); picker.destroy(); });
   return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IAM USERS'), h('h1', null, 'IAM users and access keys'),
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IDENTITIES · IAM USERS'), h('h1', null, 'IAM users and access keys'),
       h('p', { class: 'muted' }, 'Long-lived credentials: every access key with its ID, status, age and last use, console passwords and MFA. Secret keys are never readable, here or in AWS; only their IDs.')),
     h('div', { class: 'actions' }, h('a', { class: 'btn', href: '#/space?who=users' }, 'In Space'), h('a', { class: 'btn', href: '#/?who=users' }, 'On the radar'))),
     tiles, h('section', { class: 'card' }, filters, list));
 }
 
-export async function userPage(ctx, id) {
-  const u = await get(`/iam-users/${id}`);
-  ctx.setCrumbs(h('a', { href: '#/users' }, 'IAM users'), u.account.name, u.name);
+/** The sections only an IAM user has (keys, console sign-in, who used it, policies), for the identity page's tabs. `u` is GET /iam-users/:id. */
+export function userParts(u) {
   const section = (title, sub, ...kids) => h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('div', null, h('h2', null, title), sub && h('p', { class: 'muted small' }, sub))), h('div', { class: 'card-b stack' }, ...kids));
   const kv = (...pairs) => h('dl', { class: 'kv' }, ...pairs.flatMap(([k, v]) => [h('dt', null, k), h('dd', null, v)]));
   const keys = section('Access keys', 'The secret part of a key is shown once, when it is created, and never again; only the ID is listed.',
@@ -105,17 +104,10 @@ export async function userPage(ctx, id) {
     u.callers.length ? h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, h('th', null, 'Credential'), h('th', null, 'Calls'), h('th', null, 'Refused'), h('th', null, 'First seen'), h('th', null, 'Last seen'))),
       h('tbody', null, u.callers.map((c) => h('tr', null, h('td', { class: c.kind === 'access-key' ? 'mono' : null }, c.display), h('td', null, num(c.calls30)), h('td', { class: c.denied30 ? 'key-bad' : null }, num(c.denied30)),
         h('td', null, fmtDay(c.first_seen)), h('td', null, c.last_seen ? ago(c.last_seen) : '—')))))) : h('p', { class: 'muted' }, 'No call seen in the history read so far.'),
-    u.assumes.length > 0 && h('div', null, h('h3', null, 'Roles it assumed'), h('ul', { class: 'plain stack', style: 'gap:4px' }, u.assumes.map((r) => h('li', null, h('a', { href: `#/roles/${r.id}` }, r.name), h('span', { class: 'small muted' }, ` · ${r.account_name} · ${num(r.sessions_count)} sessions${r.last_seen ? `, last ${ago(r.last_seen)}` : ''}`))))));
-  const pol = section('Policies', `Its own policies and those of its groups. Permissions used and unused are on the analysis page.`,
+    u.assumes.length > 0 && h('div', null, h('h3', null, 'Roles it assumed'), h('ul', { class: 'plain stack', style: 'gap:4px' }, u.assumes.map((r) => h('li', null, h('a', { href: `#/identities/${r.id}` }, r.name), h('span', { class: 'small muted' }, ` · ${r.account_name} · ${num(r.sessions_count)} sessions${r.last_seen ? `, last ${ago(r.last_seen)}` : ''}`))))));
+  const pol = section('Policies', 'Its own policies and those of its groups. The documents are below.',
     u.policies.length ? h('ul', { class: 'plain stack', style: 'gap:4px' }, u.policies.map((p) => h('li', null, h('span', { class: 'badge b-neutral' }, p.kind === 'group' ? `group ${p.name.split('/')[0]}` : p.kind), ' ', h('b', null, p.kind === 'group' ? p.name.split('/').slice(1).join('/') : p.name), p.arn ? h('span', { class: 'mono tiny muted' }, ` ${p.arn}`) : null)))
       : h('p', { class: 'muted' }, 'No policies: it can do nothing.'),
     kv(['Permissions', `${num(u.permissions.granted)} granted · ${num(u.permissions.used)} used · ${num(u.permissions.unused)} never used · ${num(u.permissions.unconfirmed)} cannot be verified`], ['Groups', u.groups.join(', ') || 'none']));
-  return h('div', { class: 'stack-lg' },
-    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, `IAM USER · ${u.account.name}`), h('h1', null, u.name),
-      h('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap' }, riskBadge(u.risk), h('span', { class: 'badge b-neutral' }, envName(u.account.environment)), h('span', { class: 'small muted mono' }, u.arn)),
-      h('p', { class: 'small muted' }, `Created ${fmtDay(u.created)} (${dayText(u.ageDays)} ago) · user ID ${u.userId || '—'} · ${u.lastSeen ? `last active ${ago(u.lastSeen)}` : 'never seen active'}`)),
-    h('div', { class: 'actions' }, h('a', { class: 'btn primary', href: `#/roles/${u.id}` }, 'Permission analysis'), h('a', { class: 'btn', href: `#/space?view=account&account=${u.account.id}&who=users&sel=${u.id}` }, 'In Space'))),
-    h('section', { class: 'card' }, h('div', { class: 'card-b stack' }, h('h3', null, 'Why this risk level'),
-      u.reasons.length ? h('ul', { class: 'plain' }, u.reasons.map((x) => h('li', null, x))) : h('p', { class: 'muted' }, 'Nothing stands out.'))),
-    keys, consoleBox, who, pol);
+  return { keys, consoleBox, who, pol };
 }

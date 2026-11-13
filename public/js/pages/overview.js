@@ -1,24 +1,33 @@
-import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
+import { h, get, post, num, pageTabs, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { session, go } from '../main.js';
-import { cloudTabs, gcpRolesTab } from './gcp.js';
+import { gcpRolesTab } from './gcp.js';
+import { usersPage } from './users.js';
 
 const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, unidentified: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
 const saved = { ...DEFAULT };   // kept when you come back by the rail link (no filters in the address)
 const URL_KEYS = ['q', 'accounts', 'kinds', 'risks', 'teams', 'unconfirmed', 'idle', 'openFlags', 'unidentified', 'policy', 'sort', 'dir', 'page'];
 
-export async function overview(ctx) {
-  // AWS and Google Cloud on one page, switched by a tab; members limited to some AWS accounts see AWS only
-  const tabs = !session.user.scope_accounts;
-  if (tabs && ctx.params.get('cloud') === 'gcp') return h('div', { class: 'stack-lg' }, cloudTabs('gcp'), await gcpRolesTab(ctx));
+/** Which kind of identity the list shows. Kept in the address as ?type=. Google Cloud is hidden from members limited to some AWS accounts. */
+export const identityTypes = () => [['roles', 'Roles', '#/identities'], ['users', 'IAM users', '#/identities?type=users'], ...(session.user.scope_accounts ? [] : [['gcp', 'Google Cloud', '#/identities?type=gcp']])];
+
+/** Identities: one page for roles, IAM users and Google Cloud identities, switched at the top. */
+export async function identitiesPage(ctx) {
+  const types = identityTypes();
+  const type = types.some(([k]) => k === ctx.params.get('type')) ? ctx.params.get('type') : 'roles';
+  const body = type === 'users' ? usersPage(ctx) : type === 'gcp' ? gcpRolesTab(ctx) : rolesList(ctx);
+  return h('div', { class: 'stack-lg' }, pageTabs('Kind of identity', types, type), await body);
+}
+
+async function rolesList(ctx) {
   const f = saved;
-  // every filter is in the address: #/roles?accounts=<id>,<id>&risks=High. A link, a reload or Back opens the same list.
+  // every filter is in the address: #/identities?accounts=<id>,<id>&risks=High. A link, a reload or Back opens the same list.
   const P = ctx.params;
   if (URL_KEYS.some((k) => P.has(k))) {
     Object.assign(f, { ...DEFAULT, q: P.get('q') || '', accounts: urlSet(P, 'accounts'), kinds: urlSet(P, 'kinds'), risks: urlSet(P, 'risks'), teams: urlSet(P, 'teams'),
       unconfirmed: P.get('unconfirmed') === '1', idle: P.get('idle') === '1', openFlags: P.get('openFlags') === '1', unidentified: P.get('unidentified') === '1',
       policy: P.get('policy') || '', sort: P.get('sort') || 'risk', dir: P.get('dir') === 'asc' ? 'asc' : 'desc', page: Math.max(1, Number(P.get('page')) || 1) });
   }
-  ctx.setCrumbs('Roles');
+  ctx.setCrumbs('Identities', 'Roles');
   const [ov, accts] = await Promise.all([get('/overview'), get('/accounts')]);
   const accounts = accts.items.filter((a) => a.status !== 'planned');     // planned accounts have no roles to list
   for (const id of [...f.accounts]) if (!accounts.some((a) => a.id === id)) f.accounts.delete(id);
@@ -53,8 +62,8 @@ export async function overview(ctx) {
 
   const table = (r) => h('div', { class: 'scroll' }, h('table', null,
     h('thead', null, h('tr', null, sortTh('name', 'Role'), sortTh('risk', 'Risk'), h('th', null, 'Used / unused / unconfirmed'), sortTh('unused', 'Unused'), h('th', null, 'Reviewer'), sortTh('activity', 'Last activity'), h('th', null, 'Findings'), h('th', null, 'State'))),
-    h('tbody', null, r.items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/roles/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/roles/${x.id}`); } },
-      h('td', null, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'name' }, x.name), x.has_unidentified && h('a', { class: 'unk-tag', href: `#/roles/${x.id}?identify=`, title: 'Has calls under unidentified event names', onClick: (e) => e.stopPropagation() }, 'UNK')), h('div', { class: 'tiny muted' }, `${x.account_name} · ${x.aws_account_id} · `, KIND[x.kind], x.permission_set ? ` (${x.permission_set})` : '')),
+    h('tbody', null, r.items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/identities/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/identities/${x.id}`); } },
+      h('td', null, h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'name' }, x.name), x.has_unidentified && h('a', { class: 'unk-tag', href: `#/identities/${x.id}?identify=`, title: 'Has calls under unidentified event names', onClick: (e) => e.stopPropagation() }, 'UNK')), h('div', { class: 'tiny muted' }, `${x.account_name} · ${x.aws_account_id} · `, KIND[x.kind], x.permission_set ? ` (${x.permission_set})` : '')),
       h('td', null, riskBadge(x.risk)),
       h('td', { style: null }, usageBar(x.used_count, x.unused_count, x.unconfirmed_count), h('div', { class: 'tiny muted' }, `${num(x.used_count)} / ${num(x.unused_count)} / ${num(x.unconfirmed_count)} of ${num(x.granted_count)}`)),
       h('td', { class: 'nowrap' }, num(x.unused_count)),
@@ -90,9 +99,8 @@ export async function overview(ctx) {
   } }, f.accounts.size ? `Scan ${f.accounts.size} selected` : 'Scan all accounts');
 
   const body = h('div', { class: 'stack-lg' },
-    tabs && cloudTabs('aws'),
     h('header', { class: 'head' },
-      h('div', null, h('div', { class: 'eyebrow' }, 'ROLES'), title,
+      h('div', null, h('div', { class: 'eyebrow' }, 'IDENTITIES · ROLES'), title,
         h('p', { class: 'muted' }, 'Results stay provisional until each account’s CloudTrail history is fully read. History is stored, so it grows past the first read over time.')),
       h('div', { class: 'actions' }, session.user.permissions.includes('accounts') && h('a', { class: 'btn', href: '#/accounts/new' }, 'Connect account'), session.user.permissions.includes('scan') && scanBtn)),
     tiles,
