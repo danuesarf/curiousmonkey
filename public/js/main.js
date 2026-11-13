@@ -1,4 +1,4 @@
-import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, paint } from './lib.js';
+import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint } from './lib.js';
 import { theme, setTheme, initTheme } from './theme.js';
 import * as authPages from './pages/auth.js';
 import { overview } from './pages/overview.js';
@@ -137,18 +137,17 @@ export function closeWindow() {
 // ---------- the bell: what needs a look in the last 24 hours ----------
 // Everywhere it lists the estate's flagged events and takes you to Space. A page can put its own list there while
 // it is open (Space does, so picking one selects it in place).
-const KIND_LABEL = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
-const NOTICE_TONE = { high: '#ff5a4f', warn: '#fab219', medium: '#fab219', info: '#ffffff', good: '#6fe3b0', low: '#d5dceb' };
+const NOTICE_TONE = { high: COLOR.high, warn: COLOR.warn, medium: COLOR.warn, info: '#ffffff', good: COLOR.good, low: '#d5dceb' };
 let notices = null, bellOpen = false;      // a page's own list, or null for the estate's
 const bellEl = h('div', { class: 'bell' });
 export function setNotices(n) { notices = n; drawBell(); }
-const hourText = (start, b) => new Date(start + b * 36e5).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+const hourText = (start, b) => fmtClock(start + b * 36e5);
 async function drawBell() {
   let n = notices;
   if (!n && state.user) {
     try {
       const f = await getCached('/space/flags', 60_000), start = new Date(f.hourStart).getTime();
-      n = { title: 'Needs a look · last 24 h', items: f.items.map((e) => ({ kind: KIND_LABEL[e.kind] || e.kind.toUpperCase(), tone: e.severity, text: e.title, where: `${e.accountName || 'an account'}${e.roleName ? ` · ${e.roleName}` : ''}`,
+      n = { title: 'Needs a look · last 24 h', items: f.items.map((e) => ({ kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, text: e.title, where: `${e.accountName || 'an account'}${e.roleName ? ` · ${e.roleName}` : ''}`,
         time: hourText(start, e.hour), onPick: () => go(`#/space?sel=${e.accountId}&hour=${e.hour}`) })) };
     } catch { n = { title: 'Needs a look · last 24 h', items: [] }; }
     if (notices) n = notices;
@@ -200,7 +199,7 @@ export async function refreshStatus() {
       `${s.unidentified} UNIDENTIFIED`),
     meter, themeBtn());
 }
-setInterval(() => refreshStatus(), 20000);
+poll(refreshStatus, 20000);     // not while the tab is in the background
 
 // ---------- light / dark ----------
 const SUN = 'M12 4V2M12 22v-2M4 12H2M22 12h-2M6.3 6.3 4.9 4.9M19.1 19.1l-1.4-1.4M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';

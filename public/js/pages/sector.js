@@ -2,14 +2,13 @@
 //   rings   = access level (List on the inside, Permissions management on the rim)
 //   sectors = AWS service, sized by how many of its permissions the role holds
 //   dots    = permissions; lit = called, amber = unconfirmed, dim = never called
-import { h, svg, get, num, ago, fmtDate, riskBadge } from '../lib.js';
+import { h, svg, get, num, ago, fmtDate, riskBadge, r1 } from '../lib.js';
 
 const LEVELS = ['List', 'Read', 'Write', 'Tagging', 'Permissions management', 'Unknown'];
 const REASON = {
   'data-event': 'Data events not logged', 'authorization-only': 'Authorization only', 'not-logged': 'Never logged by CloudTrail',
   'before-window': 'Older than the history read', 'service-unknown': 'Service used, action not visible', 'unmapped-event': 'Event name not identified yet',
 };
-const r1 = (v) => Math.round(v * 10) / 10;
 
 export async function sectorPage(ctx, roleId) {
   const d = await get(`/roles/${roleId}/sector`);
@@ -121,8 +120,8 @@ export async function sectorPage(ctx, roleId) {
       unc.length > 0 && h('section', { class: 'stack' }, h('div', { class: 'eyebrow', style: 'color:#f0b45a' }, 'UNCONFIRMED · WHY'),
         unc.slice(0, 8).map((u) => h('div', { class: 'row' }, h('span', { class: 'tiny grow' }, `${u.service} · ${REASON[u.reason] || u.reason || 'Unknown'}`), h('span', { class: 'mono tiny muted' }, num(u.n)),
           u.reason === 'unmapped-event' && h('a', { class: 'unk-tag', href: `#/roles/${role.id}?identify=` }, 'Identify')))),
-      d.denied.length > 0 && h('section', { class: 'stack' }, h('div', { class: 'eyebrow', style: 'color:#ff6b5e' }, 'DENIED'),
-        d.denied.slice(0, 6).map((x) => h('div', { class: 'row' }, h('span', { class: 'mono tiny grow' }, x.action), h('span', { class: 'mono tiny', style: 'color:#ff6b5e' }, num(x.n))))),
+      d.denied.length > 0 && h('section', { class: 'stack' }, h('div', { class: 'eyebrow', style: 'color:#ff5a4f' }, 'DENIED'),
+        d.denied.slice(0, 6).map((x) => h('div', { class: 'row' }, h('span', { class: 'mono tiny grow' }, x.action), h('span', { class: 'mono tiny', style: 'color:#ff5a4f' }, num(x.n))))),
       h('div', { class: 'stack', style: 'margin-top:auto' }, h('a', { class: 'btn primary', href: `#/roles/${role.id}/recommendation` }, 'Open recommendation'),
         h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/track?role=${role.id}` }, 'Track a session'), h('a', { class: 'btn sm grow', href: `#/roles/${role.id}` }, 'Role details'))));
   }

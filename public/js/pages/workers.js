@@ -1,6 +1,6 @@
 // Operations → Workers and Database: the workers (memory, CPU, event loop, what is being read right now, what to change)
 // and the database (disk left, size and growth, connections, vacuum).
-import { h, svg, get, num, ago, fmtDate } from '../lib.js';
+import { h, svg, get, num, ago, fmtDate, fmtClock, fmtStamp, tile, poll } from '../lib.js';
 
 const MB = 1024 * 1024;
 const bytes = (b) => (b == null ? '—' : b >= 1024 * MB ? `${(b / 1024 / MB).toFixed(2)} GB` : b >= MB ? `${Math.round(b / MB)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
@@ -41,8 +41,7 @@ export async function workersPage(ctx) {
           h('tbody', null, d.failures.map((f) => h('tr', null, h('td', { class: 'mono small err' }, f.error || '—'), h('td', null, f.n), h('td', null, ago(f.last))))))));
   }
   draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, e.message)));
-  const t = setInterval(() => draw().catch(() => {}), 15000);
-  ctx.onLeave(() => clearInterval(t));
+  ctx.onLeave(poll(() => draw().catch(() => {}), 15000));
   return root;
 }
 
@@ -60,12 +59,9 @@ export async function databasePage(ctx) {
       databaseCard(db));
   }
   draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, `Database health could not be read: ${e.message}`)));
-  const t = setInterval(() => draw().catch(() => {}), 15000);
-  ctx.onLeave(() => clearInterval(t));
+  ctx.onLeave(poll(() => draw().catch(() => {}), 15000));
   return root;
 }
-
-const tile = (label, value, sub) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
 
 function adviceCard(items) {
   return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'What needs attention')),
@@ -133,7 +129,7 @@ function chart(title, pts, { limit = null, limitLabel = '', fmt = String, empty 
   const y = (v) => T + (1 - v / vmax) * (H - T - B);
   const path = P.map(([t, v], i) => `${i ? 'L' : 'M'}${x(t).toFixed(1)},${y(v).toFixed(1)}`).join('');
   const area = `${path}L${x(t1).toFixed(1)},${y(0)}L${x(t0).toFixed(1)},${y(0)}Z`;
-  const hm = (t) => (days ? new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' }) : new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' }));
+  const hm = (t) => (days ? fmtStamp(t) : fmtClock(t));
   const cross = svg('line', { y1: T, y2: H - B, class: 'cross', visibility: 'hidden' });
   const dot = svg('circle', { r: 4, class: 'hover-dot', visibility: 'hidden' });
   const tip = h('div', { class: 'chart-tip', hidden: true });

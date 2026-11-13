@@ -2,15 +2,13 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs } from '../lib.js';
+import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1 } from '../lib.js';
 import { go } from '../main.js';
 
 const CX = 400, CY = 400;
-const SEV = { high: '#ff6b5e', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
-const KIND = { 'new-caller': 'NEW CALLER', denied: 'DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'DEAD', cleaned: 'CLEANED' };
+const SEV = COLOR;
 const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked', 'iam-user': 'IAM users' };
 const ui = { group: 'env', chip: null };          // remembered while you move between views
-const r1 = (v) => Math.round(v * 10) / 10;
 const P = (deg, r) => { const a = ((deg - 90) * Math.PI) / 180; return [r1(CX + Math.cos(a) * r), r1(CY + Math.sin(a) * r)]; };
 const RAD = (s) => 56 + Math.max(0, Math.min(1, s ?? 0)) * 258;
 const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -143,7 +141,7 @@ function feedList(items, seenAt, onPick) {
   return h('div', { class: 'stack', style: 'gap:6px' }, items.map((f) => {
     const fresh = seenAt && new Date(f.at) > new Date(seenAt);
     const b = h('button', { class: 'feed-item', onClick: () => onPick?.(f) },
-      h('span', { class: 'row mono tiny', style: 'justify-content:space-between' }, h('span', { style: `color:${SEV[f.severity]};letter-spacing:.06em` }, KIND[f.kind] || f.kind, fresh ? h('span', { class: 'fresh' }, ' NEW') : null), h('span', { class: 'faint' }, ago(f.at))),
+      h('span', { class: 'row mono tiny', style: 'justify-content:space-between' }, h('span', { style: `color:${SEV[f.severity]};letter-spacing:.06em` }, CHANGE_KIND[f.kind] || f.kind, fresh ? h('span', { class: 'fresh' }, ' NEW') : null), h('span', { class: 'faint' }, ago(f.at))),
       h('span', { class: 'small', style: 'line-height:1.4' }, f.title),
       h('span', { class: 'tiny faint', style: 'overflow-wrap:anywhere' }, [f.account_name, f.detail].filter(Boolean).join(' · ')));
     b.style.borderLeftColor = paint(SEV[f.severity]); return b;
@@ -161,7 +159,7 @@ async function estateView(ctx, shell) {
   let sel = null;
   const maxEx = Math.max(1, ...accounts.map((a) => a.excess)), maxAct = Math.max(1, ...accounts.map((a) => a.calls24h));
   const CHIPS = [['worse', 'Getting worse', '#f0b45a', (a) => (a.d30 ?? 0) > 0.04], ['better', 'Improving', '#6fe3b0', (a) => (a.d30 ?? 0) < -0.04],
-    ['pinged', 'Has pings', '#ff6b5e', (a) => a.pings > 0], ['loading', 'Loading', '#f6e016', (a) => !a.complete]];
+    ['pinged', 'Has pings', '#ff5a4f', (a) => a.pings > 0], ['loading', 'Loading', '#f6e016', (a) => !a.complete]];
   const svgEl = stage('Estate radar: each contact is an AWS account. Distance is its share of permissions never called; size is its excess permissions; trails show where it was 7 and 30 days ago.');
   const listEl = h('div', { class: 'rank-list' }), controls = h('div', { class: 'stack', style: 'gap:10px' });
   const hasOu = accounts.some((a) => a.ou);
@@ -247,7 +245,7 @@ async function estateView(ctx, shell) {
       'CONTACT = ACCOUNT · DISTANCE = NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Account (size = excess)'], ['width:10px;height:10px;border-radius:50%;background:#ff8a7a', '8+ high-risk roles'],
       ['width:16px;border-top:2px solid #f0b45a', 'Drifting out (30 d)'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
-      ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff6b5e;box-sizing:border-box', 'Ping: change that matters'],
+      ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping: change that matters'],
       ['width:10px;height:10px;border-radius:50%;border:1.2px dashed #8ec5ff;box-sizing:border-box', 'New account'],
       ['width:10px;height:10px;border-radius:50%;border:1.4px solid #f6e016;box-sizing:border-box', 'History still loading']]));
   draw(); card();
@@ -305,7 +303,7 @@ async function accountView(ctx, shell) {
     const q = search.value.toLowerCase();
     listEl.replaceChildren(...ranked.filter((r) => !q || r.name.toLowerCase().includes(q)).slice(0, 400).map((r) => h('button', { class: 'rank-row', 'aria-pressed': String(r === sel), onClick: () => { sel = r; draw(); list(); card(); } },
       h('span', { class: 'rbody' },
-        h('span', { class: 'rname' }, h('span', { class: 'n' }, r.name), r.ping && pill(KIND[r.ping.kind], SEV[r.ping.severity]), !r.ping && r.isNew && pill('NEW', '#8ec5ff'), r.unidentified && h('span', { class: 'unk-tag' }, 'UNK')),
+        h('span', { class: 'rname' }, h('span', { class: 'n' }, r.name), r.ping && pill(CHANGE_KIND[r.ping.kind], SEV[r.ping.severity]), !r.ping && r.isNew && pill('NEW', '#8ec5ff'), r.unidentified && h('span', { class: 'unk-tag' }, 'UNK')),
         h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${KIND_LABEL[r.kind]} · ${num(r.granted)} granted${r.dead ? ' · no calls' : ''}`))),
       h('span', { class: 'rval' }, h('span', { class: 'mono tiny', style: `color:${r.dead ? '#ff8a7a' : r.never > 0.75 ? '#ffd89a' : '#9fe8c4'}` }, `${Math.round(r.never * 100)}%`),
         h('span', { class: 'mono tiny', style: `color:${headColor(r.d30)}` }, headText(r.d30))))));
@@ -338,7 +336,7 @@ async function accountView(ctx, shell) {
       'CONTACT = ROLE · SECTOR = KIND · DISTANCE = NEVER CALLED · SIZE = EXCESS'),
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Custom'], ['width:9px;height:9px;background:#6fe3b0', 'Identity Center'],
       ['width:8px;height:8px;transform:rotate(45deg);background:#6fe3b0', 'Service-linked'], ['width:16px;border-top:2px solid #f0b45a', 'Drifting out'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
-      ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff6b5e;box-sizing:border-box', 'Ping'], ['width:10px;height:10px;border-radius:50%;border:1.2px dashed #8ec5ff;box-sizing:border-box', 'New role'],
+      ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping'], ['width:10px;height:10px;border-radius:50%;border:1.2px dashed #8ec5ff;box-sizing:border-box', 'New role'],
       ['width:10px;height:10px;border-radius:50%;border:1.4px dashed #f0b45a;box-sizing:border-box', 'Unidentified calls']]));
   if (!roles.length) { shell.scene.append(h('div', { class: 'card empty', style: 'position:absolute;inset:auto 40px 80px' }, 'No roles in this account yet.')); return; }
   draw(); list(); card();

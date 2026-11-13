@@ -1,4 +1,4 @@
-import { h, svg, get, post, api, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, toast, copy, modal, KIND, TEAM, field } from '../lib.js';
+import { h, svg, get, post, api, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, toast, copy, modal, KIND, TEAM, field, searchBox, pager, tile } from '../lib.js';
 import { session, go } from '../main.js';
 import { identifyControls, eventFacts, STATE } from './unidentified.js';
 
@@ -66,7 +66,6 @@ function gcpCard(roleId) {
   }).catch(() => {});
   return box;
 }
-const tile = (l, v, s) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, l), h('b', null, v), h('span', { class: 'tiny muted' }, s));
 
 function chart(daily) {
   const w = 900, hgt = 120, days = 90, bw = w / days;
@@ -147,10 +146,9 @@ function permsTab(d) {
       h('tbody', null, r.items.map((a) => h('tr', null, h('td', { class: 'mono small' }, a.action),
         h('td', null, h('span', { class: `badge ${a.status === 'used' ? 'b-green' : a.status === 'unused' ? 'b-neutral' : 'b-medium'}` }, a.status)),
         h('td', { class: 'small' }, a.access_level || ''), h('td', null, num(a.event_count)), h('td', { class: 'small' }, a.last_seen ? fmtDay(a.last_seen) : ''), h('td', { class: 'small muted' }, a.reason || '')))))) : h('div', { class: 'empty' }, 'Nothing matches.'),
-      r.total > 100 && h('div', { class: 'pager' }, h('span', { class: 'small muted' }, `${num(r.total)} actions, page ${st.page}`),
-        h('button', { class: 'btn sm', disabled: st.page <= 1, onClick: () => { st.page--; load(); } }, 'Previous'), h('button', { class: 'btn sm', disabled: st.page * 100 >= r.total, onClick: () => { st.page++; load(); } }, 'Next')));
+      r.total > 100 && pager({ page: st.page, total: r.total, size: 100, label: `${num(r.total)} actions, page ${st.page}`, onPage: (n) => { st.page = n; load(); } }));
   };
-  const q = h('input', { type: 'search', placeholder: 'Search actions', 'aria-label': 'Search actions' }); let t; q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { st.q = q.value; st.page = 1; load(); }, 250); });
+  const q = searchBox({ placeholder: 'Search actions', onSearch: (v) => { st.q = v; st.page = 1; load(); } });
   const status = h('select', { 'aria-label': 'Status' }, [['', 'Any status'], ['used', 'Used'], ['unused', 'Unused'], ['unconfirmed', 'Cannot be verified']].map(([v, l]) => h('option', { value: v }, l)));
   status.addEventListener('change', () => { st.status = status.value; st.page = 1; load(); });
   load();

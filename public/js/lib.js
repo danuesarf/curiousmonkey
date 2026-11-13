@@ -76,8 +76,14 @@ export function modal(title, body, footer) {
 }
 export const copy = async (text) => { try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed. Select the text and copy it yourself.', true); } };
 
-export const fmtDate = (d) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' }) + ' WIB' : 'never';
-export const fmtDay = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'Asia/Jakarta' }) : 'never';
+// Every time on screen is shown in one zone. This is the only place that names it.
+export const TZ = 'Asia/Jakarta', TZ_LABEL = 'WIB';
+export const fmtDate = (d) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: TZ }) + ` ${TZ_LABEL}` : 'never';
+export const fmtDay = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: TZ }) : 'never';
+/** 14:05, or 14:05:09 with seconds */
+export const fmtClock = (d, seconds = false) => new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), timeZone: TZ });
+/** 12 Nov, 14:05, or 12 Nov, 14:05:09 with seconds */
+export const fmtStamp = (d, seconds = false) => new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}), timeZone: TZ });
 export const ago = (d) => {
   if (!d) return 'never';
   const s = Math.max(0, (Date.now() - new Date(d)) / 1000);
@@ -96,7 +102,11 @@ export function freshness(at, everyMinutes = 0, lagMinutes = 15) {
   const time = new Date(at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + (min >= 20 * 60 ? ` ${new Date(at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : '');
   return { tone, min, behind, time, text: `read up to ${time} · ${behind} behind` };
 }
-export const TONE_COLOR = { good: '#6fe3b0', warn: '#f0b45a', bad: '#ff5a4f' };
+/** One colour per severity, for every page (Radar, Space, the bell, Trust, Track). */
+export const COLOR = { high: '#ff5a4f', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
+export const TONE_COLOR = { good: COLOR.good, warn: COLOR.warn, bad: COLOR.high };
+/** What a change on the Radar feed and in the bell is called. */
+export const CHANGE_KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
 export const num = (n) => Number(n || 0).toLocaleString('en-US');
 export const TEAM = { infrasec: 'Infrastructure Security', infosec: 'Information Security' };
 export const ROLE_LABEL = { owner: 'Owner', admin: 'Admin', reviewer: 'Security reviewer', account_owner: 'Account owner', auditor: 'Auditor' };
@@ -156,3 +166,109 @@ export const envs = () => envList;
 const mix = (hex, to, t) => `#${[1, 3, 5].map((i) => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - t) + to * t).toString(16).padStart(2, '0')).join('')}`;
 /** base, a darker dim and a light hot shade of one environment colour, as the maps draw them */
 export const envPalette = (hex) => ({ base: hex, dim: mix(hex, 0, 0.3), hot: mix(hex, 255, 0.55) });
+
+// ---------- pieces every list page shares ----------
+export const r1 = (v) => Math.round(v * 10) / 10;
+/** A summary tile. With `onClick` it is a button (a filter shortcut); `pressed` marks the active one, `bad` the one to look at. */
+export function tile(label, value, sub, { onClick, pressed, bad } = {}) {
+  const kids = [h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub)];
+  return onClick ? h('button', { class: `tile${bad ? ' tile-bad' : ''}`, type: 'button', 'aria-pressed': pressed == null ? null : String(pressed), onClick }, ...kids) : h('div', { class: 'tile' }, ...kids);
+}
+/** "Page 2 of 7", Previous, Next. `onPage` gets the new page number. */
+export function pager({ page, total, size, onPage, label, prev = 'Previous', next = 'Next' }) {
+  return h('div', { class: 'pager' }, h('span', { class: 'small muted' }, label ?? `Page ${page} of ${Math.ceil(total / size)}`),
+    h('button', { class: 'btn sm', disabled: page <= 1, onClick: () => onPage(page - 1) }, prev),
+    h('button', { class: 'btn sm', disabled: page * size >= total, onClick: () => onPage(page + 1) }, next));
+}
+/** Runs `fn` once things stop changing for `ms`. `.cancel()` drops a pending run (call it when the page is left). */
+export function debounced(fn, ms = 250) {
+  let t;
+  const run = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+  run.cancel = () => clearTimeout(t);
+  return run;
+}
+/** A search box that calls `onSearch(text)` 250 ms after typing stops. */
+export function searchBox({ value = '', placeholder, label, onSearch, ms = 250 }) {
+  const input = h('input', { type: 'search', placeholder, 'aria-label': label || placeholder, value });
+  const run = debounced(() => onSearch(input.value), ms);
+  input.addEventListener('input', run);
+  return Object.assign(input, { cancel: run.cancel });
+}
+/** Calls `fn` every `ms`, but not while the tab is in the background; comes back with one call when the tab is shown again. Returns a stop function. */
+export function poll(fn, ms) {
+  const t = setInterval(() => { if (!document.hidden) fn(); }, ms);
+  const shown = () => { if (!document.hidden) fn(); };
+  document.addEventListener('visibilitychange', shown);
+  return () => { clearInterval(t); document.removeEventListener('visibilitychange', shown); };
+}
+
+// ---------- filters live in the address ----------
+/** A comma list in the address, as a Set */
+export const urlSet = (params, key) => new Set((params.get(key) || '').split(',').filter(Boolean));
+/** Writes the page's filters into the address (only the ones that are set), without adding a history entry or redrawing.
+ *  Reload, a copied link and Back to this page then give the same view. */
+export function syncUrl(filters) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters)) {
+    const val = v instanceof Set ? [...v].join(',') : v === true ? '1' : v;
+    if (val == null || val === false || val === '') continue;
+    p.set(k, String(val));
+  }
+  const [path] = location.hash.split('?'), qs = p.toString();
+  history.replaceState(null, '', `${path}${qs ? `?${qs}` : ''}`);
+}
+
+/**
+ * The account picker used on every page that filters by account: a searchable list with environment shortcuts.
+ * `selected` is a Set of account ids that the picker changes in place; `onChange` runs after each change.
+ * With `multi: false` one account at most is picked (Events). `setAccounts` swaps the list when it arrives late.
+ */
+export function accountPicker({ accounts, selected, onChange, multi = true }) {
+  let list = accounts;
+  const label = h('span');
+  const chips = h('div', { class: 'pill-bar acct-chips' });
+  const search = h('input', { type: 'search', placeholder: `Find among ${list.length} accounts`, 'aria-label': 'Find an account' });
+  const options = h('div', { class: 'acct-list', role: 'group', 'aria-label': 'Accounts' });
+  const changed = () => { redraw(); onChange(); };
+  function redraw() {
+    label.textContent = selected.size === 0 ? `All ${list.length} accounts` : selected.size === 1 ? list.find((a) => selected.has(a.id))?.name || '1 account' : `${selected.size} of ${list.length} accounts`;
+    const picked = list.filter((a) => selected.has(a.id));
+    chips.replaceChildren(...picked.slice(0, 4).map((a) => h('span', { class: 'chip ev-on' }, a.name,
+      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${a.name}`, onClick: () => { selected.delete(a.id); changed(); } }, '×'))),
+      picked.length > 4 ? h('span', { class: 'small muted' }, `+${picked.length - 4} more`) : null,
+      picked.length ? h('button', { type: 'button', class: 'btn sm', onClick: () => { selected.clear(); changed(); } }, 'Clear') : null);
+    const needle = search.value.trim().toLowerCase();
+    const shown = list.filter((a) => !needle || `${a.name} ${a.account_id} ${a.environment} ${envName(a.environment)} ${a.ou || ''}`.toLowerCase().includes(needle))
+      .sort((a, b) => (selected.has(b.id) - selected.has(a.id)) || a.name.localeCompare(b.name));
+    options.replaceChildren(...(shown.length ? shown.map((a) => {
+      const cb = h('input', { type: 'checkbox', checked: selected.has(a.id) });
+      cb.addEventListener('change', () => {
+        if (!multi) { selected.clear(); picker.open = false; }
+        cb.checked ? selected.add(a.id) : selected.delete(a.id); changed();
+      });
+      return h('label', { class: 'acct-opt' }, cb, h('span', { class: 'acct-opt-b' }, h('span', { class: 'name' }, a.name), h('span', { class: 'tiny muted' }, `${a.account_id} · ${envName(a.environment)}${a.ou ? ` · ${a.ou}` : ''}`)),
+        h('span', { class: 'mono tiny muted' }, `${num(a.roles)} roles`));
+    }) : [h('p', { class: 'small muted', style: 'margin:8px' }, 'No account matches.')]));
+  }
+  search.addEventListener('input', redraw);
+  const shortcuts = h('div', { class: 'pill-bar' });
+  const drawShortcuts = () => {
+    const ids = envList.map((e) => e.id).filter((e) => list.some((a) => a.environment === e));
+    shortcuts.replaceChildren(h('button', { type: 'button', class: 'chip', onClick: () => { selected.clear(); changed(); } }, 'All'),
+      ...(multi ? ids.map((e) => h('button', { type: 'button', class: 'chip', onClick: () => { selected.clear(); for (const a of list) if (a.environment === e) selected.add(a.id); changed(); } }, `${envName(e)} only`)) : []));
+  };
+  const picker = h('details', { class: 'acct-picker' },
+    h('summary', { class: 'btn', 'aria-label': 'Choose accounts' }, h('span', { class: 'muted' }, multi ? 'Accounts: ' : 'Account: '), label, ' ▾'),
+    h('div', { class: 'acct-pop' }, search, shortcuts, options));
+  // close when clicking elsewhere or pressing Escape
+  const outside = (e) => { if (picker.open && !picker.contains(e.target)) picker.open = false; };
+  const esc = (e) => { if (e.key === 'Escape' && picker.open) { picker.open = false; picker.querySelector('summary').focus(); } };
+  document.addEventListener('click', outside); document.addEventListener('keydown', esc);
+  picker.addEventListener('toggle', () => { if (picker.open) search.focus(); });
+  drawShortcuts(); redraw();
+  return {
+    el: picker, chips, redraw,
+    setAccounts(next) { list = next; search.placeholder = `Find among ${list.length} accounts`; drawShortcuts(); redraw(); },
+    destroy() { document.removeEventListener('click', outside); document.removeEventListener('keydown', esc); },
+  };
+}

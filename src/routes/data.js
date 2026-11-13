@@ -12,14 +12,12 @@ import { suggestMappings, decideMapping, markUnresolved } from '../recommender/e
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
-import { effectiveLookback } from '../settings.js';
 import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
 import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
-import { loadMappings, translate } from '../analyzer/mappings.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
 
 export const data = Router();
@@ -500,45 +498,6 @@ data.get('/recommendations/:id/export', requirePerm('export'), wrap(async (req, 
 }));
 
 // ---------- overview ----------
-// ---------- radar, signal, sector scan ----------
-const accountFilter = (req, p, col) => {
-  const acct = req.query.account ? uuid.parse(req.query.account) : null;
-  if (acct && !inScope(req.user, acct)) throw NotFound();
-  const parts = [scopeSql(req.user, col, p)];
-  if (acct) { p.push(acct); parts.push(`${col}=$${p.length}`); }
-  return parts.join(' AND ');
-};
-
-/** Every role as a contact: how much it holds, how much it used, who calls it, what could not be identified. */
-data.get('/radar', requirePerm('view'), wrap(async (req, res) => {
-  const p = []; const where = accountFilter(req, p, 'r.account_id');
-  const roles = (await query(
-    `SELECT r.id, r.name, r.kind, r.risk, r.account_id, a.name AS account_name, a.account_id AS aws_account_id,
-            r.granted_count, r.used_count, r.unused_count, r.unconfirmed_count, r.last_used_at,
-            coalesce(d.calls,0)::int AS calls, coalesce(d.denied,0)::int AS denied
-       FROM roles r JOIN cloud_accounts a ON a.id=r.account_id
-       LEFT JOIN (SELECT role_id, sum(count) calls, sum(error_count) denied FROM activity_daily GROUP BY role_id) d ON d.role_id=r.id
-      WHERE r.deleted_at IS NULL AND ${where} ORDER BY r.risk_score DESC, r.name LIMIT 3000`, p)).rows;
-  const ids = roles.map((r) => r.id);
-  const [acts, callers, accts, maps] = await Promise.all([
-    ids.length ? query('SELECT DISTINCT role_id, action FROM activity_daily WHERE role_id = ANY($1)', [ids]) : { rows: [] },
-    ids.length ? query(
-      `SELECT p.key, max(p.display) AS display, max(p.kind) AS kind, array_agg(DISTINCT p.role_id) AS roles, sum(p.sessions_count)::int AS sessions
-         FROM principals p WHERE p.role_id = ANY($1) AND p.kind <> 'session' GROUP BY p.key ORDER BY sum(p.sessions_count) DESC NULLS LAST LIMIT 24`, [ids]) : { rows: [] },
-    query('SELECT * FROM cloud_accounts WHERE id = ANY($1)', [[...new Set(roles.map((r) => r.account_id))]]),
-    loadMappings(),
-  ]);
-  const hist = await historyFor(accts.rows);
-  const unk = new Map();
-  for (const a of acts.rows) { const t = translate(a.action, maps); if (t.unmapped) { if (!unk.has(a.role_id)) unk.set(a.role_id, []); unk.get(a.role_id).push(a.action); } }
-  res.json({
-    roles: roles.map((r) => ({ ...r, unidentified: unk.get(r.id) || [], provisional: !hist.get(r.account_id)?.complete, progress: hist.get(r.account_id)?.progress ?? 0 })),
-    callers: callers.rows,
-    accounts: accts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, progress: hist.get(a.id)?.progress ?? 0, complete: !!hist.get(a.id)?.complete }))
-      .sort((a, b) => a.name.localeCompare(b.name)),
-  });
-}));
-
 // ---- trust map: who can reach each role, and what is wrong with it ----
 data.get('/trust', requirePerm('view'), wrap(async (req, res) => {
   res.json(await trustMap(req.user, String(req.query.q || '').slice(0, 500)));
@@ -597,19 +556,6 @@ data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   res.json(await changeFeed(req.user, { accountId, days: req.query.days }));
 }));
 data.post('/changes/seen', requirePerm('view'), wrap(async (req, res) => { await markSeen(req.user); res.json({ ok: true }); }));
-/** Calls per day over the stored history, with how far the read has got. */
-data.get('/signal', requirePerm('view'), wrap(async (req, res) => {
-  const p = []; const where = accountFilter(req, p, 'r.account_id');
-  const days = (await query(
-    `SELECT d.day, sum(d.count)::int AS calls, sum(d.error_count)::int AS denied FROM activity_daily d JOIN roles r ON r.id=d.role_id
-      WHERE ${where} GROUP BY d.day ORDER BY d.day`, p)).rows;
-  const ap = []; const accts = (await query(`SELECT * FROM cloud_accounts a WHERE ${accountFilter(req, ap, 'a.id')}`, ap)).rows;
-  const hist = [...(await historyFor(accts)).values()];
-  const lookback = Math.max(90, ...accts.map(effectiveLookback));
-  res.json({ days, from: new Date(Date.now() - lookback * 864e5), to: new Date(), readUpTo: hist.filter((x) => !x.complete).map((x) => x.readUpTo).filter(Boolean).sort((a, b) => a - b)[0] || null,
-    complete: hist.every((x) => x.complete) });
-}));
-
 /** One role cut by access level (rings) and service (sectors). */
 data.get('/roles/:id/sector', requirePerm('view'), wrap(async (req, res) => {
   const role = await roleFor(req, req.params.id);

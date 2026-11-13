@@ -7,7 +7,7 @@
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in WIB); play steps through them.
-import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs } from '../lib.js';
+import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL } from '../lib.js';
 import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
 
@@ -18,9 +18,8 @@ const W = 1000, H = 900;
 // environments as set on the Configuration page: colours, and their order east to west across the plane
 let ENV = {}, ORDER = [];
 const useEnvironments = (list) => { ENV = Object.fromEntries(list.map((e) => [e.id, { name: e.name, ...envPalette(e.color) }])); ORDER = list.map((e) => e.id); };
-const RED = '#ff5a4f', WARN = '#fab219', COLD = '#7a8780', OUT = '#c3cbd9';
+const RED = COLOR.high, WARN = COLOR.warn, COLD = '#7a8780', OUT = '#c3cbd9';
 const TONE = { high: RED, warn: WARN, info: '#ffffff', good: '#6fe3b0', medium: WARN, low: '#d5dceb' };
-const KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
 const CM = '#c79a6b', CM_ID = 'cm';
 const GCP = '#7fb2ff', DY = 440;          // Google Cloud: its colour, and how far apart the two fields sit                 // Curious Monkey, this portal's own scanner: its own colour and shape
 const GLYPH = { oidc: 'oidc', saml: 'saml', 'external-account': 'account', public: 'web' };
@@ -107,7 +106,7 @@ function estateModel(d) {
   links.forEach((l, i) => { l.id = `link:${i}`; });
   const name = (id) => by.get(id)?.name || 'an account';
   const events = [
-    ...d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: `${name(e.accountId)}${e.roleName ? ` · ${e.roleName}` : ''}`, target: e.accountId })),
+    ...d.events.map((e) => ({ id: e.id, kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: `${name(e.accountId)}${e.roleName ? ` · ${e.roleName}` : ''}`, target: e.accountId })),
     ...d.chains.filter((c) => c.isNew && by.has(c.from) && by.has(c.to)).map((c) => ({ id: `n${c.from}${c.to}`, kind: 'NEW PATH', tone: 'info', hour: c.hours[0] ?? 23, text: `${name(c.from)} entered ${name(c.to)} for the first time`, where: c.roles.slice(0, 2).map((r) => `${r.caller} → ${r.role}`).join(' · '), target: c.to })),
   ].sort((a, b) => b.hour - a.hour);
   return { view: 'estate', zones, groups, by, sources, scanner, hidden: d.outside.hidden, links, events, hourStart: new Date(d.hourStart).getTime(),
@@ -227,7 +226,7 @@ function accountModel(d) {
     }
   }
   links.forEach((l, i) => { l.id = `link:${i}`; });
-  const events = d.events.map((e) => ({ id: e.id, kind: KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
+  const events = d.events.map((e) => ({ id: e.id, kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
   for (const t of towers) t.denied = roles.reduce((n, r) => n + (r.services.find((v) => v.name === t.name)?.denied || 0), 0);
   return { view: 'account', account: d.account, zones: [], groups, roles, byRole, towers, gates, doors, rim, sources, scanner, fars, links, events, hidden: d.outside.hidden,
     coldCount: d.coldCount, roleCount: d.roleCount, hourStart: new Date(d.hourStart).getTime(),
@@ -352,7 +351,7 @@ export async function spacePage(ctx) {
     const CX = W / 2 - F * ox + st.px, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou + st.py;
     return (x, y, z = 0) => { const [X, U, dep] = p(x, y, z); return [CX + F * X, CY - F * U, dep, F / dep]; };
   }
-  const hourLabel = (b) => new Date(M.hourStart + b * 36e5).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jakarta' });
+  const hourLabel = (b) => fmtClock(M.hourStart + b * 36e5);
 
   function render() {
     const hour = st.hour, sel = st.sel, motion = !still() && !st.dragging, focus = M.view === 'estate' ? st.zone : '';
@@ -1060,7 +1059,7 @@ export async function spacePage(ctx) {
     const focused = document.activeElement?.classList?.contains('sp-range');
     input.classList.add('sp-range');
     bar.replaceChildren(play, h('div', { class: 'sp-bar-body' },
-      h('div', { class: 'sp-bar-head' }, h('span', null, `${hourLabel(hour)}–${hourLabel(hour + 1)} WIB${hour === 23 ? ' · NOW' : ''} · ${kfmt(perHour[hour])} CALLS`),
+      h('div', { class: 'sp-bar-head' }, h('span', null, `${hourLabel(hour)}–${hourLabel(hour + 1)} ${TZ_LABEL}${hour === 23 ? ' · NOW' : ''} · ${kfmt(perHour[hour])} CALLS`),
         h('span', { style: `color:${nowEv.length ? TONE[nowEv[0].tone] || '#fff' : 'var(--faint)'}` }, nowEv.length ? nowEv.map((e) => `${e.kind}: ${e.text}`).join(' · ') : 'nothing flagged this hour')),
       h('div', { class: 'sp-scrub' }, ...perHour.map((v, i) => { const ev = M.events.find((e) => e.hour === i);
         return h('span', { class: 'sp-col' }, h('span', { class: `sp-fill${i === hour ? ' on' : ''}`, style: `height:${Math.max(3, Math.round((v / max) * 28))}px` }), ev ? h('span', { class: 'sp-mark', style: `background:${TONE[ev.tone] || '#fff'}` }) : null); }), input),

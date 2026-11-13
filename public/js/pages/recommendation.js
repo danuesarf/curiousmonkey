@@ -1,4 +1,4 @@
-import { h, get, post, num, ago, toast, copy, modal, TEAM, riskBadge } from '../lib.js';
+import { h, get, post, num, ago, toast, copy, modal, TEAM, riskBadge, tile } from '../lib.js';
 import { session } from '../main.js';
 
 const SOURCE = { ai: ['AI draft', 'b-banana'], rules: ['Rules draft', 'b-neutral'], 'rules-fallback': ['Rules draft (AI fell back)', 'b-medium'] };
@@ -61,7 +61,6 @@ function heldTile(held, roleId) {
     h('span', { class: 'tiny muted' }, `kept in ${held.services.slice(0, 3).join(', ')}${held.services.length > 3 ? '…' : ''} until event names are settled`),
     h('a', { class: 'tiny', href: `#/roles/${roleId}?identify=` }, 'Identify them'));
 }
-const tile = (l, v, s) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, l), h('b', null, v), s && h('span', { class: 'tiny muted' }, s));
 
 async function exportIt(rec, format) {
   try {

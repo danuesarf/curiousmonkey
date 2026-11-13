@@ -1,9 +1,10 @@
 // IAM users: long-lived credentials. Every access key with its ID, status, age and last use; console passwords and MFA;
 // groups; what each key did. A user's permission analysis is the same as a role's (Roles page, "Permissions" tab).
-import { h, get, num, ago, fmtDate, fmtDay, riskBadge, envName, loadEnvironments } from '../lib.js';
+import { h, get, num, ago, fmtDate, fmtDay, riskBadge, envName, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { go } from '../main.js';
 
-const F = { q: '', accounts: '', risk: '', flag: '', sort: 'risk', page: 1 };
+const F = { q: '', accounts: new Set(), risk: '', flag: '', sort: 'risk', page: 1 };   // kept when you come back by the rail link
+const URL_KEYS = ['q', 'accounts', 'account', 'risk', 'flag', 'sort', 'page'];
 const FLAGS = [['oldKey', 'Key older than 90 days'], ['unusedKey', 'Unused key'], ['twoKeys', 'Two active keys'], ['noMfa', 'Console without MFA'], ['console', 'Has a console password'], ['hasKeys', 'Has access keys'], ['inactive', 'Inactive 90 days']];
 const dayText = (n) => (n == null ? '—' : n === 0 ? 'today' : n === 1 ? '1 day' : `${num(n)} days`);
 const usedText = (k) => (k.lastUsed ? `${ago(k.lastUsed)}${k.lastService ? ` · ${k.lastService}` : ''}${k.lastRegion ? ` · ${k.lastRegion}` : ''}` : 'never used');
@@ -22,43 +23,44 @@ function keyLine(k, rules) {
 export async function usersPage(ctx) {
   ctx.setCrumbs('IAM users');
   await loadEnvironments();
-  if (ctx.params.get('account')) Object.assign(F, { accounts: ctx.params.get('account'), page: 1 });
-  if (ctx.params.get('flag')) Object.assign(F, { flag: ctx.params.get('flag'), page: 1 });
+  // every filter is in the address: #/users?accounts=<id>,<id>&flag=oldKey. (`account=` from older links still works.)
+  const P = ctx.params;
+  if (URL_KEYS.some((k) => P.has(k))) {
+    const ids = urlSet(P, 'accounts'); if (P.get('account')) ids.add(P.get('account'));
+    Object.assign(F, { q: P.get('q') || '', accounts: ids, risk: P.get('risk') || '', flag: P.get('flag') || '', sort: P.get('sort') || 'risk', page: Math.max(1, Number(P.get('page')) || 1) });
+  }
   const accounts = (await get('/accounts')).items.filter((a) => a.status !== 'planned');
+  for (const id of [...F.accounts]) if (!accounts.some((a) => a.id === id)) F.accounts.delete(id);
   const list = h('div'), tiles = h('div', { class: 'tiles' }), count = h('span', { class: 'count' });
-  let timer;
-  const qs = () => new URLSearchParams({ sort: F.sort, limit: '25', offset: String((F.page - 1) * 25), ...(F.q ? { q: F.q } : {}), ...(F.accounts ? { accounts: F.accounts } : {}), ...(F.risk ? { risk: F.risk } : {}), ...(F.flag ? { flag: F.flag } : {}) });
+  const qs = () => new URLSearchParams({ sort: F.sort, limit: '25', offset: String((F.page - 1) * 25), ...(F.q ? { q: F.q } : {}), ...(F.accounts.size ? { accounts: [...F.accounts].join(',') } : {}), ...(F.risk ? { risk: F.risk } : {}), ...(F.flag ? { flag: F.flag } : {}) });
   const set = (p) => { Object.assign(F, p, { page: 1 }); load(); };
   async function load() {
+    syncUrl({ q: F.q, accounts: F.accounts, risk: F.risk, flag: F.flag, sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
     const r = await get(`/iam-users?${qs()}`);
     count.textContent = `${num(r.total)} users`;
     const t = r.totals;
-    const tile = (label, value, sub, flag, bad) => h('button', { class: `tile${bad ? ' tile-bad' : ''}`, type: 'button', 'aria-pressed': String(F.flag === flag && !!flag), onClick: () => set({ flag: F.flag === flag ? '' : flag }) },
-      h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
+    const flagTile = (label, value, sub, flag, bad) => tile(label, value, sub, { onClick: () => set({ flag: F.flag === flag ? '' : flag }), pressed: F.flag === flag && !!flag, bad });
     tiles.replaceChildren(
-      tile('IAM users', num(t.users), `${num(t.high)} high risk · ${num(t.inactive)} inactive 90 days`, ''),
-      tile('Active access keys', num(t.activeKeys), 'long-lived: they work from anywhere until deleted', 'hasKeys'),
-      tile(`Keys older than ${r.rules.rotateDays} days`, num(t.oldKeys), 'rotate them, or move the workload to a role', 'oldKey', t.oldKeys > 0),
-      tile('Unused keys', num(t.unusedKeys), `never used, or not in ${r.rules.staleDays} days: deactivate`, 'unusedKey', t.unusedKeys > 0),
-      tile('Console without MFA', num(t.consoleNoMfa), `${num(t.console)} users can sign in to the console`, 'noMfa', t.consoleNoMfa > 0));
+      flagTile('IAM users', num(t.users), `${num(t.high)} high risk · ${num(t.inactive)} inactive 90 days`, ''),
+      flagTile('Active access keys', num(t.activeKeys), 'long-lived: they work from anywhere until deleted', 'hasKeys'),
+      flagTile(`Keys older than ${r.rules.rotateDays} days`, num(t.oldKeys), 'rotate them, or move the workload to a role', 'oldKey', t.oldKeys > 0),
+      flagTile('Unused keys', num(t.unusedKeys), `never used, or not in ${r.rules.staleDays} days: deactivate`, 'unusedKey', t.unusedKeys > 0),
+      flagTile('Console without MFA', num(t.consoleNoMfa), `${num(t.console)} users can sign in to the console`, 'noMfa', t.consoleNoMfa > 0));
     list.replaceChildren(r.items.length ? table(r.items, r.rules) : h('div', { class: 'empty' }, t.users ? 'No user matches these filters.' : 'No IAM users found. A scanner role created before user monitoring needs iam:ListUsers and the other user reads; see the account’s setup.'),
-      r.total > 25 && h('div', { class: 'pager' }, h('span', { class: 'small muted' }, `Page ${F.page} of ${Math.ceil(r.total / 25)}`),
-        h('button', { class: 'btn sm', disabled: F.page <= 1, onClick: () => { F.page--; load(); } }, 'Previous'),
-        h('button', { class: 'btn sm', disabled: F.page * 25 >= r.total, onClick: () => { F.page++; load(); } }, 'Next')));
+      r.total > 25 && pager({ page: F.page, total: r.total, size: 25, onPage: (n) => { F.page = n; load(); } }));
     drawFilters(r);
   }
-  const filters = h('div', { class: 'filters' });
+  // the account picker and the search box are built once, so an open list and the cursor stay put while the results reload
+  const picker = accountPicker({ accounts, selected: F.accounts, onChange: () => set({}) });
+  const search = searchBox({ placeholder: 'Search user, ARN or access key ID', label: 'Search users', value: F.q, onSearch: (v) => { F.q = v; F.page = 1; load(); } });
+  const rest = h('div', { style: 'display:contents' });
+  const filters = h('div', { class: 'filters' }, search, h('div', { class: 'row acct-row' }, picker.el, picker.chips), rest);
   function drawFilters(r) {
-    const search = h('input', { type: 'search', placeholder: 'Search user, ARN or access key ID', 'aria-label': 'Search users', value: F.q });
-    search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { F.q = search.value; F.page = 1; load(); }, 250); });
     const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: F[key] === v }, l))); s.addEventListener('change', () => set({ [key]: s.value })); return s; };
-    const typing = document.activeElement?.type === 'search' && filters.contains(document.activeElement);
-    filters.replaceChildren(search,
-      sel('accounts', [['', 'All accounts'], ...accounts.map((a) => [a.id, `${a.name} · ${a.account_id}`])], 'Account'),
+    rest.replaceChildren(
       h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Risk' }, ...['High', 'Medium', 'Low'].map((x) => h('button', { class: 'chip', type: 'button', 'aria-pressed': String(F.risk === x), onClick: () => set({ risk: F.risk === x ? '' : x }) }, x))),
       sel('flag', [['', 'Anything'], ...FLAGS.map(([k, l]) => [k, `${l} (${r.counts[k]})`])], 'Finding'),
       sel('sort', [['risk', 'Riskiest first'], ['keyAge', 'Oldest key first'], ['lastSeen', 'Longest unused first'], ['calls', 'Busiest first'], ['name', 'Name']], 'Sort'), count);
-    if (typing) { const i = filters.querySelector('input[type=search]'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
   }
   const table = (items, rules) => h('div', { class: 'scroll' }, h('table', { class: 'users-table' },
     h('thead', null, h('tr', null, h('th', null, 'User'), h('th', null, 'Risk'), h('th', null, 'Access keys · ID, status, age, last use'), h('th', null, 'Console'), h('th', null, 'Activity'), h('th', null, 'Findings'))),
@@ -73,7 +75,7 @@ export async function usersPage(ctx) {
       h('td', { class: 'small' }, u.reasons.slice(0, 2).map((x) => h('div', null, x)), u.reasons.length > 2 ? h('div', { class: 'tiny muted' }, `+${u.reasons.length - 2} more`) : null))))));
 
   load();
-  ctx.onLeave(() => clearTimeout(timer));
+  ctx.onLeave(() => { search.cancel(); picker.destroy(); });
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IAM USERS'), h('h1', null, 'IAM users and access keys'),
       h('p', { class: 'muted' }, 'Long-lived credentials: every access key with its ID, status, age and last use, console passwords and MFA. Secret keys are never readable, here or in AWS; only their IDs.')),

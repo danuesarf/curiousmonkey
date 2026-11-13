@@ -1,6 +1,6 @@
 // Google Cloud pages: connecting an organization, folder or project; the Roles page's Google Cloud tab; one identity.
 // Permissions only for now: who can do what, and where they can come from. No audit logs are read.
-import { h, get, post, api, num, ago, fmtDate, toast, copy, riskBadge, confirmDialog, loadEnvironments, envName } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, copy, riskBadge, confirmDialog, loadEnvironments, envName, tile, pager, searchBox, syncUrl, urlSet } from '../lib.js';
 import { session, go } from '../main.js';
 
 const SEV = { high: 'b-high', medium: 'b-medium', low: 'b-low', info: 'b-neutral' };
@@ -160,13 +160,16 @@ export async function gcpConnectPage(ctx, id = null) {
 }
 
 // ---------------------------------------------------------------- Roles page: Google Cloud tab
-const F = { q: '', kinds: new Set(), risks: new Set(), source: '', project: '', hideManaged: true, sort: 'risk', page: 1 };
+const F = { q: '', kinds: new Set(), risks: new Set(), source: '', project: '', hideManaged: true, sort: 'risk', page: 1 };   // kept when you come back by the tab link
+const URL_KEYS = ['q', 'kinds', 'risks', 'source', 'project', 'hideManaged', 'sort', 'page'];
 export async function gcpRolesTab(ctx) {
   ctx.setCrumbs('Roles', 'Google Cloud');
-  // links from Space and elsewhere can open it already filtered
-  if (ctx.params.get('project') || ctx.params.get('source')) Object.assign(F, { q: '', kinds: new Set(), risks: new Set(), project: ctx.params.get('project') || '', source: ctx.params.get('source') || '', page: 1 });
+  // every filter is in the address (#/roles?cloud=gcp&risks=High&source=key), so links from Space and elsewhere, reloads and Back open the same list
+  const P = ctx.params;
+  if (URL_KEYS.some((k) => P.has(k))) Object.assign(F, { q: P.get('q') || '', kinds: urlSet(P, 'kinds'), risks: urlSet(P, 'risks'), project: P.get('project') || '', source: P.get('source') || '',
+    hideManaged: P.get('hideManaged') !== '0', sort: P.get('sort') || 'risk', page: Math.max(1, Number(P.get('page')) || 1) });
   const list = h('div'), count = h('span', { class: 'count' }), tiles = h('div', { class: 'tiles' });
-  let first = true, timer;
+  let first = true, search = null;
   const qs = () => {
     const p = new URLSearchParams({ sort: F.sort, limit: '25', offset: String((F.page - 1) * 25) });
     if (F.q) p.set('q', F.q); if (F.kinds.size === 1) p.set('kind', [...F.kinds][0]); if (F.risks.size === 1) p.set('risk', [...F.risks][0]);
@@ -176,32 +179,30 @@ export async function gcpRolesTab(ctx) {
   const chips = h('div', { class: 'filters' });
   async function load() {
     let r;
+    syncUrl({ cloud: 'gcp', q: F.q, kinds: F.kinds, risks: F.risks, source: F.source, project: F.project, hideManaged: F.hideManaged ? '' : '0', sort: F.sort === 'risk' ? '' : F.sort, page: F.page > 1 ? F.page : '' });
     try { r = await get(`/gcp/principals?${qs()}`); } catch (x) { list.replaceChildren(h('div', { class: 'alert bad' }, x.message)); return; }
     count.textContent = `${num(r.total)} identities`;
     if (first) { first = false; drawFilters(r); drawTiles(r); }
     list.replaceChildren(r.items.length ? table(r.items) : h('div', { class: 'empty' }, r.total === 0 && !F.q && !F.kinds.size && !F.risks.size && !F.source && !F.project
       ? h('div', null, 'No Google Cloud identities yet. ', can('accounts') ? h('span', null, 'Connect an organization or project on ', h('a', { href: GCP_CONNECTIONS }, 'Accounts → Google Cloud'), '.') : 'An admin connects Google Cloud on the Accounts page.') : 'Nothing matches these filters.'),
-    r.total > 25 && h('div', { class: 'pager' }, h('span', { class: 'small muted' }, `Page ${F.page} of ${Math.ceil(r.total / 25)}`),
-      h('button', { class: 'btn sm', disabled: F.page <= 1, onClick: () => { F.page--; load(); } }, 'Previous'),
-      h('button', { class: 'btn sm', disabled: F.page * 25 >= r.total, onClick: () => { F.page++; load(); } }, 'Next')));
+    r.total > 25 && pager({ page: F.page, total: r.total, size: 25, onPage: (n) => { F.page = n; load(); } }));
   }
   async function drawTiles(r) {
     const k = r.facets.kinds, risks = r.facets.risks;
     const [keys, aws] = await Promise.all([get('/gcp/principals?source=key&limit=1'), get('/gcp/principals?source=aws&limit=1')]);
-    const tile = (label, value, sub, onClick) => h('button', { class: 'tile', type: 'button', onClick }, h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
     tiles.replaceChildren(
-      tile('Identities', num(Object.values(k).reduce((a, b) => a + b, 0)), `${num(k.serviceAccount || 0)} service accounts, ${num((k.user || 0) + (k.group || 0))} people and groups`, () => set({ kinds: new Set(), risks: new Set(), source: '' })),
-      tile('High risk', num(risks.High || 0), `${num(risks.Medium || 0)} medium`, () => set({ risks: new Set(['High']) })),
-      tile('Service accounts with keys', num(keys.total), 'keys work from anywhere until deleted', () => set({ source: 'key' })),
-      tile('Reachable from AWS', num(aws.total), 'through workload identity federation', () => set({ source: 'aws' })));
+      tile('Identities', num(Object.values(k).reduce((a, b) => a + b, 0)), `${num(k.serviceAccount || 0)} service accounts, ${num((k.user || 0) + (k.group || 0))} people and groups`, { onClick: () => set({ kinds: new Set(), risks: new Set(), source: '' }) }),
+      tile('High risk', num(risks.High || 0), `${num(risks.Medium || 0)} medium`, { onClick: () => set({ risks: new Set(['High']) }) }),
+      tile('Service accounts with keys', num(keys.total), 'keys work from anywhere until deleted', { onClick: () => set({ source: 'key' }) }),
+      tile('Reachable from AWS', num(aws.total), 'through workload identity federation', { onClick: () => set({ source: 'aws' }) }));
   }
   const set = (patch) => { Object.assign(F, patch, { page: 1 }); drawFilters(null); load(); };
   let facets = null;
   function drawFilters(r) {
     if (r) facets = r;
     const fx = facets;
-    const search = h('input', { type: 'search', placeholder: 'Search email, member or name', 'aria-label': 'Search identities', value: F.q });
-    search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { F.q = search.value; F.page = 1; load(); }, 250); });
+    search?.cancel();
+    search = searchBox({ placeholder: 'Search email, member or name', label: 'Search identities', value: F.q, onSearch: (v) => { F.q = v; F.page = 1; load(); } });
     const pill = (set_, v, label) => { const b = h('button', { class: 'chip', type: 'button', 'aria-pressed': set_.has(v) }, label); b.addEventListener('click', () => { const on = set_.has(v); set_.clear(); if (!on) set_.add(v); set({}); }); return b; };
     const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: F[key] === v }, l))); s.addEventListener('change', () => set({ [key]: s.value })); return s; };
     const managed = h('input', { type: 'checkbox', checked: F.hideManaged }); managed.addEventListener('change', () => set({ hideManaged: managed.checked }));
@@ -234,7 +235,7 @@ export async function gcpRolesTab(ctx) {
       h('td', { class: 'small' }, x.reasons.filter((r) => r.severity !== 'info').slice(0, 2).map((r) => h('div', null, h('span', { class: `dot ${SEV[r.severity]}` }), r.title)), x.reasons.filter((r) => r.severity !== 'info').length > 2 ? h('div', { class: 'tiny muted' }, `+${x.reasons.filter((r) => r.severity !== 'info').length - 2} more`) : null))))));
 
   drawFilters(null); load();
-  ctx.onLeave(() => clearTimeout(timer));
+  ctx.onLeave(() => search?.cancel());
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ROLES · GOOGLE CLOUD'), h('h1', null, 'Google Cloud identities'),
       h('p', { class: 'muted' }, 'Service accounts, people, groups and federated identities: what IAM lets them do, and where they can come from. Read from IAM policies; activity is not read yet, so nothing here says what was actually used.')),

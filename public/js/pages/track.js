@@ -2,14 +2,13 @@
 // Each session is a lane. A call that assumed another role is a portal; the session it created
 // starts from that portal on its own lane, in its own colour. Replay sends a comet along the path,
 // pulses each node as it lands and flashes the matching rows in the call log.
-import { h, svg, get, num, fmtDate, ago, paint } from '../lib.js';
+import { h, svg, get, num, fmtDate, fmtClock, ago, paint, r1 } from '../lib.js';
 import { go } from '../main.js';
 
 const LANE = ['#6fe3b0', '#8ec5ff', '#c9a7ff', '#ffb38a', '#f6e016', '#7fe0e0'];
 const laneColor = (i) => LANE[i % LANE.length];
 const MAX_STEPS = 160;
-const r1 = (v) => Math.round(v * 10) / 10;
-const time = (d) => new Date(d).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Jakarta' });
+const time = (d) => fmtClock(d, true);
 const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 export async function trackPage(ctx) {
@@ -120,7 +119,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
       return { base, lit };
     });
     const nodeEls = shown.map((s) => {
-      const c = s.denied ? '#ff6b5e' : laneColor(s.lane);
+      const c = s.denied ? '#ff5a4f' : laneColor(s.lane);
       const g = svg('g', { style: 'cursor:pointer', tabindex: 0, role: 'button', 'aria-label': `${s.action}${s.calls.length > 1 ? ` ×${s.calls.length}` : ''}${s.denied ? ', denied' : ''}`, onClick: () => { seek(s.i); pick(s); } });
       const portal = s.jumpTo != null || s.jumpOutOfView;
       const core = portal
@@ -128,9 +127,9 @@ export async function trackView({ role: roleId = null, account = null, from = nu
           svg('text', { x: s.x, y: s.y + 4, 'text-anchor': 'middle', fill: '#8ec5ff', 'font-size': 10, 'font-weight': 700 }, '⇣'))
         : svg('circle', { cx: s.x, cy: s.y, r: r1(5 + Math.min(4, Math.log2(s.calls.length))), fill: '#030d08', stroke: c, 'stroke-width': 1.6 });
       g.append(core);
-      if (s.denied) g.append(svg('path', { d: `M${s.x - 4} ${s.y - 4} L${s.x + 4} ${s.y + 4} M${s.x + 4} ${s.y - 4} L${s.x - 4} ${s.y + 4}`, stroke: '#ff6b5e', 'stroke-width': 1.8 }));
+      if (s.denied) g.append(svg('path', { d: `M${s.x - 4} ${s.y - 4} L${s.x + 4} ${s.y + 4} M${s.x + 4} ${s.y - 4} L${s.x - 4} ${s.y + 4}`, stroke: '#ff5a4f', 'stroke-width': 1.8 }));
       const up = s.i % 2 === 0;
-      g.append(svg('text', { x: s.x, y: up ? s.y - 16 : s.y + 24, 'text-anchor': 'middle', fill: s.denied ? '#ff6b5e' : '#a9bfb2', 'font-family': 'Geist Mono, monospace', 'font-size': 9.5 },
+      g.append(svg('text', { x: s.x, y: up ? s.y - 16 : s.y + 24, 'text-anchor': 'middle', fill: s.denied ? '#ff5a4f' : '#a9bfb2', 'font-family': 'Geist Mono, monospace', 'font-size': 9.5 },
         `${short(s.action.split(':')[1] || s.action, 16)}${s.calls.length > 1 ? ` ×${s.calls.length}` : ''}`));
       if (s.jumpOutOfView) g.append(svg('text', { x: s.x, y: s.y + 38, 'text-anchor': 'middle', fill: '#8ec5ff', 'font-size': 9.5 }, 'into a role outside view'));
       gNodes.append(g);
@@ -148,7 +147,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
         truncated && h('div', { style: 'color:#f0b45a' }, `SHOWING FIRST ${MAX_STEPS} OF ${steps.length} STEPS`)),
       h('div', { class: 'legend' },
         lanes.slice(0, 4).map((l, i) => h('span', null, dot(laneColor(i)), `Lane ${i + 1}`)),
-        h('span', null, h('b', { style: 'color:#8ec5ff' }, '⇣'), 'Assumed another role (jump)'), h('span', null, h('b', { style: 'color:#ff6b5e' }, '×'), 'Denied')));
+        h('span', null, h('b', { style: 'color:#8ec5ff' }, '⇣'), 'Assumed another role (jump)'), h('span', null, h('b', { style: 'color:#ff5a4f' }, '×'), 'Denied')));
 
     // ---- call log ----
     const rowFor = new Map();
@@ -158,7 +157,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
         h('span', { class: 'mono' }, dot(laneColor(c.lane), 'lane-dot'), time(c.at)),
         h('span', { class: 'mono' }, c.action, c.jumpTo != null && h('span', { style: 'color:#8ec5ff' }, ` ⇢ lane ${c.jumpTo + 1}`)),
         h('span', { class: 'mono muted', style: 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, (c.resources || []).join(', ') || '—'),
-        h('span', { class: 'mono', style: c.denied ? 'color:#ff6b5e' : 'color:#6fe3b0' }, c.denied ? c.errorCode || 'Denied' : 'OK'));
+        h('span', { class: 'mono', style: c.denied ? 'color:#ff5a4f' : 'color:#6fe3b0' }, c.denied ? c.errorCode || 'Denied' : 'OK'));
       rowFor.set(i, r); return r;
     });
     log.replaceChildren(head, ...rows);
@@ -175,7 +174,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
 
     function paint() {
       shown.forEach((s, i) => {
-        const done = i <= pos; const c = s.denied ? '#ff6b5e' : laneColor(s.lane);
+        const done = i <= pos; const c = s.denied ? '#ff5a4f' : laneColor(s.lane);
         segEls[i].lit.setAttribute('opacity', done ? 0.9 : 0);
         const core = nodeEls[i].core; const ring = core.tagName === 'circle' ? core : core.firstChild;
         ring.setAttribute('fill', paint(done && core.tagName === 'circle' ? c : '#030d08'));
@@ -188,7 +187,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
     function land(i) {
       const s = shown[i]; pos = i; paint();
       if (!reduced()) {
-        const c = s.denied ? '#ff6b5e' : (s.jumpTo != null ? '#8ec5ff' : laneColor(s.lane));
+        const c = s.denied ? '#ff5a4f' : (s.jumpTo != null ? '#8ec5ff' : laneColor(s.lane));
         for (const [delay, max] of [[0, 26], [160, 40]]) {
           const ring = svg('circle', { cx: s.x, cy: s.y, r: 6, fill: 'none', stroke: c, 'stroke-width': 2 });
           const a1 = svg('animate', { attributeName: 'r', from: 6, to: max, dur: '0.9s', begin: 'indefinite', fill: 'freeze' });
@@ -246,10 +245,10 @@ export async function trackView({ role: roleId = null, account = null, from = nu
     function pick(s, quiet) {
       const l = lanes[s.lane]; const first = t.calls[s.calls[0]];
       nodeBox.replaceChildren(h('div', { class: 'eyebrow' }, quiet ? 'NOW' : 'PICKED'),
-        h('div', { class: 'readout' }, h('div', { class: 'mono', style: `color:${s.denied ? '#ff6b5e' : laneColor(s.lane)}` }, s.action),
+        h('div', { class: 'readout' }, h('div', { class: 'mono', style: `color:${s.denied ? '#ff5a4f' : laneColor(s.lane)}` }, s.action),
           h('div', { class: 'tiny muted' }, `${l.role} · ${time(s.at)}${s.calls.length > 1 ? ` – ${time(s.lastAt)} · ${s.calls.length} calls` : ''}`),
           (first.resources || []).length > 0 && h('div', { class: 'mono tiny', style: 'overflow-wrap:anywhere' }, first.resources.slice(0, 3).join(', ')),
-          s.denied && h('div', { class: 'tiny', style: 'color:#ff6b5e' }, s.errorCode || 'Denied'),
+          s.denied && h('div', { class: 'tiny', style: 'color:#ff5a4f' }, s.errorCode || 'Denied'),
           s.jumpTo != null && h('div', { class: 'tiny', style: 'color:#8ec5ff' }, `Assumed ${lanes[s.jumpTo].role} in ${lanes[s.jumpTo].account}. Its calls continue on lane ${s.jumpTo + 1}.`),
           s.jumpOutOfView && h('div', { class: 'tiny', style: 'color:#8ec5ff' }, 'Assumed a role in an account that is not connected or not in your scope, so its calls are not shown.')));
     }

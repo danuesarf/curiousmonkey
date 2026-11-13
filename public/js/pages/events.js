@@ -1,10 +1,10 @@
 // Event history: search the calls kept per role session. Every filter lives in the URL, so a search can be linked to.
-import { h, get, copy, ago } from '../lib.js';
+import { h, get, copy, ago, fmtStamp, TZ_LABEL, accountPicker, loadEnvironments } from '../lib.js';
 import { go } from '../main.js';
 
 const RANGES = [['1h', 'Last hour'], ['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days']];
 const OUTCOMES = [['all', 'Allowed and denied'], ['denied', 'Denied only'], ['allowed', 'Allowed only']];
-const time = (t) => new Date(t).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Jakarta' });
+const time = (t) => fmtStamp(t, true);
 const SYNTAX = [['role:deploy', 'role name'], ['user:alice', 'session name or caller'], ['ip:10.0.', 'source IP'], ['action:s3:Get', 'IAM action or event'], ['resource:acme-reports', 'resource ARN'],
   ['error:AccessDenied', 'error code'], ['id:…', 'CloudTrail event ID'], ['-action:Describe', 'leave out']];
 
@@ -20,16 +20,16 @@ export async function eventsPage(ctx) {
   // ---------- the search ----------
   const q = h('input', { type: 'search', value: f.q, class: 'mono', 'aria-label': 'Search calls', placeholder: 'Search: words, or role:, user:, ip:, action:, resource:, error:' });
   const select = (name, options, cur, label) => h('select', { 'aria-label': label, 'data-name': name }, options.map(([v, l]) => h('option', { value: v, selected: v === cur }, l)));
-  const acct = select('account', [['', 'All accounts'], ...(f.account ? [[f.account, 'This account']] : [])], f.account, 'Account');
-  get('/accounts').then(({ items }) => {
-    acct.replaceChildren(...[['', 'All accounts'], ...items.filter((a) => a.status !== 'planned').map((a) => [a.id, `${a.name} · ${a.account_id}`])]
-      .map(([v, l]) => h('option', { value: v, selected: v === f.account }, l)));
-  }, () => {});
+  // the same account picker as Roles and IAM users, one account at most (the search takes one); its list fills in when it arrives
+  const picked = new Set(f.account ? [f.account] : []);
+  const acct = accountPicker({ accounts: [], selected: picked, multi: false, onChange: () => form.requestSubmit() });
+  Promise.all([get('/accounts'), loadEnvironments()]).then(([{ items }]) => acct.setAccounts(items.filter((a) => a.status !== 'planned')), () => {});
+  ctx.onLeave?.(() => acct.destroy());
   const outcome = select('outcome', OUTCOMES, f.outcome, 'Result');
   const range = select('range', RANGES, f.range, 'Time range');
-  const form = h('form', { class: 'ev-form', role: 'search', onSubmit: (e) => { e.preventDefault(); searchFor({ q: q.value.trim(), account: acct.value, outcome: outcome.value, range: range.value }); } },
-    q, acct, outcome, range, h('button', { class: 'btn primary', type: 'submit' }, 'Search'));
-  for (const s of [acct, outcome, range]) s.addEventListener('change', () => form.requestSubmit());
+  const form = h('form', { class: 'ev-form', role: 'search', onSubmit: (e) => { e.preventDefault(); searchFor({ q: q.value.trim(), account: [...picked][0] || '', outcome: outcome.value, range: range.value }); } },
+    q, acct.el, outcome, range, h('button', { class: 'btn primary', type: 'submit' }, 'Search'));
+  for (const s of [outcome, range]) s.addEventListener('change', () => form.requestSubmit());
   const syntax = h('div', { class: 'ev-syntax' }, ...SYNTAX.map(([k, d]) => h('button', { type: 'button', class: 'chip', title: d, onClick: () => { q.value = `${q.value.trim()} ${k.endsWith('…') ? 'id:' : k}`.trim(); q.focus(); } }, k)));
   const chipsRow = h('div', { class: 'row' });
   const drawChips = (first) => chipsRow.replaceChildren(...[
@@ -87,11 +87,11 @@ export async function eventsPage(ctx) {
     count += page.items.length; next = page.next;
     more.hidden = !next;
     if (!count && !page.items.length) body.replaceChildren();
-    const indexing = page.indexing ? ` Older events are still being indexed (done back to ${time(page.indexing)} WIB); until then, searching before that is slower.` : '';
+    const indexing = page.indexing ? ` Older events are still being indexed (done back to ${time(page.indexing)} ${TZ_LABEL}); until then, searching before that is slower.` : '';
     status.textContent = (count
-      ? `${count.toLocaleString('en-US')} call${count === 1 ? '' : 's'}, newest first. Searched back to ${time(page.searched.from)} WIB${next ? '' : ', the start of the range'}.`
-      : next ? `No match yet. Searched back to ${time(page.searched.from)} WIB; still looking further back.`
-        : `No calls match between ${time(page.range.from)} and ${time(page.range.to)} WIB.`) + indexing;
+      ? `${count.toLocaleString('en-US')} call${count === 1 ? '' : 's'}, newest first. Searched back to ${time(page.searched.from)} ${TZ_LABEL}${next ? '' : ', the start of the range'}.`
+      : next ? `No match yet. Searched back to ${time(page.searched.from)} ${TZ_LABEL}; still looking further back.`
+        : `No calls match between ${time(page.range.from)} and ${time(page.range.to)} ${TZ_LABEL}.`) + indexing;
   };
   // older calls load by themselves when the end of the list comes into view; the button stays for keyboards and as a fallback
   const loadOlder = async () => {
@@ -124,7 +124,7 @@ export async function eventsPage(ctx) {
     h('section', { class: 'card' }, h('div', { class: 'card-b stack' }, form, syntax, chipsRow)),
     h('section', { class: 'card' },
       h('div', { class: 'scroll' }, h('table', { class: 'ev-table' },
-        h('thead', null, h('tr', null, ...['Time (WIB)', 'Account', 'Role', 'Session', 'Event', 'Resource', 'Source IP', 'Result'].map((t) => h('th', null, t)))), body)),
+        h('thead', null, h('tr', null, ...[`Time (${TZ_LABEL})`, 'Account', 'Role', 'Session', 'Event', 'Resource', 'Source IP', 'Result'].map((t) => h('th', null, t)))), body)),
       sentinel,
       h('div', { class: 'card-f row' }, status, h('span', { class: 'grow' }), more)));
 }

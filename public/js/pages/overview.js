@@ -1,24 +1,28 @@
-import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, envName } from '../lib.js';
+import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { session, go } from '../main.js';
 import { cloudTabs, gcpRolesTab } from './gcp.js';
 
 const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, unidentified: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
-const saved = { ...DEFAULT };   // survives navigating to a role and back
+const saved = { ...DEFAULT };   // kept when you come back by the rail link (no filters in the address)
+const URL_KEYS = ['q', 'accounts', 'kinds', 'risks', 'teams', 'unconfirmed', 'idle', 'openFlags', 'unidentified', 'policy', 'sort', 'dir', 'page'];
 
 export async function overview(ctx) {
   // AWS and Google Cloud on one page, switched by a tab; members limited to some AWS accounts see AWS only
   const tabs = !session.user.scope_accounts;
   if (tabs && ctx.params.get('cloud') === 'gcp') return h('div', { class: 'stack-lg' }, cloudTabs('gcp'), await gcpRolesTab(ctx));
   const f = saved;
-  // a link can open the list already filtered: #/roles?accounts=<id>,<id>&risks=High
-  const ids = (k) => (ctx.params.get(k) || '').split(',').filter(Boolean);
-  if (ids('accounts').length || ids('risks').length) Object.assign(f, { ...DEFAULT, accounts: new Set(ids('accounts')), risks: new Set(ids('risks')), kinds: new Set(), teams: new Set() });
+  // every filter is in the address: #/roles?accounts=<id>,<id>&risks=High. A link, a reload or Back opens the same list.
+  const P = ctx.params;
+  if (URL_KEYS.some((k) => P.has(k))) {
+    Object.assign(f, { ...DEFAULT, q: P.get('q') || '', accounts: urlSet(P, 'accounts'), kinds: urlSet(P, 'kinds'), risks: urlSet(P, 'risks'), teams: urlSet(P, 'teams'),
+      unconfirmed: P.get('unconfirmed') === '1', idle: P.get('idle') === '1', openFlags: P.get('openFlags') === '1', unidentified: P.get('unidentified') === '1',
+      policy: P.get('policy') || '', sort: P.get('sort') || 'risk', dir: P.get('dir') === 'asc' ? 'asc' : 'desc', page: Math.max(1, Number(P.get('page')) || 1) });
+  }
   ctx.setCrumbs('Roles');
   const [ov, accts] = await Promise.all([get('/overview'), get('/accounts')]);
   const accounts = accts.items.filter((a) => a.status !== 'planned');     // planned accounts have no roles to list
   for (const id of [...f.accounts]) if (!accounts.some((a) => a.id === id)) f.accounts.delete(id);
   const list = h('div'), tiles = h('div', { class: 'tiles' });
-  let timer;
 
   const query = () => {
     const p = new URLSearchParams();
@@ -34,15 +38,15 @@ export async function overview(ctx) {
   const chip = (set, v, label) => { const b = h('button', { class: 'chip', type: 'button', 'aria-pressed': set.has(v) }, label); b.addEventListener('click', toggle(set, v, b)); return b; };
   const flag = (key, label) => { const b = h('button', { class: 'chip', type: 'button', 'aria-pressed': f[key] }, label); b.addEventListener('click', () => { f[key] = !f[key]; b.setAttribute('aria-pressed', f[key]); f.page = 1; load(); }); return b; };
 
+  const toUrl = () => syncUrl({ q: f.q, accounts: f.accounts, kinds: f.kinds, risks: f.risks, teams: f.teams, unconfirmed: f.unconfirmed, idle: f.idle, openFlags: f.openFlags, unidentified: f.unidentified,
+    policy: f.policy, sort: f.sort === DEFAULT.sort ? '' : f.sort, dir: f.dir === DEFAULT.dir ? '' : f.dir, page: f.page > 1 ? f.page : '' });
   async function load() {
+    toUrl();
     const r = await get(`/roles?${query()}`);
     list.replaceChildren(r.items.length ? table(r) : h('div', { class: 'empty' }, accounts.length ? 'No roles match these filters.' : 'No accounts yet. Connect one to start.'),
-      r.total > 25 && pager(r.total));
+      r.total > 25 && pager({ page: f.page, total: r.total, size: 25, onPage: (n) => { f.page = n; load(); } }));
     count.textContent = `${num(r.total)} roles`;
   }
-  const pager = (total) => h('div', { class: 'pager' }, h('span', { class: 'small muted' }, `Page ${f.page} of ${Math.ceil(total / 25)}`),
-    h('button', { class: 'btn sm', disabled: f.page <= 1, onClick: () => { f.page--; load(); } }, 'Previous'),
-    h('button', { class: 'btn sm', disabled: f.page * 25 >= total, onClick: () => { f.page++; load(); } }, 'Next'));
 
   const sortTh = (key, label) => h('th', { 'aria-sort': f.sort === key ? (f.dir === 'asc' ? 'ascending' : 'descending') : 'none' },
     h('button', { class: 'chip', type: 'button', onClick: () => { f.dir = f.sort === key && f.dir === 'desc' ? 'asc' : 'desc'; f.sort = key; load(); } }, label, f.sort === key ? (f.dir === 'asc' ? ' ↑' : ' ↓') : ''));
@@ -60,7 +64,6 @@ export async function overview(ctx) {
       h('td', null, x.history?.complete ? h('span', { class: 'state' }, 'Final') : h('span', { class: 'state prov', title: 'History is still being read' }, `Provisional ${x.history?.progress ?? 0}%`)))))));
 
   const t = ov.totals;
-  const tile = (label, value, sub) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, label), h('b', null, value), sub && h('span', { class: 'tiny muted' }, sub));
   tiles.append(tile('Roles', num(t.roles), `${ov.byKind.map((k) => `${k.n} ${KIND[k.kind].toLowerCase()}`).join(', ')}`),
     tile('High risk', num(t.high), `${t.medium} medium, ${t.low} low`),
     tile('Permissions used', t.granted ? `${(() => { const p = (t.used / t.granted) * 100; return p < 1 ? (p > 0 ? '<1' : '0') : Math.round(p); })()}%` : 'none', `${num(t.used)} of ${num(t.granted)} granted`),
@@ -68,49 +71,14 @@ export async function overview(ctx) {
     tile('Cannot be verified', num(t.unconfirmed), 'event history cannot prove them'));
 
   const count = h('span', { class: 'count' });
-  const search = h('input', { type: 'search', placeholder: 'Search role name or ARN', 'aria-label': 'Search roles', value: f.q });
-  search.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(() => { f.q = search.value; f.page = 1; load(); }, 250); });
+  const search = searchBox({ placeholder: 'Search role name or ARN', label: 'Search roles', value: f.q, onSearch: (v) => { f.q = v; f.page = 1; load(); } });
   const sel = (key, opts, label) => { const s = h('select', { 'aria-label': label }, opts.map(([v, l]) => h('option', { value: v, selected: f[key] === v }, l))); s.addEventListener('change', () => { f[key] = s.value; f.page = 1; load(); }); return s; };
 
   // ---- which accounts: one control in the filter bar, not a table above the roles (works the same for 5 or 500) ----
-  const ENVS = (await loadEnvironments()).map((e) => e.id).filter((e) => accounts.some((a) => a.environment === e));
-  const acctLabel = h('span');
-  const acctChips = h('div', { class: 'pill-bar acct-chips' });
+  await loadEnvironments();
   const title = h('h1');
   const drawTitle = () => { title.textContent = f.accounts.size ? `IAM roles in ${f.accounts.size} account${f.accounts.size > 1 ? 's' : ''}` : 'IAM roles across all accounts'; };
-  const acctSearch = h('input', { type: 'search', placeholder: `Find among ${accounts.length} accounts`, 'aria-label': 'Find an account' });
-  const acctList = h('div', { class: 'acct-list', role: 'group', 'aria-label': 'Accounts' });
-  const changed = () => { f.page = 1; drawAccounts(); drawTitle(); scanBtn.textContent = f.accounts.size ? `Scan ${f.accounts.size} selected` : 'Scan all accounts'; load(); };
-  function drawAccounts() {
-    acctLabel.textContent = f.accounts.size === 0 ? `All ${accounts.length} accounts` : f.accounts.size === 1 ? accounts.find((a) => f.accounts.has(a.id))?.name || '1 account' : `${f.accounts.size} of ${accounts.length} accounts`;
-    const picked = accounts.filter((a) => f.accounts.has(a.id));
-    acctChips.replaceChildren(...picked.slice(0, 4).map((a) => h('span', { class: 'chip ev-on' }, a.name,
-      h('button', { type: 'button', class: 'chip-x', 'aria-label': `Remove ${a.name}`, onClick: () => { f.accounts.delete(a.id); changed(); } }, '×'))),
-      picked.length > 4 ? h('span', { class: 'small muted' }, `+${picked.length - 4} more`) : null,
-      picked.length ? h('button', { type: 'button', class: 'btn sm', onClick: () => { f.accounts.clear(); changed(); } }, 'Clear') : null);
-    const needle = acctSearch.value.trim().toLowerCase();
-    const shown = accounts.filter((a) => !needle || `${a.name} ${a.account_id} ${a.environment} ${envName(a.environment)} ${a.ou || ''}`.toLowerCase().includes(needle))
-      .sort((a, b) => (f.accounts.has(b.id) - f.accounts.has(a.id)) || a.name.localeCompare(b.name));
-    acctList.replaceChildren(...(shown.length ? shown.map((a) => {
-      const cb = h('input', { type: 'checkbox', checked: f.accounts.has(a.id) });
-      cb.addEventListener('change', () => { cb.checked ? f.accounts.add(a.id) : f.accounts.delete(a.id); changed(); });
-      return h('label', { class: 'acct-opt' }, cb, h('span', { class: 'acct-opt-b' }, h('span', { class: 'name' }, a.name), h('span', { class: 'tiny muted' }, `${a.account_id} · ${envName(a.environment)}${a.ou ? ` · ${a.ou}` : ''}`)),
-        h('span', { class: 'mono tiny muted' }, `${num(a.roles)} roles`));
-    }) : [h('p', { class: 'small muted', style: 'margin:8px' }, 'No account matches.')]));
-  }
-  acctSearch.addEventListener('input', drawAccounts);
-  const onlyEnv = (env) => { f.accounts = new Set(accounts.filter((a) => a.environment === env).map((a) => a.id)); changed(); };
-  const acctPicker = h('details', { class: 'acct-picker' },
-    h('summary', { class: 'btn', 'aria-label': 'Choose accounts' }, h('span', { class: 'muted' }, 'Accounts: '), acctLabel, ' ▾'),
-    h('div', { class: 'acct-pop' }, acctSearch,
-      h('div', { class: 'pill-bar' }, h('button', { type: 'button', class: 'chip', onClick: () => { f.accounts.clear(); changed(); } }, 'All'),
-        ...ENVS.map((e) => h('button', { type: 'button', class: 'chip', onClick: () => onlyEnv(e) }, `${envName(e)} only`))),
-      acctList));
-  // close when clicking elsewhere or pressing Escape
-  const outside = (e) => { if (acctPicker.open && !acctPicker.contains(e.target)) acctPicker.open = false; };
-  const esc = (e) => { if (e.key === 'Escape' && acctPicker.open) { acctPicker.open = false; acctPicker.querySelector('summary').focus(); } };
-  document.addEventListener('click', outside); document.addEventListener('keydown', esc);
-  acctPicker.addEventListener('toggle', () => { if (acctPicker.open) acctSearch.focus(); });
+  const picker = accountPicker({ accounts, selected: f.accounts, onChange: () => { f.page = 1; drawTitle(); scanBtn.textContent = f.accounts.size ? `Scan ${f.accounts.size} selected` : 'Scan all accounts'; load(); } });
 
   const scanBtn = h('button', { class: 'btn primary', type: 'button', onClick: async (e) => {
     const ids = (f.accounts.size ? accounts.filter((a) => f.accounts.has(a.id)) : accounts).map((a) => a.id);
@@ -129,15 +97,15 @@ export async function overview(ctx) {
       h('div', { class: 'actions' }, session.user.permissions.includes('accounts') && h('a', { class: 'btn', href: '#/accounts/new' }, 'Connect account'), session.user.permissions.includes('scan') && scanBtn)),
     tiles,
     h('section', { class: 'card' },
-      h('div', { class: 'filters' }, h('div', { class: 'row acct-row' }, acctPicker, acctChips), search,
+      h('div', { class: 'filters' }, h('div', { class: 'row acct-row' }, picker.el, picker.chips), search,
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Role kind' }, ...Object.entries(KIND).map(([k, l]) => chip(f.kinds, k, l))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Risk' }, ...['High', 'Medium', 'Low'].map((r) => chip(f.risks, r, r))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Reviewer' }, ...Object.entries(TEAM).map(([k, l]) => chip(f.teams, k, l))),
         h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Findings' }, flag('unconfirmed', 'Has unverifiable'), flag('idle', 'Idle role'), flag('openFlags', 'Needs a decision'), flag('unidentified', 'Has unidentified calls')),
         sel('policy', [['', 'Any policy type'], ['inline', 'Has inline policy'], ['managed', 'Has attached policy']], 'Policy type'), count),
       list));
-  drawAccounts(); drawTitle();
+  drawTitle();
   load();
-  ctx.onLeave(() => { clearTimeout(timer); document.removeEventListener('click', outside); document.removeEventListener('keydown', esc); });
+  ctx.onLeave(() => { search.cancel(); picker.destroy(); });
   return body;
 }

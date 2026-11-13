@@ -1,4 +1,4 @@
-import { h, get, post, num, ago, fmtDate, toast, modal, api, confirmDialog } from '../lib.js';
+import { h, get, post, num, ago, fmtDate, toast, modal, api, confirmDialog, poll } from '../lib.js';
 import { session } from '../main.js';
 import { dial } from './sector.js';
 
@@ -42,8 +42,7 @@ export async function opsPage(ctx) {
           canScan && ['failed', 'dead', 'canceled'].includes(j.status) && h('button', { class: 'btn sm', onClick: async () => { await post(`/ops/jobs/${j.id}/retry`); redraw(); } }, 'Retry'),
           canScan && j.kind === 'events' && !['running', 'queued'].includes(j.status) && h('button', { class: 'btn sm', onClick: () => resumeDialog(d.run, j, redraw) }, 'Resume…')))))))));
   draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, e.message)));
-  const t = setInterval(() => draw().catch(() => {}), 5000);
-  ctx.onLeave(() => clearInterval(t));
+  ctx.onLeave(poll(() => draw().catch(() => {}), 5000));
   return root;
 }
 // Continue one region of one account from where it stopped, optionally in smaller slices.
