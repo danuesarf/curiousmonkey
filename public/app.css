@@ -699,3 +699,20 @@ kbd{font-family:var(--mono);font-size:11px;padding:1px 5px;border:1px solid var(
 .sector-page.embedded>aside{max-height:none}
 .sector-page.embedded .scene{min-height:0}
 @media (max-width:1200px){.sector-page.embedded{height:auto;grid-template-rows:none}.sector-page.embedded .scene{min-height:520px}}
+
+/* ---- command palette (Ctrl/⌘ K) ---- */
+.search-btn{flex:none;display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border:1px solid var(--edge);background:var(--surface);color:var(--muted);font:inherit;font-size:13px;cursor:pointer}
+.search-btn:hover{color:var(--ink);border-color:var(--faint)}
+.pal-bg{position:fixed;inset:0;z-index:80;background:rgba(1,6,4,.62);display:flex;justify-content:center;align-items:flex-start;padding:12vh 16px 16px}
+.pal{width:min(680px,100%);max-height:70vh;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--edge);box-shadow:0 18px 60px rgba(0,0,0,.45)}
+.pal-input{border:0;border-bottom:1px solid var(--line);background:none;min-height:52px;padding:0 16px;font-size:16px;width:100%;border-radius:0}
+.pal-input:focus-visible{outline:0;border-bottom-color:var(--banana)}
+.pal-list{overflow:auto;padding:6px 0;min-height:0}
+.pal-row{display:grid;grid-template-columns:84px minmax(0,auto) minmax(0,1fr) auto;gap:12px;align-items:center;padding:8px 16px;cursor:pointer;border-left:2px solid transparent}
+.pal-row.on{background:var(--raise);border-left-color:var(--banana)}
+.pal-kind{font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--faint)}
+.pal-name{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pal-sub{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pal-empty{padding:10px 16px}
+.pal-foot{padding:8px 16px;border-top:1px solid var(--line)}
+@media (max-width:900px){.search-btn span,.search-btn kbd{display:none}}

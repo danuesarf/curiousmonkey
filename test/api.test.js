@@ -305,6 +305,31 @@ test('findings inbox: bulk decisions are all or nothing, per-kind, scoped and au
   } finally { await db.query(`UPDATE flags SET status='open' WHERE id=$1`, [others[0].id]); }
 });
 
+test('search: a few of each kind by name or ID, exact names first, only in the member\'s accounts', async () => {
+  const r = (await owner.get('/api/search?q=legacy')).json;
+  assert.ok(r.roles.length >= 1 && r.roles.length <= 5); assert.ok(r.roles.every((x) => /legacy/i.test(x.name) && x.account && x.risk));
+  assert.equal((await owner.get('/api/search?q=legacy-admin')).json.roles[0].name, 'legacy-admin', 'the exact name comes first');
+  // IAM users and their access keys
+  const u = (await owner.get('/api/iam-users?limit=50')).json.items.find((x) => x.keys.length);
+  const byUser = (await owner.get(`/api/search?q=${encodeURIComponent(u.name)}`)).json;
+  assert.ok(byUser.users.some((x) => x.id === u.id)); assert.ok(byUser.roles.every((x) => x.kind !== 'iam-user'), 'users are not listed again as roles');
+  const byKey = (await owner.get(`/api/search?q=${u.keys[0].id.slice(0, 10)}`)).json;
+  assert.ok(byKey.keys.some((k) => k.id === u.keys[0].id && k.userId === u.id));
+  assert.equal((await owner.get('/api/search?q=AKI')).json.keys.length, 0, 'three letters are too few for a key ID');
+  // accounts by name and by AWS account ID
+  assert.deepEqual((await owner.get('/api/search?q=1111111')).json.accounts.map((a) => a.awsAccountId), ['111111111111']);
+  assert.ok((await owner.get('/api/search?q=stag')).json.accounts.some((a) => a.id === accB));
+  // too short, and LIKE wildcards are plain text
+  const short = (await owner.get('/api/search?q=a')).json; assert.equal(short.roles.length + short.users.length + short.accounts.length, 0);
+  const pct = (await owner.get('/api/search?q=%25%25')).json; assert.equal(pct.roles.length + pct.users.length + pct.accounts.length, 0);
+  // a member limited to account B finds nothing from account A, and no Google Cloud
+  const mine = (await scopedClient.get('/api/search?q=legacy')).json;
+  const inB = new Set((await scopedClient.get('/api/roles?limit=100')).json.items.map((x) => x.id));
+  assert.ok(mine.roles.every((x) => inB.has(x.id))); assert.deepEqual(mine.gcp, []);
+  assert.equal((await scopedClient.get('/api/search?q=1111111')).json.accounts.length, 0);
+  assert.equal((await new Client().get('/api/search?q=legacy')).status, 401);
+});
+
 test('recommend, then both teams approve a High-risk role; the export reflects approval', async () => {
   const id = (await owner.get(`/api/roles?accounts=${accA}&q=legacy-admin`)).json.items[0].id;
   const rec = await reviewerClient.post(`/api/roles/${id}/recommend`, { useAi: false });

@@ -132,6 +132,10 @@ Whatever you open, a role, an IAM user or a Google Cloud identity, lands on one 
 
 Tabs that do not apply are left out (Google Cloud has no Activity: its audit logs are not read). Old addresses (`#/roles`, `#/roles/<id>`, `#/roles/<id>/scan`, `#/users`, `#/users/<id>`, `#/gcp/principals/<id>`) open the new ones.
 
+## Search
+
+Press `Ctrl K` (`⌘ K` on a Mac) on any page, or use **Search** in the top bar, and type a role, an IAM user, an access key ID, an account name or ID, a Google Cloud identity or a page name. Arrows move, Enter opens, Esc closes. Results only come from the accounts you can see.
+
 ## IAM users
 
 IAM users are watched alongside roles. **Identities → IAM users** lists every user with each access key on its own line: the key ID, Active or Inactive, its age, when and where it was last used, and badges when it should be rotated (older than 90 days) or deactivated (never used, or not in 90 days). Secret keys are never readable, here or in AWS; only their IDs are shown. The list also shows console passwords and MFA, groups, calls in the last 7 days and the findings behind the risk level, with filters for old keys, unused keys, two active keys, console without MFA and inactive users.

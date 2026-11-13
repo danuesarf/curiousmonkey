@@ -1,5 +1,6 @@
 import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint } from './lib.js';
 import { theme, setTheme, initTheme } from './theme.js';
+import { openPalette, closePalette, paletteOpen } from './palette.js';
 import * as authPages from './pages/auth.js';
 import { identitiesPage } from './pages/overview.js';
 import { identityPage } from './pages/identity.js';
@@ -210,13 +211,27 @@ export async function refreshStatus() {
   meter.querySelector('b').style.color = paint(s.complete ? '#6fe3b0' : '#f6e016');
   if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = paint(TONE_COLOR[fr.tone]);
   if (!bellEl.firstChild) drawBell();
-  statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), can('view') ? bellEl : null,
+  statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), searchBtn, can('view') ? bellEl : null,
     s.unidentified > 0 && h('a', { class: 'unk-badge', href: '#/unidentified', title: 'Calls under event names not yet identified' },
       svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: '#f0b45a', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }), svg('circle', { cx: 8, cy: 8, r: 1.8, fill: '#f0b45a' })),
       `${s.unidentified} UNIDENTIFIED`),
     meter, themeBtn());
 }
 poll(refreshStatus, 20000);     // not while the tab is in the background
+
+// ---------- search everything: Ctrl/⌘ K, or the button in the top bar ----------
+const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+function search() {
+  if (!state.user || state.user.needsMfaSetup || !can('view')) return;
+  // the result opens as the page, not inside a window that happens to be open
+  openPalette({ user: state.user, navigate: (hash) => { closeWindow(); location.hash === hash ? render() : (location.hash = hash); } });
+}
+const searchBtn = h('button', { class: 'search-btn', type: 'button', title: 'Search roles, users, keys, accounts and pages', onClick: search },
+  svg('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2', 'aria-hidden': 'true' }, svg('path', { d: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM16 16l4.5 4.5' })),
+  h('span', null, 'Search'), h('kbd', null, MAC ? '⌘K' : 'Ctrl K'));
+document.addEventListener('keydown', (ev) => {
+  if ((ev.metaKey || ev.ctrlKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'k') { ev.preventDefault(); paletteOpen() ? closePalette() : search(); }
+});
 
 // ---------- light / dark ----------
 const SUN = 'M12 4V2M12 22v-2M4 12H2M22 12h-2M6.3 6.3 4.9 4.9M19.1 19.1l-1.4-1.4M6.3 17.7l-1.4 1.4M19.1 4.9l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
@@ -252,7 +267,7 @@ function shell(active, content, full) {
 }
 
 async function render() {
-  closeWindow();
+  closePalette(); closeWindow();
   state.leave.forEach((f) => f()); state.leave = [];
   if (notices) { notices = null; }
   bellOpen = false; drawBell();

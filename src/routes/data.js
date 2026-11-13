@@ -16,6 +16,7 @@ import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
+import { search } from '../searchApi.js';
 import { listFindings, waitingCount, decideMany, undecideMany, allowedFor, DecisionError } from '../findingsApi.js';
 import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
@@ -590,6 +591,9 @@ data.get('/roles/:id/sector', requirePerm('view'), wrap(async (req, res) => {
   res.json({ role: { id: role.id, name: role.name, account: role.account_name, kind: role.kind, risk: role.risk, granted: role.granted_count, used: role.used_count, unused: role.unused_count, unconfirmed: role.unconfirmed_count },
     levels: lv.rows, services: svc.rows, used: used.rows, denied: denied.rows, unconfirmed, history });
 }));
+
+/** The command palette: a few roles, IAM users, access keys, accounts and Google Cloud identities matching the text. */
+data.get('/search', requirePerm('view'), wrap(async (req, res) => { res.json(await search(req.user, req.query.q)); }));
 
 /** What the status bar shows on every screen: history read so far, time left, unidentified calls. */
 data.get('/status', requirePerm('view'), wrap(async (req, res) => {
