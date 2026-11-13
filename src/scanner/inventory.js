@@ -48,17 +48,24 @@ async function savePolicies(c, roleId, docs) {
  * IAM users, stored as roles of kind 'iam-user' so everything that analyses roles analyses them. Returns the ARNs
  * seen, or null when the scanner role cannot list users (created before it could): stored users are then kept.
  */
+const USER_READS = 'iam:ListUsers, iam:GetUser, iam:ListAccessKeys, iam:GetAccessKeyLastUsed, iam:ListMFADevices, iam:GetLoginProfile, iam:ListGroupsForUser and the user and group policy reads';
 export async function inventoryUsers(ctx, account, gw) {
   if (!gw.listUsers) return null;
   let users;
-  try { users = await gw.listUsers(); } catch (e) {
-    if (!/AccessDenied|not authorized/i.test(`${e.name} ${e.message}`)) throw e;
-    ctx.log('cannot read IAM users: add iam:ListUsers, iam:GetUser, iam:ListAccessKeys, iam:GetAccessKeyLastUsed, iam:ListMFADevices, iam:GetLoginProfile, iam:ListGroupsForUser and the user and group policy reads to the scanner role', null, 'warn');
+  // IAM users are optional: a scanner role without the user reads (any of them), or any other failure here, skips users
+  // with a warning and never fails the scan. Users already stored are kept (null: nothing is marked deleted).
+  const skip = (e) => {
+    const denied = /AccessDenied|not authorized/i.test(`${e.name} ${e.message}`);
+    const action = String(e.message).match(/perform: (\S+)/)?.[1];
+    ctx.log(denied
+      ? `IAM users skipped: the scanner role cannot ${action ? `call ${action}` : 'read them'}. Add ${USER_READS} to it; roles are scanned as usual and stored users are kept.`
+      : `IAM users skipped: ${e.message}. Roles are scanned as usual and stored users are kept.`, null, 'warn');
     return null;
-  }
+  };
+  try { users = await gw.listUsers(); } catch (e) { return skip(e); }
   await ctx.progress({ phase: 'users', total: users.length, done: 0 });
   let done = 0;
-  await limited(users, 4, async (u) => {
+  try { await limited(users, 4, async (u) => {
     const [detail, pol] = await Promise.all([gw.getUserDetail(u.name), gw.getUserPolicies(u.name)]);
     const docs = [...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document }))];
     for (const a of pol.attached) { const m = await managedDoc(gw, a); docs.push({ kind: 'managed', name: m.name, arn: m.arn, aws: m.awsManaged, document: m.document }); }
@@ -92,7 +99,7 @@ export async function inventoryUsers(ctx, account, gw) {
       await c.query(`UPDATE iam_access_keys SET deleted_at=now(), status='Deleted' WHERE role_id=$1 AND deleted_at IS NULL AND NOT (key_id = ANY($2))`, [row.id, detail.keys.map((k) => k.id)]);
     });
     await ctx.progress({ done: ++done });
-  });
+  }); } catch (e) { return skip(e); }
   return users.map((u) => u.arn);
 }
 

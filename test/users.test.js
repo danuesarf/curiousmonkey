@@ -120,7 +120,7 @@ test('roles stay roles: the Roles list and its totals leave users out unless ask
   assert.ok(inAcct.roleCount === 4 || inAcct.roles?.length <= 4, JSON.stringify(Object.keys(inAcct)));
 });
 
-test('members limited to an account see only its users; a scanner role that cannot list users keeps what is stored', async () => {
+test('members limited to an account see only its users; a scanner role that cannot read users skips them and keeps what is stored', async () => {
   const inv = await owner.post('/api/members/invite', { email: 'squad@acme.example', role: 'account_owner', scope_accounts: [B] });
   const squad = new Client(); await squad.post('/api/auth/signup', { name: 'Squad', email: 'squad@acme.example', password: PW, invite: inv.json.link.split('invite=')[1] });
   const mine = (await squad.get('/api/iam-users')).json;
@@ -135,6 +135,13 @@ test('members limited to an account see only its users; a scanner role that cann
   const logs = [];
   const got = await inventoryUsers({ log: (m) => logs.push(m), progress: async () => {} }, { id: A }, gw);
   assert.equal(got, null); assert.match(logs[0], /iam:ListUsers/);
+  assert.equal((await owner.get(`/api/iam-users?accounts=${A}`)).json.total, 4);
+  // allowed to list users but not to read their keys or sign-in: skipped too, never a failed scan
+  const gw2 = demoGateway({ account_id: '111111111111', regions: ['ap-southeast-3'], role_arn: 'x' });
+  gw2.getUserDetail = async () => { throw Object.assign(new Error('User: x is not authorized to perform: iam:GetLoginProfile on resource: y'), { name: 'AccessDenied' }); };
+  logs.length = 0;
+  assert.equal(await inventoryUsers({ log: (m) => logs.push(m), progress: async () => {} }, { id: A }, gw2), null);
+  assert.match(logs[0], /cannot call iam:GetLoginProfile/);
   assert.equal((await owner.get(`/api/iam-users?accounts=${A}`)).json.total, 4);
 });
 
