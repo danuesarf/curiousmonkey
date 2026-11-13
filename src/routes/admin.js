@@ -59,6 +59,26 @@ admin.patch('/members/:id', requirePerm('members'), wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// A single-use link that lets one member choose a new password. Owners only: whoever can reset a password can take
+// over that account, so this is kept to the role that can already change everything else.
+export const RESET_HOURS = 24;
+admin.post('/members/:id/reset-password', requirePerm('members'), wrap(async (req, res) => {
+  if (req.user.role !== 'owner') return res.status(403).json({ error: 'forbidden', message: 'Only an owner can reset a password.' });
+  const id = uuid.parse(req.params.id);
+  const b = z.object({ resetMfa: z.boolean().optional() }).parse(req.body || {});
+  const target = (await query('SELECT id, email, disabled, oidc_subject, password_hash FROM users WHERE id=$1', [id])).rows[0];
+  if (!target) return res.status(404).json({ error: 'not_found' });
+  if (target.disabled) return res.status(409).json({ error: 'disabled', message: 'This member is disabled. Enable them first.' });
+  if (target.oidc_subject && !target.password_hash) return res.status(409).json({ error: 'sso_user', message: 'This member signs in with SSO. Reset their password in your identity provider.' });
+  const token = randomToken(32);
+  await query('DELETE FROM password_resets WHERE user_id=$1 AND used_at IS NULL', [id]);   // one live link per member
+  await query(`INSERT INTO password_resets(token_hash, user_id, reset_mfa, created_by, expires_at) VALUES ($1,$2,$3,$4, now() + make_interval(hours => $5))`,
+    [sha256(token), id, Boolean(b.resetMfa), req.user.id, RESET_HOURS]);
+  await audit(req, 'member.password_reset_link', { type: 'user', id }, { email: target.email, resetMfa: Boolean(b.resetMfa) });
+  // No email is sent. The link is shown once and the token sits after the #, so it never reaches server or proxy logs.
+  res.status(201).json({ link: `${config.publicUrl}/#/reset?token=${token}`, email: target.email, expiresInHours: RESET_HOURS, resetMfa: Boolean(b.resetMfa) });
+}));
+
 admin.get('/sso/mappings', requirePerm('sso'), wrap(async (req, res) => res.json({ items: (await query('SELECT * FROM sso_group_mappings ORDER BY group_name')).rows })));
 admin.put('/sso/mappings', requirePerm('sso'), wrap(async (req, res) => {
   const b = z.object({ group_name: z.string().trim().min(1).max(200) }).merge(Grant).parse(req.body);

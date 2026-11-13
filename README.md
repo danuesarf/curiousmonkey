@@ -195,6 +195,10 @@ Only event names and request parameter *names* are kept, never parameter values.
 
 Roles: owner, admin, reviewer, account owner, auditor. Reviewers belong to Infrastructure Security or Information Security. Identity Center roles go to Information Security, service-linked roles to Infrastructure Security. High-risk roles need both teams. Everything can be limited to some accounts. Sign-in uses scrypt passwords, TOTP two-factor (required for privileged roles) and an audit log.
 
+**Forgotten passwords.** An owner opens Members → *Reset password* and gets a single-use link to send the member (nothing is emailed). It expires in 24 hours, a newer link cancels it, and the current password keeps working until it is used. Using it signs the member out everywhere and can also reset their two-factor if they lost their authenticator. The token sits after the `#`, so it never reaches server or proxy logs; only its hash is stored.
+
+**Single sign-on (OIDC).** Owners set it on Configuration → *Single sign-on*, or with the `OIDC_*` environment variables (a setup saved in the portal overrides them). The JumpCloud preset fills in the issuer for your region, the scopes (`openid email profile`) and the group claim; paste the client ID and secret from a JumpCloud *Custom OIDC App* whose redirect URI and login URL are the two addresses the page shows, with *Include group attribute* on and named `groups`. *Check issuer* reads the provider's discovery document before you save. Map IdP groups to roles under Members; someone in no mapped group is turned away. The client secret is stored encrypted and never shown again. Password sign-in keeps working as the way back in.
+
 ## Security checks
 
 Every push, pull request and Monday morning, `.github/workflows/security.yml` runs:

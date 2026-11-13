@@ -272,6 +272,98 @@ test('disabling a member ends their sessions at once', async () => {
   assert.equal(r.status, 401);
 });
 
+test('password reset: only an owner makes the link; it works once, signs the member out, and can reset two-factor', async () => {
+  const NEW = 'brand-new-password-42';
+  const members = async () => (await owner.get('/api/members')).json.members;
+  const squad = (await members()).find((x) => x.email === 'squad@kbi.id');
+  const squadSession = new Client(); assert.equal((await squadSession.post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 200);
+
+  // an admin can manage members but cannot reset passwords
+  const inv = await owner.post('/api/members/invite', { email: 'adm@kbi.id', role: 'admin' });
+  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm', email: 'adm@kbi.id', password: PW, invite: inv.json.link.split('invite=')[1] });
+  const s = await adm.post('/api/auth/mfa/start'); await adm.post('/api/auth/mfa/confirm', { code: totp.code(s.json.secret) });
+  const denied = await adm.post(`/api/members/${squad.id}/reset-password`, {});
+  assert.equal(denied.status, 403); assert.match(denied.json.message, /owner/);
+
+  // a newer link cancels the older one
+  const first = (await owner.post(`/api/members/${squad.id}/reset-password`, {})).json;
+  const made = await owner.post(`/api/members/${squad.id}/reset-password`, {});
+  assert.equal(made.status, 201); assert.equal(made.json.expiresInHours, 24);
+  const token = made.json.link.split('token=')[1];
+  assert.match(made.json.link, /#\/reset\?token=/);                                    // after the #: never sent to the server
+  const anon = new Client();
+  assert.equal((await anon.get(`/api/auth/reset/${first.link.split('token=')[1]}`)).status, 404);
+  assert.equal((await anon.get(`/api/auth/reset/${token}`)).json.email, 'squad@kbi.id');
+
+  // the link alone changes nothing; the old password still works until it is used
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 200);
+  assert.equal((await anon.post('/api/auth/reset', { token, password: 'short' })).status, 400);
+  assert.equal((await anon.post('/api/auth/reset', { token, password: PW })).json.error, 'same_password');
+  const done = await anon.post('/api/auth/reset', { token, password: NEW });
+  assert.equal(done.status, 200); assert.equal(done.json.email, 'squad@kbi.id');
+  assert.equal((await squadSession.get('/api/roles')).status, 401);                     // signed out everywhere
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 401);
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: NEW })).status, 200);
+  assert.equal((await anon.post('/api/auth/reset', { token, password: 'another-password-77' })).status, 404);   // once only
+
+  // resetting two-factor: the admin signs in with no code and is asked to set it up again
+  const rev = (await members()).find((x) => x.email === 'adm@kbi.id');
+  assert.equal(rev.totp_confirmed, true);
+  const t2 = (await owner.post(`/api/members/${rev.id}/reset-password`, { resetMfa: true })).json.link.split('token=')[1];
+  assert.equal((await anon.get(`/api/auth/reset/${t2}`)).json.resetMfa, true);
+  assert.equal((await anon.post('/api/auth/reset', { token: t2, password: NEW })).status, 200);
+  const back = new Client(); const r = await back.post('/api/auth/signin', { email: 'adm@kbi.id', password: NEW });
+  assert.equal(r.status, 200); assert.equal(r.json.user.needsMfaSetup, true);
+
+  // disabled members get no link; every step is in the audit log
+  const aud = (await members()).find((x) => x.email === 'aud@kbi.id');
+  assert.equal((await owner.post(`/api/members/${aud.id}/reset-password`, {})).json.error, 'disabled');
+  const log = (await owner.get('/api/audit?action=')).json.items.map((i) => i.action);
+  assert.ok(log.includes('member.password_reset_link') && log.includes('auth.password_reset'));
+});
+
+test('single sign-on: only owners set it; the secret is stored encrypted and never returned; the sign-in page follows', async () => {
+  const inv = await owner.post('/api/members/invite', { email: 'adm2@kbi.id', role: 'admin' });
+  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm2', email: 'adm2@kbi.id', password: PW, invite: inv.json.link.split('invite=')[1] });
+  const s = await adm.post('/api/auth/mfa/start'); await adm.post('/api/auth/mfa/confirm', { code: totp.code(s.json.secret) });
+  assert.equal((await adm.get('/api/settings')).status, 200);                           // admins configure the rest
+  assert.equal((await adm.get('/api/settings/sso')).status, 403);
+  assert.equal((await adm.call('PUT', '/api/settings/sso', {})).status, 403);
+
+  const v0 = (await owner.get('/api/settings/sso')).json;
+  assert.equal(v0.source, 'none'); assert.match(v0.redirectUri, /\/api\/auth\/oidc\/callback$/);
+  assert.equal(v0.presets.jumpcloud.issuers.us, 'https://oauth.id.jumpcloud.com/');
+  assert.equal((await new Client().get('/api/auth/state')).json.oidc, false);
+
+  const SECRET = 'jc-client-secret-value-123';
+  const body = { enabled: true, provider: 'jumpcloud', issuer: 'https://oauth.id.jumpcloud.com/', clientId: 'cm-client-id', groupsClaim: 'groups', scopes: 'openid email profile', buttonLabel: 'JumpCloud' };
+  assert.equal((await owner.call('PUT', '/api/settings/sso', body)).json.fields.clientSecret, 'Paste the client secret.');
+  assert.equal((await owner.call('PUT', '/api/settings/sso', { ...body, clientSecret: SECRET, issuer: 'http://oauth.id.jumpcloud.com/' })).status, 400);   // https only
+  assert.equal((await owner.call('PUT', '/api/settings/sso', { ...body, clientSecret: SECRET, scopes: 'email profile' })).status, 400);                    // needs openid
+  const saved = await owner.call('PUT', '/api/settings/sso', { ...body, clientSecret: SECRET });
+  assert.equal(saved.status, 200); assert.equal(saved.json.source, 'saved'); assert.equal(saved.json.hasSecret, true);
+  assert.ok(!saved.text.includes(SECRET));
+  const stored = (await db.query(`SELECT value FROM app_settings WHERE key='sso.oidc'`)).rows[0].value;
+  assert.ok(!JSON.stringify(stored).includes(SECRET)); assert.match(stored.secret, /^v1\./);
+
+  const st = (await new Client().get('/api/auth/state')).json;
+  assert.equal(st.oidc, true); assert.equal(st.oidcLabel, 'JumpCloud');
+
+  // saving without a secret keeps it; turning it off hides the button
+  assert.equal((await owner.call('PUT', '/api/settings/sso', { ...body, clientId: 'cm-client-id-2' })).json.hasSecret, true);
+  await owner.call('PUT', '/api/settings/sso', { ...body, enabled: false });
+  assert.equal((await new Client().get('/api/auth/state')).json.oidc, false);
+  assert.equal((await new Client().get('/api/auth/oidc/login')).status, 404);
+
+  // the audit log records what changed, never the secret
+  const log = (await owner.get('/api/audit?action=settings.sso')).json.items;
+  assert.ok(log.length >= 3); assert.ok(!JSON.stringify(log).includes(SECRET));
+  assert.ok(log.some((l) => JSON.stringify(l).includes('clientSecret')));
+
+  const cleared = (await owner.call('DELETE', '/api/settings/sso')).json;
+  assert.equal(cleared.source, 'none');
+});
+
 test('health and metrics endpoints answer; unknown API paths are JSON 404s; the SPA shell is served', async () => {
   assert.equal((await fetch(base + '/healthz')).status, 200);
   assert.match(await (await fetch(base + '/metrics')).text(), /cm_scan_jobs/);

@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { config } from './config.js';
 import { query } from './db.js';
 import { refreshEnvironments } from './environments.js';
+import { refreshSso } from './sso.js';
 
 export const EVENT_HISTORY_MAX_DAYS = 90;        // AWS limit for LookupEvents; not configurable
 export const LOOKBACK_CEILING_DAYS = 730;        // the most this tool will ever read back from an S3 trail
@@ -42,6 +43,7 @@ export async function refreshSettings() {
     put(path, s?.success ? s.data : DEFAULTS[k]);
   }
   await refreshEnvironments();
+  await refreshSso();
   loadedAt = Date.now();
   return current();
 }

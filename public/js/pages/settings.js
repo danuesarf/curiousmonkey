@@ -1,5 +1,6 @@
 // Configuration: Bedrock, how far back CloudTrail history is read, and the environments accounts belong to.
-import { h, get, api, post, num, ago, fmtDay, toast, loadEnvironments } from '../lib.js';
+import { h, get, api, post, num, ago, fmtDay, toast, copy, loadEnvironments } from '../lib.js';
+import { session } from '../main.js';
 
 const MODELS = [
   'global.anthropic.claude-sonnet-4-5-20250929-v1:0', 'apac.anthropic.claude-sonnet-4-5-20250929-v1:0', 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
@@ -14,7 +15,11 @@ const tailLabel = (v) => (!v ? 'Off (daily scan only)' : v < 60 ? `${v} min` : `
 export async function settingsPage(ctx) {
   const root = h('div', { class: 'stack-lg settings-page' });
   let d;
-  async function load() { const [x, e] = await Promise.all([get('/settings'), get('/environments')]); d = { ...x, environments: e.environments }; draw(); }
+  async function load() {
+    const owner = session.user?.role === 'owner';
+    const [x, e, sso, maps] = await Promise.all([get('/settings'), get('/environments'), owner ? get('/settings/sso') : null, owner ? get('/sso/mappings') : null]);
+    d = { ...x, environments: e.environments, sso, ssoMappings: maps?.items || [] }; draw();
+  }
 
   function draw() {
     const S = d.settings;
@@ -116,7 +121,7 @@ export async function settingsPage(ctx) {
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      bedrock, history, environmentsCard(d.environments, load));
+      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, environmentsCard(d.environments, load));
     refreshSave();
   }
 
@@ -203,4 +208,108 @@ function environmentsCard(saved, reload) {
     h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Environments'),
       h('p', { class: 'muted small' }, 'What an account can be: the zones in Space, the groups on Radar and the Trust map, the filters on Roles. The order is east to west in Space. Renaming keeps every account where it is.'))),
     box);
+}
+
+// Single sign-on (owners only). JumpCloud fixes the issuer, scopes and claim name, so the preset fills them and the
+// owner pastes the client ID and secret. Signing in with a password keeps working, as the way back in if SSO breaks.
+const JC_STEPS = [
+  'In the JumpCloud admin portal: SSO Applications → Add New Application → Custom OIDC App. Name it Curious Monkey.',
+  'On the SSO tab, paste the Redirect URI and Login URL below. Client authentication type: Client Secret Basic.',
+  'Attribute mapping: tick the Email and Profile standard scopes. Turn on Include group attribute and name it groups.',
+  'On the User Groups tab, tick the groups that should get in. Activate, then copy the client ID and secret here (JumpCloud shows the secret once).',
+  'Map those group names to roles on the Members page. Someone in no mapped group is turned away.',
+];
+function ssoCard(v, mappings, reload) {
+  const P = v.presets;
+  const st = { provider: v.provider, enabled: v.source === 'none' ? true : v.enabled };
+  const regionOf = (iss) => Object.entries(P.jumpcloud.issuers).find(([, u]) => u === iss)?.[0] || 'us';
+  const err = h('div', { class: 'err', role: 'alert' });
+  const result = h('div', { class: 'test-result' });
+  const provider = h('select', null, Object.entries(P).map(([k, p]) => h('option', { value: k, selected: k === v.provider }, p.label)));
+  const region = h('select', null, [['us', 'US (default)'], ['eu', 'EU'], ['in', 'India']].map(([k, l]) => h('option', { value: k, selected: k === regionOf(v.issuer) }, l)));
+  const issuer = h('input', { value: v.issuer || P[v.provider].issuers.us || '', class: 'mono', spellcheck: 'false', placeholder: 'https://idp.example.com/' });
+  const clientId = h('input', { value: v.clientId || '', class: 'mono', spellcheck: 'false', autocomplete: 'off' });
+  const secret = h('input', { type: 'password', autocomplete: 'new-password', placeholder: v.hasSecret ? 'Saved. Leave empty to keep it.' : 'Paste the client secret' });
+  const groups = h('input', { value: v.groupsClaim || P[v.provider].groupsClaim, class: 'mono', spellcheck: 'false' });
+  const scopes = h('input', { value: v.source === 'none' ? P[v.provider].scopes : v.scopes, class: 'mono', spellcheck: 'false' });
+  const label = h('input', { value: v.buttonLabel || (v.provider === 'jumpcloud' ? 'JumpCloud' : ''), maxlength: '60', placeholder: 'company SSO' });
+  const on = h('input', { type: 'checkbox', checked: st.enabled });
+  const regionField = h('div', { class: 'field' }, h('label', null, 'JumpCloud region', region), h('span', { class: 'hint' }, 'Where your JumpCloud organisation lives. Sets the issuer.'));
+  const steps = h('details', { class: 'sso-steps', open: v.source === 'none' }, h('summary', null, 'Set up the app in JumpCloud'), h('ol', { class: 'small' }, JC_STEPS.map((t) => h('li', null, t))));
+  const sync = () => {
+    const jc = provider.value === 'jumpcloud';
+    regionField.hidden = !jc; steps.hidden = !jc;
+    issuer.readOnly = jc;
+    if (jc) issuer.value = P.jumpcloud.issuers[region.value];
+  };
+  provider.addEventListener('change', () => {
+    const p = P[provider.value];
+    scopes.value = p.scopes; groups.value = p.groupsClaim;
+    if (provider.value === 'jumpcloud' && !label.value) label.value = 'JumpCloud';
+    if (provider.value !== 'jumpcloud' && issuer.readOnly) issuer.value = '';
+    sync();
+  });
+  region.addEventListener('change', sync);
+  sync();
+
+  const copyRow = (name, value) => h('div', { class: 'field' }, h('label', null, name),
+    h('div', { class: 'row', style: 'gap:6px' }, h('input', { readonly: true, value, class: 'mono', onFocus: (e) => e.target.select() }), h('button', { class: 'btn sm', type: 'button', onClick: () => copy(value) }, 'Copy')));
+
+  const test = h('button', { class: 'btn', type: 'button', onClick: async () => {
+    test.disabled = true; result.replaceChildren(h('span', { class: 'spin' }), ' Reading the provider’s discovery document…');
+    try {
+      const r = await post('/settings/sso/test', { issuer: issuer.value, groupsClaim: groups.value });
+      result.replaceChildren(r.ok
+        ? h('div', { class: `alert ${r.notes.length ? 'warn' : 'ok'}` }, h('b', null, 'The provider answered. '), `Issuer ${r.issuer}.`, ...r.notes.map((n) => h('div', null, n)))
+        : h('div', { class: 'alert bad' }, h('b', null, 'Could not reach the provider. '), r.message));
+    } catch (e) { result.replaceChildren(h('div', { class: 'alert bad' }, e.message)); }
+    test.disabled = false;
+  } }, 'Check issuer');
+
+  const save = h('button', { class: 'btn primary', type: 'submit' }, 'Save single sign-on');
+  const form = h('form', { class: 'stack', onSubmit: async (e) => {
+    e.preventDefault(); err.textContent = ''; save.disabled = true;
+    try {
+      await api('PUT', '/settings/sso', { enabled: on.checked, provider: provider.value, issuer: issuer.value, clientId: clientId.value, clientSecret: secret.value || undefined,
+        groupsClaim: groups.value, scopes: scopes.value, buttonLabel: label.value || undefined });
+      toast(on.checked ? 'Single sign-on saved. The sign-in page now shows its button.' : 'Saved. Single sign-on is off.');
+      await reload();
+    } catch (x) { err.textContent = x.message; save.disabled = false; }
+  } },
+    h('div', { class: 'field' }, h('label', { class: 'check' }, on, h('span', null, 'Offer single sign-on on the sign-in page')),
+      h('span', { class: 'hint' }, 'Password sign-in keeps working, so an owner can still get in if the provider is down or misconfigured.')),
+    h('div', { class: 'field' }, h('label', null, 'Identity provider', provider)), regionField,
+    h('div', { class: 'field' }, h('label', null, 'Issuer', issuer), h('span', { class: 'hint' }, 'Must match the provider exactly, trailing slash included.')),
+    h('div', { class: 'field' }, h('label', null, 'Client ID', clientId)),
+    h('div', { class: 'field' }, h('label', null, 'Client secret', secret), h('span', { class: 'hint' }, 'Stored encrypted. It is never shown again, here or in the audit log.')),
+    h('div', { class: 'field' }, h('label', null, 'Groups claim', groups), h('span', { class: 'hint' }, 'The name of the claim that lists the user’s groups. For JumpCloud: the name you gave the group attribute.')),
+    h('details', null, h('summary', { class: 'small' }, 'More'),
+      h('div', { class: 'stack', style: 'margin-top:10px' },
+        h('div', { class: 'field' }, h('label', null, 'Scopes', scopes), h('span', { class: 'hint' }, 'JumpCloud: openid email profile. Groups come from the group attribute, not a scope.')),
+        h('div', { class: 'field' }, h('label', null, 'Button text', label), h('span', { class: 'hint' }, 'Shown as “Sign in with …”.')))),
+    err,
+    h('div', { class: 'row' }, test, h('span', { class: 'spacer' }),
+      v.source === 'saved' && h('button', { class: 'btn', type: 'button', title: v.envSet ? 'Use the OIDC_* environment variables again' : 'Turn single sign-on off and forget these values', onClick: async () => {
+        if (!confirm(v.envSet ? 'Forget these values and use the OIDC_* environment variables again?' : 'Forget these values? Single sign-on turns off.')) return;
+        await api('DELETE', '/settings/sso'); toast('Removed.'); await reload();
+      } }, v.envSet ? 'Use environment instead' : 'Remove'),
+      save),
+    result);
+
+  const badge = v.enabled ? (v.source === 'env' ? ['b-neutral', 'On (environment)'] : ['b-green', 'On']) : ['b-neutral', 'Off'];
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Single sign-on'),
+      h('p', { class: 'muted small' }, 'Let people sign in with your identity provider (OIDC). Their groups decide their role. Only owners see this.')),
+      h('span', { class: `badge ${badge[0]}` }, badge[1])),
+    h('div', { class: 'card-b settings-grid' },
+      form,
+      h('div', { class: 'stack' },
+        h('p', { class: 'small muted' }, 'Give your identity provider these two addresses:'),
+        copyRow('Redirect URI', v.redirectUri), copyRow('Login URL', v.loginUrl),
+        steps,
+        h('div', { class: `alert ${mappings.length ? 'ok' : 'warn'}` },
+          mappings.length ? `${mappings.length} group${mappings.length === 1 ? '' : 's'} mapped to roles: ${mappings.map((m) => m.group_name).join(', ')}. ` : 'No groups are mapped to roles yet, so nobody can get in with SSO. ',
+          h('a', { href: '#/members' }, 'Group mappings on Members')),
+        v.source === 'env' && h('p', { class: 'small muted' }, 'Now set by the OIDC_* environment variables. Saving here overrides them.'),
+        v.updatedAt && h('p', { class: 'small muted' }, `Changed here ${ago(v.updatedAt)}.`))));
 }

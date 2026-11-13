@@ -8,6 +8,7 @@ import { hashPassword, verifyPassword, encrypt, decrypt, sha256, sign, unsign, r
 import * as totp from '../auth/totp.js';
 import { createSession, destroySession, requireUser, needsMfaSetup, throttle } from '../auth/sessions.js';
 import { PERMS } from '../auth/rbac.js';
+import { ssoVersion } from '../sso.js';
 
 export const auth = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -22,7 +23,7 @@ const domainOk = (e) => !config.allowedEmailDomains.length || config.allowedEmai
 auth.get('/state', wrap(async (req, res) => {
   const users = (await query('SELECT count(*)::int n FROM users')).rows[0].n;
   const ws = (await query('SELECT name FROM workspace')).rows[0];
-  res.json({ needsSetup: users === 0, workspace: ws?.name || null, oidc: oidcEnabled(), signupOpen: users === 0 });
+  res.json({ needsSetup: users === 0, workspace: ws?.name || null, oidc: oidcEnabled(), oidcLabel: config.oidc.buttonLabel || null, signupOpen: users === 0 });
 }));
 
 auth.get('/invite/:token', wrap(async (req, res) => {
@@ -75,6 +76,39 @@ auth.post('/signin', wrap(async (req, res) => {
   res.json({ user: publicUser(u), csrf });
 }));
 
+// ---------- password reset (link made by an owner on the Members page) ----------
+const liveReset = `SELECT r.*, u.email, u.password_hash, u.disabled FROM password_resets r JOIN users u ON u.id=r.user_id
+                   WHERE r.token_hash=$1 AND r.used_at IS NULL AND r.expires_at > now()`;
+const badLink = { error: 'reset_invalid', message: 'This reset link is invalid, already used, or expired. Ask a workspace owner for a new one.' };
+
+auth.get('/reset/:token', wrap(async (req, res) => {
+  const k = throttle.key(req, 'reset');
+  if (throttle.blocked(k)) return res.status(429).json({ error: 'too_many_attempts', message: 'Too many attempts. Try again in 15 minutes.' });
+  const r = (await query(liveReset, [sha256(String(req.params.token).slice(0, 200))])).rows[0];
+  if (!r || r.disabled) { throttle.fail(k); return res.status(404).json(badLink); }
+  res.json({ email: r.email, resetMfa: r.reset_mfa, expiresAt: r.expires_at });
+}));
+
+auth.post('/reset', wrap(async (req, res) => {
+  const b = z.object({ token: z.string().min(10).max(200), password }).parse(req.body);
+  const k = throttle.key(req, 'reset');
+  if (throttle.blocked(k)) return res.status(429).json({ error: 'too_many_attempts', message: 'Too many attempts. Try again in 15 minutes.' });
+  const out = await tx(async (c) => {
+    const r = (await c.query(`${liveReset} FOR UPDATE OF r`, [sha256(b.token)])).rows[0];
+    if (!r || r.disabled) return { fail: badLink, status: 404 };
+    if (r.password_hash && verifyPassword(b.password, r.password_hash)) return { fail: { error: 'same_password', message: 'Choose a password different from your old one.' }, status: 400 };
+    await c.query(`UPDATE users SET password_hash=$2${r.reset_mfa ? ', totp_secret=NULL, totp_confirmed=false' : ''} WHERE id=$1`, [r.user_id, hashPassword(b.password)]);
+    await c.query('UPDATE password_resets SET used_at=now() WHERE token_hash=$1', [r.token_hash]);
+    await c.query('DELETE FROM password_resets WHERE user_id=$1 AND used_at IS NULL', [r.user_id]);
+    await c.query('DELETE FROM sessions WHERE user_id=$1', [r.user_id]);                 // signed out everywhere
+    return { r };
+  });
+  if (out.fail) { if (out.status === 404) throttle.fail(k); return res.status(out.status).json(out.fail); }
+  throttle.clear(throttle.key(req, out.r.email));
+  await audit(req, 'auth.password_reset', { type: 'user', id: out.r.user_id }, { email: out.r.email, resetMfa: out.r.reset_mfa });
+  res.json({ ok: true, email: out.r.email, mfaReset: out.r.reset_mfa });
+}));
+
 auth.post('/signout', wrap(async (req, res) => { await audit(req, 'auth.signout'); await destroySession(req, res); res.json({ ok: true }); }));
 
 auth.get('/me', wrap(async (req, res) => {
@@ -100,8 +134,10 @@ auth.post('/mfa/confirm', requireUser, wrap(async (req, res) => {
 }));
 
 // ---- OIDC (sign in with your IdP). Stateless: the login state rides in a signed, short-lived cookie. ----
-let clientP;
+// Rebuilt when an owner changes the setup on the Configuration page.
+let clientP, clientFor = -1;
 const oidcClient = async () => {
+  if (clientFor !== ssoVersion()) { clientP = null; clientFor = ssoVersion(); }
   if (!clientP) clientP = (async () => {
     const { Issuer } = await import('openid-client');
     const issuer = await Issuer.discover(config.oidc.issuer);

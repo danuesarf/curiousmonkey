@@ -25,6 +25,25 @@ export async function membersPage(ctx) {
           h('div', { class: 'actions' }, h('button', { class: 'btn primary', onClick: () => copy(r.link) }, 'Copy link'), h('button', { class: 'btn', onClick: (ev) => { ev.target.closest('.modal-bg').remove(); ctx.reload(); } }, 'Done'))); } catch (x) { err.textContent = x.message; }
     } }, field('Email', email), field('Role', role), field('Review team', team, 'Required for security reviewers. Decides which approvals they can give.'), field('Accounts they can see', scope, 'Leave empty for all accounts.'), err, h('button', { class: 'btn primary', type: 'submit' }, 'Create invite')), h('span'));
   };
+  // Owners only: a single-use link the member opens to choose a new password. Shown once, not emailed.
+  const reset = (u) => {
+    const mfa = h('input', { type: 'checkbox' });
+    const err = h('div', { class: 'err', role: 'alert' });
+    const m3 = modal(`Reset password for ${u.name}`, h('form', { class: 'stack', onSubmit: async (e) => { e.preventDefault(); err.textContent = '';
+      try {
+        const r = await post(`/members/${u.id}/reset-password`, { resetMfa: mfa.checked });
+        m3.remove();
+        const box = modal('Reset link ready', h('div', { class: 'stack' },
+          h('p', null, `Send this to ${r.email} yourself, over a channel you trust. It works once and expires in ${r.expiresInHours} hours. Their current password keeps working until they use it.`),
+          r.resetMfa && h('p', { class: 'small muted' }, 'Using it also resets their two-factor sign-in.'),
+          h('input', { readonly: true, value: r.link, onFocus: (ev) => ev.target.select(), 'aria-label': 'Reset link' }),
+          h('p', { class: 'small muted' }, 'This is the only time the link is shown. Making a new one cancels this one.'),
+          h('div', { class: 'actions' }, h('button', { class: 'btn primary', type: 'button', onClick: () => copy(r.link) }, 'Copy link'), h('button', { class: 'btn', type: 'button', onClick: () => box.remove() }, 'Done'))), h('span'));
+      } catch (x) { err.textContent = x.message; } } },
+      h('p', null, `Creates a link ${u.email} opens to choose a new password. Nothing changes until they use it; then all their sessions are signed out.`),
+      h('label', { class: 'row' }, mfa, h('span', null, 'Also reset their two-factor sign-in (they lost their authenticator app)')),
+      err, h('button', { class: 'btn primary', type: 'submit' }, 'Create reset link')), h('span'));
+  };
   const edit = (u) => {
     const role = h('select', null, Object.keys(ROLE_LABEL).map((r) => h('option', { value: r, selected: r === u.role }, ROLE_LABEL[r])));
     const team = h('select', null, [['', 'No team'], ...Object.entries(TEAM)].map(([v, l]) => h('option', { value: v, selected: v === (u.team || '') }, l)));
@@ -44,6 +63,7 @@ export async function membersPage(ctx) {
         h('td', null, ROLE_LABEL[u.role], u.disabled && h('span', { class: 'badge b-high' }, 'disabled')), h('td', null, u.team ? TEAM[u.team] : '—'), h('td', { class: 'small' }, scopeLabel(u.scope_accounts)),
         h('td', null, u.totp_confirmed ? h('span', { class: 'badge b-green' }, 'on') : u.sso ? 'via SSO' : h('span', { class: 'badge b-medium' }, 'not set up')), h('td', { class: 'small' }, ago(u.last_login_at)),
         h('td', { class: 'right' }, h('div', { class: 'row' }, h('button', { class: 'btn sm', onClick: () => edit(u) }, 'Edit'),
+          isOwner && !u.sso && !u.disabled && h('button', { class: 'btn sm', title: 'Make a single-use link to choose a new password', onClick: () => reset(u) }, 'Reset password'),
           h('button', { class: 'btn sm', onClick: async () => { await api('PATCH', `/members/${u.id}`, { disabled: !u.disabled }); ctx.reload(); } }, u.disabled ? 'Enable' : 'Disable')))))))),
       m.invites.length > 0 && h('div', { class: 'card-b' }, h('h3', null, 'Pending invites'), h('ul', { class: 'plain' }, m.invites.map((i) => h('li', { class: 'small' }, `${i.email} as ${ROLE_LABEL[i.role]}, expires ${fmtDate(i.expires_at)}`))))),
     h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'What each role can do')), h('div', { class: 'scroll' }, h('table', null,

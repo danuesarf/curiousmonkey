@@ -8,6 +8,7 @@ import { requireUser, requirePerm } from '../auth/sessions.js';
 import { current, saveSettings, effectiveLookback, EVENT_HISTORY_MAX_DAYS, LOOKBACK_CEILING_DAYS, SLICE_CHOICES } from '../settings.js';
 import { historyFor } from '../history.js';
 import { environments, environmentsWithCounts, saveEnvironments } from '../environments.js';
+import { ssoView, saveSso, clearSso } from '../sso.js';
 
 export const settings = Router();
 settings.use(requireUser);
@@ -80,6 +81,43 @@ settings.put('/environments', requirePerm('settings'), wrap(async (req, res) => 
 }));
 
 /** One tiny Converse call with the given (or saved) region and model. Nothing is saved. */
+// ---------- single sign-on (owner only: whoever sets the identity provider decides who can get in) ----------
+settings.get('/settings/sso', requirePerm('sso'), (req, res) => res.json(ssoView()));
+
+settings.put('/settings/sso', requirePerm('sso'), wrap(async (req, res) => {
+  const r = await saveSso(req.body, req.user.id);
+  if (r.errors) return res.status(400).json({ error: 'invalid', message: Object.values(r.errors)[0], fields: r.errors });
+  const v = ssoView();
+  await audit(req, 'settings.sso', { type: 'settings' }, { changed: r.changed, enabled: v.enabled, provider: v.provider, issuer: v.issuer, clientId: v.clientId });
+  res.json(v);
+}));
+
+settings.delete('/settings/sso', requirePerm('sso'), wrap(async (req, res) => {
+  if (await clearSso()) await audit(req, 'settings.sso_cleared', { type: 'settings' });
+  res.json(ssoView());
+}));
+
+/** Fetch the provider's discovery document: proves the issuer is right before anyone is locked out. */
+settings.post('/settings/sso/test', requirePerm('sso'), wrap(async (req, res) => {
+  const { issuer, groupsClaim } = z.object({ issuer: z.string().trim().url().max(300).refine((u) => u.startsWith('https://'), 'The issuer must use https.'), groupsClaim: z.string().max(100).optional() }).parse(req.body);
+  try {
+    const { Issuer, custom } = await import('openid-client');
+    custom.setHttpOptionsDefaults({ timeout: 8000 });
+    const found = await Issuer.discover(issuer);
+    const m = found.metadata;
+    const notes = [];
+    if (m.issuer !== issuer) notes.push(`The provider calls itself ${m.issuer}. Use exactly that, including any trailing slash.`);
+    if (!(m.code_challenge_methods_supported || ['S256']).includes('S256')) notes.push('The provider does not list PKCE (S256); sign-in may fail.');
+    if (groupsClaim && m.claims_supported && !m.claims_supported.includes(groupsClaim))
+      notes.push(`"${groupsClaim}" is not in the provider's list of standard claims. That is normal for JumpCloud: turn on the group attribute in the app and give it this exact name.`);
+    await audit(req, 'settings.sso_test', { type: 'settings' }, { issuer, ok: true });
+    res.json({ ok: true, issuer: m.issuer, authorization: m.authorization_endpoint, token: m.token_endpoint, scopes: m.scopes_supported || [], notes });
+  } catch (e) {
+    await audit(req, 'settings.sso_test', { type: 'settings' }, { issuer, ok: false, error: e.name });
+    res.json({ ok: false, message: `Could not read ${issuer.replace(/\/$/, '')}/.well-known/openid-configuration: ${e.message}` });
+  }
+}));
+
 settings.post('/settings/bedrock/test', requirePerm('settings'), wrap(async (req, res) => {
   const b = z.object({ region: z.string().trim().regex(/^[a-z]{2}(-gov)?-[a-z]+-\d$/).optional(), modelId: z.string().trim().min(3).max(200).regex(/^[\w.:/-]+$/).optional() }).parse(req.body || {});
   const region = b.region || config.ai.region, modelId = b.modelId || config.ai.modelId;

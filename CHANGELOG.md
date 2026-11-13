@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- **Password reset by an owner.** Members → *Reset password* makes a single-use link (24 hours, hash-only storage, token after the `#`) for the member to choose a new password. Using it signs them out everywhere and can reset their two-factor too. Owners only; audited as `member.password_reset_link` and `auth.password_reset`.
+- **Single sign-on on the Configuration page.** Owners set OIDC there instead of only by environment variables, with a JumpCloud preset (issuer per region, scopes, group claim), the redirect and login URLs to copy, a *Check issuer* test and a warning when no group is mapped to a role. The client secret is stored encrypted and never returned. The sign-in button says which provider it is.
 - **Light theme.** A sun/moon button in the top bar switches between the dark theme and a light one: the same design on pale mint paper with deep green ink, with banana kept for buttons and darkened to gold for text. The choice is kept per browser. Drawings (Space, Radar, Track, the sign-in radar) are mapped colour by colour, so every page follows the theme.
 - **IAM Identity Center as one source.** Every account's `AWSSSO_<id>_DO_NOT_DELETE` SAML provider is matched to its Identity Center instance by the issuer in its metadata, and the Trust map and Space draw each instance once, with the account it is managed from.
 - **Warnings for a second Identity Center.** An account that trusts more than one instance, or an instance other than the one most of your accounts use, is a high finding (`finding:idc-multiple`, `finding:idc-other`). Either can mean an account instance turned on inside a member account, or another organisation's.

@@ -224,9 +224,11 @@ async function render() {
   state.leave.forEach((f) => f()); state.leave = [];
   if (notices) { notices = null; }
   bellOpen = false; drawBell();
+  document.querySelectorAll('.modal-bg').forEach((m) => m.remove());   // a dialog belongs to the page it was opened on
   const hash = location.hash;
   const [path, qs] = hash.split('?'); const params = new URLSearchParams(qs || '');
   try {
+    if (path === '#/reset') return mount(authPages.resetPassword(params));
     if (!state.user) {
       try { const me = await get('/auth/me'); state.user = me.user; setCsrf(me.csrf); } catch (e) { if (!(e instanceof ApiError) || e.status !== 401) throw e; }
     }

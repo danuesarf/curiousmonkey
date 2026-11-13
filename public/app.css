@@ -647,3 +647,5 @@ details.sp-legend summary::-webkit-details-marker{display:none}
 /* theme switch in the status bar */
 .theme-btn{flex:none;display:flex;align-items:center;justify-content:center;width:40px;height:40px;padding:0;background:none;border:1px solid var(--edge);color:var(--muted);cursor:pointer;border-radius:var(--radius)}
 .theme-btn:hover{color:var(--ink);border-color:var(--ink)}
+details.sso-steps summary{cursor:pointer;font-weight:600;color:var(--banana)}
+details.sso-steps ol{margin:8px 0 0;padding-left:18px;display:grid;gap:6px;color:var(--muted)}

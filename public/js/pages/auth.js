@@ -43,10 +43,44 @@ export function signIn(st) {
     h('div', { class: 'row' }, logo(), h('b', null, 'Curious Monkey')),
     h('h1', null, 'Sign in'), h('p', { class: 'muted' }, st.workspace ? `Workspace: ${st.workspace}` : 'Review what your IAM roles really use.'),
     field('Work email', email), field('Password', pw), codeField, err, btn,
-    st.oidc && h('a', { class: 'btn', href: '/api/auth/oidc/login' }, 'Sign in with company SSO'),
+    st.oidc && h('a', { class: 'btn', href: '/api/auth/oidc/login' }, st.oidcLabel ? `Sign in with ${st.oidcLabel}` : 'Sign in with company SSO'),
     h('p', { class: 'small muted' }, 'New here? Ask a workspace owner for an invite link.'));
   return h('div', { class: 'auth' }, h('div', { class: 'auth-form' }, form), artPanel());
 }
+
+/** Choose a new password from a link an owner made on the Members page. Works signed in or not. */
+export function resetPassword(params) {
+  const token = params.get('token') || '';
+  const err = h('div', { class: 'err', role: 'alert' });
+  const who = h('p', { class: 'muted' }, 'Checking your link…');
+  const pw = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: '12' });
+  const pw2 = h('input', { type: 'password', autocomplete: 'new-password', required: true, minlength: '12' });
+  const btn = h('button', { class: 'btn primary', type: 'submit', disabled: true }, 'Set new password');
+  const mfaNote = h('p', { class: 'small muted', hidden: true }, 'Your two-factor sign-in was also reset. You will set up your authenticator again after signing in.');
+  get(`/auth/reset/${encodeURIComponent(token)}`).then((r) => {
+    who.textContent = `New password for ${r.email}.`; mfaNote.hidden = !r.resetMfa; btn.disabled = false; pw.focus();
+  }).catch((e) => { who.textContent = ''; err.textContent = e.message; });
+  const form = h('form', { onSubmit: async (e) => {
+    e.preventDefault(); err.textContent = '';
+    if (pw.value !== pw2.value) { err.textContent = 'The two passwords are different.'; return; }
+    btn.disabled = true;
+    try {
+      const r = await post('/auth/reset', { token, password: pw.value });
+      session.user = null; setCsrf('');
+      clearChildren(form);
+      form.append(h('div', { class: 'row' }, logo(), h('b', null, 'Curious Monkey')), h('h1', null, 'Password changed'),
+        h('p', { class: 'muted' }, `Sign in as ${r.email} with your new password. Any other sessions were signed out.`),
+        r.mfaReset && h('p', { class: 'small muted' }, 'You will set up your authenticator app again right after signing in.'),
+        h('a', { class: 'btn primary', href: '#/signin' }, 'Go to sign in'));
+    } catch (x) { err.textContent = x.message; btn.disabled = false; }
+  } },
+    h('div', { class: 'row' }, logo(), h('b', null, 'Curious Monkey')),
+    h('h1', null, 'Choose a new password'), who, mfaNote,
+    field('New password', pw, 'At least 12 characters.'), field('Repeat it', pw2), err, btn,
+    h('a', { href: '#/signin' }, 'Back to sign in'));
+  return h('div', { class: 'auth' }, h('div', { class: 'auth-form' }, form), artPanel());
+}
+const clearChildren = (el) => { while (el.firstChild) el.firstChild.remove(); };
 
 export function signUp(params, st) {
   const invite = params.get('invite');
