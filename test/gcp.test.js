@@ -227,3 +227,22 @@ test('a scan keeps environments set by hand; failures are recorded and retried l
   assert.equal((await owner.call('DELETE', `/api/gcp/connections/${conn}`)).status, 200);
   assert.equal((await owner.get('/api/gcp/principals')).json.total, 0);
 });
+
+test('federation pools: the GKE pool and other managed pools are skipped, and a pool that refuses provider listing never fails the scan', async () => {
+  const { realGcpGateway } = await import('../src/gcp/real.js');
+  const P = 'projects/52/locations/global/workloadIdentityPools';
+  const asked = [];
+  const client = { async request({ url }) {
+    asked.push(url);
+    if (url.endsWith('/workloadIdentityPools?pageSize=100')) return { data: { workloadIdentityPools: [
+      { name: `${P}/acme-stg.svc.id.goog`, state: 'ACTIVE' },                // GKE: listing providers is "not supported"
+      { name: `${P}/trust`, state: 'ACTIVE', mode: 'TRUST_DOMAIN' },
+      { name: `${P}/odd`, state: 'ACTIVE' },
+      { name: `${P}/aws`, state: 'ACTIVE' }] } };
+    if (url.includes('/aws/providers')) return { data: { workloadIdentityPoolProviders: [{ name: `${P}/aws/providers/a1`, state: 'ACTIVE', aws: { accountId: '111111111111' } }] } };
+    throw Object.assign(new Error('RPC Method ListWorkloadIdentityPoolProviders is not supported'), { response: { status: 400, data: { error: { message: 'not supported' } } } });
+  } };
+  const out = await realGcpGateway({ auth_mode: 'key' }, { client }).wifProviders('acme-stg');
+  assert.deepEqual(out.map((p) => p.name), [`${P}/aws/providers/a1`]);
+  assert.ok(!asked.some((u) => /svc\.id\.goog\/providers|trust\/providers/.test(u)), 'managed pools are not asked for providers');
+});

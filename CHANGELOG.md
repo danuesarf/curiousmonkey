@@ -19,6 +19,9 @@
 - **Environments are yours to edit.** Add, rename, recolour, reorder or remove environments on the Configuration page. Removing one that accounts use asks where to move them.
 - **Space: what you pick stands out.** Picking an account, role, service, outside identity or path keeps it and everything connected to it lit, and fades the rest. The page still opens with the whole scene lit.
 
+### Fixed
+- **Google Cloud scans failed on any project with GKE.** The scanner asked the GKE workload identity pool (`<project>.svc.id.goog`) for its providers, which Google refuses with a 400, and the whole scan stopped. Google-managed pools are now skipped, and a pool that cannot list its providers is skipped instead of failing the scan.
+
 ### Changed
 - **Accounts: AWS | Google Cloud tabs.** Google Cloud connections moved from the bottom of the Accounts page to their own tab there, where they are connected and edited. The Roles page's Google Cloud tab links to it instead of offering its own *Connect* button.
 - **Space, easier to read.** The right-hand panel now leads with one sentence, the key numbers, then who can get in (from outside your org and from your other accounts, separately) and where it goes. With nothing picked it shows an overview and what to check first. The legend is folded away.

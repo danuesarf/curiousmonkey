@@ -43,8 +43,8 @@ function limiter(n) {
   return (fn) => new Promise((ok, ko) => { queue.push({ fn, ok, ko }); next(); });
 }
 
-export function realGcpGateway(conn) {
-  let clientP;
+export function realGcpGateway(conn, { client: injected } = {}) {
+  let clientP = injected ? Promise.resolve(injected) : null;
   const limit = limiter(8);
   const call = (method, url, data) => limit(async () => {
     clientP ||= gcpClient(conn);
@@ -67,7 +67,7 @@ export function realGcpGateway(conn) {
     } while (token);
     return out;
   };
-  const optional = async (p, fallback) => { try { return await p; } catch (e) { if (e.status === 403 || e.status === 404) return fallback; throw e; } };
+  const optional = async (p, fallback, also = []) => { try { return await p; } catch (e) { if (e.status === 403 || e.status === 404 || also.includes(e.status)) return fallback; throw e; } };
 
   return {
     async organization(id) { return call('GET', `${CRM}/organizations/${id}`); },
@@ -84,8 +84,13 @@ export function realGcpGateway(conn) {
     async wifProviders(projectId) {
       const pools = await optional(pages(`${IAM}/projects/${projectId}/locations/global/workloadIdentityPools?pageSize=100`, 'workloadIdentityPools'), []);
       const out = [];
-      for (const pool of pools.filter((p) => p.state !== 'DELETED')) {
-        for (const pv of await optional(pages(`${IAM}/${pool.name}/providers?pageSize=100`, 'workloadIdentityPoolProviders'), [])) {
+      // Google-managed pools hold no providers, and listing them is refused with a 400: the GKE workload identity pool
+      // <project>.svc.id.goog that every GKE project gets, and trust-domain pools. GKE identities are read from IAM bindings.
+      const managed = (p) => /\.svc\.id\.goog$/.test(p.name) || (p.mode && p.mode !== 'FEDERATION_ONLY');
+      for (const pool of pools.filter((p) => p.state !== 'DELETED' && !managed(p))) {
+        // any other pool that cannot list providers is skipped too: one pool never fails the whole scan
+        const providers = await optional(pages(`${IAM}/${pool.name}/providers?pageSize=100`, 'workloadIdentityPoolProviders'), [], [400]);
+        for (const pv of providers) {
           if (pv.state !== 'DELETED') out.push({ ...pv, disabled: pv.disabled || pool.disabled });
         }
       }
