@@ -273,25 +273,37 @@ data.get('/accounts/:id/data-events', requirePerm('view'), wrap(async (req, res)
 
 // ---------- event coverage and event-name mappings ----------
 const COVER = ['events', 'assume_events', 'role_calls', 'recovered_role', 'other_role', 'not_role', 'no_permission', 'unmapped', 'no_resources'];
-data.get('/accounts/:id/coverage', requirePerm('view'), wrap(async (req, res) => {
-  const a = await accountFor(req, req.params.id);
-  const days = z.coerce.number().int().min(1).max(730).default(30).parse(req.query.days || undefined);
+/** Coverage totals, per-region totals and the unidentified event names for one or more accounts (one account, or every account a member can see). */
+async function coverageFor(ids, days) {
   const sum = COVER.map((c) => `sum(${c})::bigint AS ${c}`).join(', ');
   const [tot, reg, un] = await Promise.all([
-    query(`SELECT ${sum}, min(day) AS first_day, max(day) AS last_day FROM event_coverage WHERE account_id=$1 AND day >= current_date - $2::int`, [a.id, days]),
-    query(`SELECT region, ${sum} FROM event_coverage WHERE account_id=$1 AND day >= current_date - $2::int GROUP BY region ORDER BY region`, [a.id, days]),
-    query(`SELECT u.raw_action, u.event_source, u.event_name, u.count, u.first_seen, u.last_seen, u.identity_type, u.param_keys,
+    query(`SELECT ${sum}, min(day) AS first_day, max(day) AS last_day FROM event_coverage WHERE account_id = ANY($1) AND day >= current_date - $2::int`, [ids, days]),
+    query(`SELECT region, ${sum} FROM event_coverage WHERE account_id = ANY($1) AND day >= current_date - $2::int GROUP BY region ORDER BY region`, [ids, days]),
+    query(`SELECT u.account_id, ca.name AS account_name, u.raw_action, u.event_source, u.event_name, u.count, u.first_seen, u.last_seen, u.identity_type, u.param_keys,
              (SELECT count(DISTINCT d.role_id)::int FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=u.account_id AND d.action=u.raw_action) AS roles,
              CASE WHEN m.raw_action IS NULL THEN NULL ELSE json_build_object('action', m.action, 'status', m.status, 'source', m.source, 'confidence', m.confidence, 'note', m.note, 'decided_at', m.decided_at, 'reopen_at', m.reopen_at,
                'decided_by', (SELECT name FROM users WHERE id=m.decided_by)) END AS mapping,
              CASE WHEN m.raw_action IS NULL THEN 'open' WHEN m.status='suggested' THEN 'suggested' WHEN m.status='accepted' THEN 'identified'
                   WHEN m.reopen_at < now() AND u.last_seen > m.decided_at THEN 'reopened' ELSE 'unresolved' END AS state,
              (SELECT array_agg(DISTINCT r.name) FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE r.account_id=u.account_id AND d.action=u.raw_action) AS role_names
-           FROM unmapped_events u LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
-           WHERE u.account_id=$1 ORDER BY (m.status='accepted') NULLS FIRST, u.count DESC LIMIT 500`, [a.id]),
+           FROM unmapped_events u JOIN cloud_accounts ca ON ca.id=u.account_id LEFT JOIN event_action_map m ON m.raw_action=u.raw_action
+           WHERE u.account_id = ANY($1) ORDER BY (m.status='accepted') NULLS FIRST, u.count DESC LIMIT 500`, [ids]),
   ]);
   const num = (r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, COVER.includes(k) ? Number(v || 0) : v]));
-  res.json({ days, totals: num(tot.rows[0]), regions: reg.rows.map(num), unmapped: un.rows, bedrockEnabled: config.ai.enabled });
+  return { totals: num(tot.rows[0]), regions: reg.rows.map(num), unmapped: un.rows, bedrockEnabled: config.ai.enabled };
+}
+const daysParam = (req) => z.coerce.number().int().min(1).max(730).default(30).parse(req.query.days || undefined);
+data.get('/accounts/:id/coverage', requirePerm('view'), wrap(async (req, res) => {
+  const a = await accountFor(req, req.params.id);
+  const days = daysParam(req);
+  res.json({ days, ...(await coverageFor([a.id], days)) });
+}));
+// The same for every account the member can see: the estate-wide Unidentified calls page.
+data.get('/coverage', requirePerm('view'), wrap(async (req, res) => {
+  const days = daysParam(req);
+  const p = [];
+  const ids = (await query(`SELECT a.id FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', p)}`, p)).rows.map((r) => r.id);
+  res.json({ days, ...(await coverageFor(ids, days)) });
 }));
 
 data.post('/accounts/:id/unmapped/suggest', requirePerm('decide'), wrap(async (req, res) => {

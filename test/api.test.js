@@ -200,6 +200,20 @@ test('RBAC: an auditor can read but not change anything; a scoped account owner 
   const other = (await owner.get(`/api/roles?accounts=${accA}&q=payments`)).json.items[0].id;
   assert.equal((await scoped.get(`/api/roles/${other}`)).status, 404);                 // not 403: existence is not revealed
   assert.equal((await scoped.get('/api/accounts')).json.items.length, 1);
+  // unidentified calls across the estate: everything for a member who sees everything, only their account for a scoped one
+  const ins = (acct, raw, name) => db.query(`INSERT INTO unmapped_events(account_id, raw_action, event_source, event_name, count, first_seen, last_seen) VALUES ($1,$2,'estate.amazonaws.com',$3,3,now(),now())`, [acct, raw, name]);
+  await ins(accA, 'estate:EstateOnlyInA', 'EstateOnlyInA'); await ins(accB, 'estate:EstateOnlyInB', 'EstateOnlyInB');
+  try {
+    const all = (await owner.get('/api/coverage?days=30')).json;
+    assert.deepEqual(all.unmapped.filter((u) => u.raw_action.startsWith('estate:')).map((u) => u.raw_action).sort(), ['estate:EstateOnlyInA', 'estate:EstateOnlyInB']);
+    assert.ok(all.unmapped.every((u) => u.account_id && u.account_name), 'each name says which account it was seen in');
+    const mineB = (await scoped.get('/api/coverage')).json.unmapped.filter((u) => u.raw_action.startsWith('estate:'));
+    assert.deepEqual(mineB.map((u) => u.raw_action), ['estate:EstateOnlyInB']);
+    const one = (await owner.get(`/api/accounts/${accA}/coverage`)).json;                  // the per-account answer is unchanged
+    assert.deepEqual(one.unmapped.filter((u) => u.raw_action.startsWith('estate:')).map((u) => u.raw_action), ['estate:EstateOnlyInA']);
+    assert.equal((await scoped.get(`/api/accounts/${accA}/coverage`)).status, 404);
+    assert.equal((await new Client().get('/api/coverage')).status, 401);
+  } finally { await db.query(`DELETE FROM unmapped_events WHERE raw_action LIKE 'estate:%'`); }
   reviewerClient = await mk('rev@kbi.id', 'reviewer', { team: 'infrasec' });
 });
 

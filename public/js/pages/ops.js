@@ -18,11 +18,10 @@ export async function opsPage(ctx) {
       !alive.length && h('div', { class: 'alert bad' }, 'No worker has checked in recently. Queued scans will wait until one starts.'),
       o.oldestWaitingSeconds > 600 && h('div', { class: 'alert warn' }, `The oldest waiting job has been queued for ${secs(o.oldestWaitingSeconds)}. Add worker replicas or check the worker logs.`),
       h('div', { class: 'tiles' }, ...['queued', 'running', 'succeeded', 'failed', 'dead'].map((k) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, `Jobs ${k}`), h('b', null, num(o.jobs[k] || 0)))),
-        h('div', { class: 'tile' }, h('span', { class: 'small muted' }, 'Workers alive'), h('b', null, `${alive.length}`), h('span', { class: 'tiny muted' }, `${o.succeededLastHour} jobs done in the last hour`))),
+        h('div', { class: 'tile' }, h('span', { class: 'small muted' }, 'Workers alive'), h('b', null, `${alive.length}`), h('span', { class: 'tiny muted' }, `${o.succeededLastHour} jobs done in the last hour`), h('a', { class: 'tiny', href: '#/operations/workers' }, 'Workers →'))),
       h('p', { class: 'small muted' }, o.tail.everyMinutes > 0
         ? `Catch-up reads: every ${o.tail.everyMinutes} min each finished account reads only the CloudTrail events that arrived since its last read. ${o.tail.lastHour} done in the last hour${o.tail.open ? `, ${o.tail.open} in progress` : ''}${o.tail.last ? `, last ${ago(o.tail.last)}` : ''}. They are left out of the list below unless one fails.`
         : 'Catch-up reads are off: new CloudTrail events are read by the daily scan only. Turn them on in Configuration.'),
-      workersCard(o.workers, alive, draw),
       h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Recent scans')), h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Account', 'Trigger', 'Status', 'Jobs', 'Started', 'Duration', ''].map((x) => h('th', null, x)))),
         h('tbody', null, o.runs.map((r) => h('tr', { class: 'link', onClick: () => { openRun = openRun === r.id ? null : r.id; draw(); } },
           h('td', null, h('div', { class: 'name' }, r.account_name), h('div', { class: 'tiny muted' }, r.aws_account_id)), h('td', null, r.trigger === 'tail' ? 'catch-up' : r.trigger), h('td', null, h('span', { class: `badge ${ST[r.status]}` }, r.status)),
@@ -95,19 +94,4 @@ const etaText = (s) => (s < 60 ? 'under a minute' : s < 3600 ? `about ${Math.rou
 export function runEta(jobs) {
   const etas = jobs.filter((j) => j.status === 'running' && j.progress?.etaSeconds != null).map((j) => j.progress.etaSeconds);
   return etas.length ? Math.max(...etas) : null;
-}
-
-// Live workers only, by default: every redeploy leaves ended workers behind. Ended ones open 20 at a time.
-const ended = { open: false, shown: 20 };
-function workersCard(all, alive, redraw) {
-  const gone = all.filter((w) => !w.alive);
-  const rows = [...alive, ...(ended.open ? gone.slice(0, ended.shown) : [])];
-  const row = (w) => h('tr', { class: w.alive ? null : 'muted' }, h('td', { class: 'mono small' }, w.id), h('td', null, h('span', { class: `dot ${w.alive ? 'ok' : 'bad'}` }), ' ', w.alive ? (w.current_job ? 'working' : 'idle') : w.end_reason || (w.stopped_at ? 'stopped' : 'lost')),
-    h('td', { class: 'small' }, ago(w.heartbeat_at)), h('td', null, w.jobs_done), h('td', null, w.jobs_failed), h('td', { class: 'small' }, ago(w.started_at)));
-  return h('section', { class: 'card' },
-    h('div', { class: 'card-h row' }, h('h2', null, `Workers · ${alive.length} live`), h('span', { class: 'grow' }),
-      gone.length > 0 && h('button', { class: 'btn sm', 'aria-expanded': String(ended.open), onClick: () => { ended.open = !ended.open; ended.shown = 20; redraw(); } }, ended.open ? 'Hide ended' : `Show ${gone.length} ended, last 24 h`)),
-    rows.length ? h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, ['Worker', 'Status', 'Heartbeat', 'Done', 'Failed', 'Started'].map((x) => h('th', null, x)))), h('tbody', null, rows.map(row))))
-      : h('div', { class: 'card-b empty' }, all.length ? 'No live worker. Ended ones are hidden.' : 'No worker has registered yet.'),
-    ended.open && gone.length > ended.shown && h('div', { class: 'card-f' }, h('button', { class: 'btn sm', onClick: () => { ended.shown += 20; redraw(); } }, `Show ${Math.min(20, gone.length - ended.shown)} more of ${gone.length - ended.shown}`)));
 }

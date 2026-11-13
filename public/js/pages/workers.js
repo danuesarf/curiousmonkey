@@ -1,5 +1,5 @@
-// Health: the database (disk left, size and growth, connections, vacuum) and the workers (memory, CPU, event loop),
-// what is being read right now, and what to change.
+// Operations → Workers and Database: the workers (memory, CPU, event loop, what is being read right now, what to change)
+// and the database (disk left, size and growth, connections, vacuum).
 import { h, svg, get, num, ago, fmtDate } from '../lib.js';
 
 const MB = 1024 * 1024;
@@ -10,24 +10,23 @@ const LEVEL = { critical: ['Critical', 'lv-critical', '!'], warning: ['Warning',
 const AREA = { memory: 'Memory', cpu: 'CPU', capacity: 'Capacity', reading: 'Reading', setup: 'Setup', disk: 'Disk', database: 'Database' };
 const ORDER = { critical: 0, warning: 1, info: 2, good: 3 };
 
+// The Workers tab of Operations: what needs attention for the workers, then every worker.
 export async function workersPage(ctx) {
   let range = '1h';
   const root = h('div', { class: 'stack-lg workers-page' });
   async function draw() {
-    const [d, db] = await Promise.all([get(`/ops/workers?range=${range}`), get('/ops/database').catch((e) => ({ error: e.message }))]);
-    // one list of what needs attention: the database's and the workers', worst first, one 'all good' at most
-    const advice = [...(db.advice || []), ...d.advice].sort((a, b) => ORDER[a.level] - ORDER[b.level]);
+    const d = await get(`/ops/workers?range=${range}`);
+    const advice = [...d.advice].sort((a, b) => ORDER[a.level] - ORDER[b.level]);
     const real = advice.filter((a) => a.level !== 'good');
     const alive = d.workers.filter((w) => w.alive);
     const gone = d.workers.filter((w) => !w.alive);
     const rangeBtns = h('div', { class: 'seg', role: 'group', 'aria-label': 'Chart range' }, ['1h', '6h', '24h'].map((r) =>
       h('button', { class: r === range ? 'on' : '', 'aria-pressed': String(r === range), onClick: () => { range = r; draw(); } }, r)));
     root.replaceChildren(
-      h('header', { class: 'head row' }, h('div', null, h('div', { class: 'eyebrow' }, 'HEALTH'), h('h1', null, 'Database and workers'),
-        h('p', { class: 'muted' }, 'Disk left under the database, how fast it grows, and whether Postgres keeps up; memory, CPU and throughput of every worker, and what to change. Refreshes every 15 seconds.')),
+      h('header', { class: 'head row' }, h('div', null, h('div', { class: 'eyebrow' }, 'WORKERS'), h('h1', null, 'Workers'),
+        h('p', { class: 'muted' }, 'Memory, CPU and throughput of every worker, what is being read right now, and what to change. Refreshes every 15 seconds.')),
         h('span', { class: 'grow' }), rangeBtns),
       adviceCard(real.length ? real : advice.filter((a) => a.level === 'good').slice(0, 1)),
-      db.error ? h('div', { class: 'alert bad' }, `Database health could not be read: ${db.error}`) : databaseCard(db),
       h('div', { class: 'tiles' },
         tile('Workers alive', `${alive.length}`, `${alive.reduce((n, w) => n + (w.telemetry?.activeJobs || 0), 0)} of ${alive.reduce((n, w) => n + (w.concurrency || 2), 0)} job slots busy`),
         tile('Jobs running', num(d.queue.running), `${num(d.queue.ready)} ready to start`),
@@ -42,6 +41,25 @@ export async function workersPage(ctx) {
           h('tbody', null, d.failures.map((f) => h('tr', null, h('td', { class: 'mono small err' }, f.error || '—'), h('td', null, f.n), h('td', null, ago(f.last))))))));
   }
   draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, e.message)));
+  const t = setInterval(() => draw().catch(() => {}), 15000);
+  ctx.onLeave(() => clearInterval(t));
+  return root;
+}
+
+// The Database tab of Operations: disk left under the database, size and growth, connections, vacuum.
+export async function databasePage(ctx) {
+  const root = h('div', { class: 'stack-lg workers-page' });
+  async function draw() {
+    const db = await get('/ops/database');
+    const advice = [...(db.advice || [])].sort((a, b) => ORDER[a.level] - ORDER[b.level]);
+    const real = advice.filter((a) => a.level !== 'good');
+    root.replaceChildren(
+      h('header', { class: 'head row' }, h('div', null, h('div', { class: 'eyebrow' }, 'DATABASE'), h('h1', null, 'Database'),
+        h('p', { class: 'muted' }, 'Disk left under the database, how fast it grows, and whether Postgres keeps up. Refreshes every 15 seconds.'))),
+      adviceCard(real.length ? real : advice.filter((a) => a.level === 'good').slice(0, 1)),
+      databaseCard(db));
+  }
+  draw().catch((e) => root.replaceChildren(h('div', { class: 'alert bad' }, `Database health could not be read: ${e.message}`)));
   const t = setInterval(() => draw().catch(() => {}), 15000);
   ctx.onLeave(() => clearInterval(t));
   return root;

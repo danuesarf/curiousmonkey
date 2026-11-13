@@ -1,5 +1,5 @@
 // Configuration: Bedrock, how far back CloudTrail history is read, and the environments accounts belong to.
-import { h, get, api, post, num, ago, fmtDay, toast, copy, loadEnvironments } from '../lib.js';
+import { h, get, api, post, num, ago, fmtDay, toast, copy, loadEnvironments, ROLE_LABEL, TEAM } from '../lib.js';
 import { session } from '../main.js';
 
 const MODELS = [
@@ -217,7 +217,7 @@ const JC_STEPS = [
   'On the SSO tab, paste the Redirect URI and Login URL below. Client authentication type: Client Secret Basic.',
   'Attribute mapping: tick the Email and Profile standard scopes. Turn on Include group attribute and name it groups.',
   'On the User Groups tab, tick the groups that should get in. Activate, then copy the client ID and secret here (JumpCloud shows the secret once).',
-  'Map those group names to roles on the Members page. Someone in no mapped group is turned away.',
+  'Map those group names to roles under Group mappings, below. Someone in no mapped group is turned away.',
 ];
 function ssoCard(v, mappings, reload) {
   const P = v.presets;
@@ -309,7 +309,19 @@ function ssoCard(v, mappings, reload) {
         steps,
         h('div', { class: `alert ${mappings.length ? 'ok' : 'warn'}` },
           mappings.length ? `${mappings.length} group${mappings.length === 1 ? '' : 's'} mapped to roles: ${mappings.map((m) => m.group_name).join(', ')}. ` : 'No groups are mapped to roles yet, so nobody can get in with SSO. ',
-          h('a', { href: '#/members' }, 'Group mappings on Members')),
+          'Map them below.'),
         v.source === 'env' && h('p', { class: 'small muted' }, 'Now set by the OIDC_* environment variables. Saving here overrides them.'),
-        v.updatedAt && h('p', { class: 'small muted' }, `Changed here ${ago(v.updatedAt)}.`))));
+        v.updatedAt && h('p', { class: 'small muted' }, `Changed here ${ago(v.updatedAt)}.`))),
+    mappingsBlock(mappings, reload));
+}
+
+// Which identity-provider group gets which role (and review team). Owners only, like the card around it.
+function mappingsBlock(items, reload) {
+  const group = h('input', { placeholder: 'IdP group name', 'aria-label': 'IdP group name' }), role = h('select', { 'aria-label': 'Role' }, Object.keys(ROLE_LABEL).map((r) => h('option', { value: r }, ROLE_LABEL[r])));
+  const team = h('select', { 'aria-label': 'Review team' }, [['', 'No team'], ...Object.entries(TEAM)].map(([v, l]) => h('option', { value: v }, l)));
+  return h('div', { class: 'card-b stack' }, h('h3', null, 'Group mappings'), h('p', { class: 'small muted' }, 'OIDC sign-in maps IdP groups to roles. This path has not been tested against a live identity provider.'),
+    items.length ? h('ul', { class: 'plain' }, items.map((s) => h('li', { class: 'row' }, h('code', null, s.group_name), '→', ROLE_LABEL[s.role], s.team && `, ${TEAM[s.team]}`,
+      h('button', { class: 'btn sm', onClick: async () => { await api('DELETE', `/sso/mappings/${encodeURIComponent(s.group_name)}`); reload(); } }, 'Remove')))) : h('p', { class: 'muted' }, 'No mappings yet.'),
+    h('form', { class: 'row', onSubmit: async (e) => { e.preventDefault(); try { await api('PUT', '/sso/mappings', { group_name: group.value, role: role.value, team: team.value || null }); reload(); } catch (x) { toast(x.message, true); } } },
+      group, role, team, h('button', { class: 'btn', type: 'submit' }, 'Add mapping')));
 }

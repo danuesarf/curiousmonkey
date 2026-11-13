@@ -757,7 +757,7 @@ export async function spacePage(ctx) {
           row('Signs in to', `${sc.targets.length} account${sc.targets.length === 1 ? '' : 's'}`),
           row('This hour', `${sc.targets.filter((t) => t.hours.includes(st.hour)).length} of them`)],
         lists: [{ title: 'Where it reads', items: [...sc.targets].sort((a, b) => b.sessions - a.sessions).map((t) => ({ label: acctName(t.accountId), meta: `${pretty(t.role).label} · ${t.sessions ? `last ${ago(t.lastSeen)}` : 'no sign-in seen yet'}`, value: num(t.sessions), pick: linkOf(t), href: linkOf(t) ? null : `#/roles/${t.roleId}` })), empty: 'no scanner role found' }],
-        actions: [['Workers', '#/workers', true], ['Accounts', '#/accounts']] };
+        actions: [['Workers', '#/operations/workers', true], ['Accounts', '#/accounts']] };
     }
     if (M.view === 'estate' && isGcp(id) && M.by.has(id)) return projectDetail(M.by.get(id));
     if (M.view === 'estate') {

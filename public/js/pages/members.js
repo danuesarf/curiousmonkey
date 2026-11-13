@@ -8,7 +8,6 @@ const MATRIX = [['View roles and findings', ['view'], 'owner admin reviewer acco
 export async function membersPage(ctx) {
   const [m, a] = await Promise.all([get('/members'), get('/accounts')]);
   const isOwner = session.user.role === 'owner';
-  const sso = isOwner ? await get('/sso/mappings') : null;
   const accts = a.items;
   const scopeLabel = (ids) => (ids ? ids.map((i) => accts.find((x) => x.id === i)?.name || 'unknown').join(', ') : 'All accounts');
 
@@ -70,12 +69,5 @@ export async function membersPage(ctx) {
       h('thead', null, h('tr', null, h('th', null, 'Permission'), Object.keys(ROLE_LABEL).map((r) => h('th', null, ROLE_LABEL[r])))),
       h('tbody', null, MATRIX.map(([label, , who]) => h('tr', null, h('td', null, label), Object.keys(ROLE_LABEL).map((r) => h('td', null, who.split(' ').includes(r) ? h('span', { class: 'badge b-green' }, 'yes') : h('span', { class: 'muted' }, '—')))))))),
       h('div', { class: 'card-b small muted' }, 'Approving also needs a review team. High-risk roles need an approval from both Infrastructure Security and Information Security. Identity Center roles go to Information Security, service-linked roles to Infrastructure Security.')),
-    isOwner && ssoCard(sso, ctx));
-}
-
-function ssoCard(sso, ctx) {
-  const group = h('input', { placeholder: 'IdP group name' }), role = h('select', null, Object.keys(ROLE_LABEL).map((r) => h('option', { value: r }, ROLE_LABEL[r]))), team = h('select', null, [['', 'No team'], ...Object.entries(TEAM)].map(([v, l]) => h('option', { value: v }, l)));
-  return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Single sign-on group mappings'), h('span', { class: 'small muted' }, 'OIDC sign-in maps IdP groups to roles. This path has not been tested against a live identity provider.')),
-    h('div', { class: 'card-b stack' }, sso.items.length ? h('ul', { class: 'plain' }, sso.items.map((s) => h('li', { class: 'row' }, h('code', null, s.group_name), '→', ROLE_LABEL[s.role], s.team && `, ${TEAM[s.team]}`, h('button', { class: 'btn sm', onClick: async () => { await api('DELETE', `/sso/mappings/${encodeURIComponent(s.group_name)}`); ctx.reload(); } }, 'Remove')))) : h('p', { class: 'muted' }, 'No mappings yet.'),
-      h('form', { class: 'row', onSubmit: async (e) => { e.preventDefault(); try { await api('PUT', '/sso/mappings', { group_name: group.value, role: role.value, team: team.value || null }); ctx.reload(); } catch (x) { toast(x.message, true); } } }, group, role, team, h('button', { class: 'btn', type: 'submit' }, 'Add mapping'))));
+    isOwner && h('p', { class: 'small muted' }, 'Single sign-on group mappings are under ', h('a', { href: '#/admin/config' }, 'Configuration → Single sign-on'), '.'));
 }

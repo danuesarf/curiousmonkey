@@ -58,24 +58,42 @@ export function eventFacts(u) {
     u.state === 'unresolved' && u.mapping?.reopen_at && [h('dt', null, 'Reopens'), h('dd', null, `${fmtDate(u.mapping.reopen_at)} if still called`)]);
 }
 
-export async function unidentifiedPage(ctx, id) {
-  const st = { days: 30, tab: 'todo' };
+/** Unidentified calls for the whole estate, or for one account when ?account= is set. */
+export async function unidentifiedPage(ctx) {
+  const url = ctx.params;
+  const st = { days: [7, 30, 90, 365].includes(Number(url.get('days'))) ? Number(url.get('days')) : 30, tab: ['todo', 'identified', 'unresolved'].includes(url.get('tab')) ? url.get('tab') : 'todo', account: url.get('account') || '' };
   const root = h('div', { class: 'stack-lg' });
   let changed = false;
+  const accounts = (await get('/accounts')).items;
+  if (st.account && !accounts.some((x) => x.id === st.account)) st.account = '';
+  const acct = () => accounts.find((x) => x.id === st.account);
+  // the choice stays in the address, so a reload or a pasted link opens the same view
+  const here = () => { const q = new URLSearchParams(); if (st.account) q.set('account', st.account); if (st.days !== 30) q.set('days', st.days); if (st.tab !== 'todo') q.set('tab', st.tab); const s = q.toString(); return `#/unidentified${s ? `?${s}` : ''}`; };
+  const remember = () => { if (!ctx.inWindow) history.replaceState(null, '', here()); };
 
   async function draw() {
-    const [a, c] = await Promise.all([get(`/accounts/${id}`), get(`/accounts/${id}/coverage?days=${st.days}`)]);
-    ctx.setCrumbs(h('a', { href: '#/accounts' }, 'Accounts'), a.name, 'Unidentified calls');
+    remember();
+    const c = await get(st.account ? `/accounts/${st.account}/coverage?days=${st.days}` : `/coverage?days=${st.days}`);
+    const one = acct();
+    ctx.setCrumbs(h('a', { href: '#/unidentified' }, 'Unidentified calls'), ...(one ? [one.name] : []));
     const t = c.totals;
     const groups = { todo: c.unmapped.filter((u) => ['open', 'suggested', 'reopened'].includes(u.state)), identified: c.unmapped.filter((u) => u.state === 'identified'), unresolved: c.unmapped.filter((u) => u.state === 'unresolved') };
     const period = h('select', { 'aria-label': 'Period' }, [7, 30, 90, 365].map((d) => h('option', { value: d, selected: d === st.days }, `Last ${d} days`)));
     period.addEventListener('change', () => { st.days = Number(period.value); draw(); });
+    const picker = h('select', { 'aria-label': 'Account' }, h('option', { value: '', selected: !st.account }, 'All accounts'), accounts.map((x) => h('option', { value: x.id, selected: x.id === st.account }, x.name)));
+    picker.addEventListener('change', () => { st.account = picker.value; draw(); });
     const onChange = () => { changed = true; draw(); ctx.refreshStatus(); };
-    const askAll = h('button', { class: 'btn sm', disabled: !c.bedrockEnabled || !groups.todo.length || !session.user.permissions.includes('decide') }, 'Ask Bedrock for all open');
+    const canDecide = session.user.permissions.includes('decide');
+    const askAll = h('button', { class: 'btn sm', disabled: !c.bedrockEnabled || !groups.todo.length || !canDecide }, 'Ask Bedrock for all open');
     askAll.addEventListener('click', async () => {
       askAll.disabled = true; askAll.textContent = 'Asking Bedrock…';
-      try { const r = await post(`/accounts/${id}/unmapped/suggest`, {}); toast(`${r.suggested.length} suggestion(s)${r.rejected.length ? `, ${r.rejected.length} dropped: not real IAM actions` : ''}. Review each one.`); onChange(); }
-      catch (x) { toast(x.message, true); askAll.disabled = false; askAll.textContent = 'Ask Bedrock for all open'; }
+      try {
+        // Bedrock is asked per account: one call for the chosen account, or one per account that has something open
+        const ids = st.account ? [st.account] : [...new Set(groups.todo.map((u) => u.account_id))];
+        let suggested = 0, rejected = 0;
+        for (const id of ids) { const r = await post(`/accounts/${id}/unmapped/suggest`, {}); suggested += r.suggested.length; rejected += r.rejected.length; }
+        toast(`${suggested} suggestion(s)${rejected ? `, ${rejected} dropped: not real IAM actions` : ''}. Review each one.`); onChange();
+      } catch (x) { toast(x.message, true); askAll.disabled = false; askAll.textContent = 'Ask Bedrock for all open'; }
     });
 
     // coverage strip: where every event went
@@ -86,11 +104,17 @@ export async function unidentifiedPage(ctx, id) {
 
     const list = groups[st.tab];
     root.replaceChildren(
-      h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'UNIDENTIFIED CALLS'), h('h1', null, a.name),
+      h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'UNIDENTIFIED CALLS'), h('h1', null, one ? one.name : 'All accounts'),
         h('p', { class: 'muted' }, 'CloudTrail names a call by event source and event name. Most match an IAM action; the ones that do not land here. Their calls are kept, and that service stays unconfirmed — never removed — until each name is settled.')),
-        h('div', { class: 'row' }, period, askAll)),
+        h('div', { class: 'row' }, picker, period, askAll)),
       changed && h('div', { class: 'alert ok row' }, h('span', { class: 'grow' }, 'Decisions changed. They apply to stored history at the next analysis.'),
-        h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${id}/scan`); toast('Re-analyzing'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Re-analyze now')),
+        h('button', { class: 'btn sm primary', onClick: async () => {
+          try {
+            const ids = st.account ? [st.account] : [...new Set(c.unmapped.map((u) => u.account_id))];     // only accounts that have names to settle
+            for (const id of ids) await post(`/accounts/${id}/scan`);
+            toast('Re-analyzing'); go('#/operations/scans');
+          } catch (x) { toast(x.message, true); }
+        } }, 'Re-analyze now')),
       !c.bedrockEnabled && h('div', { class: 'alert warn' }, 'Bedrock is off, so suggestions are unavailable. You can still settle each name by hand.'),
       h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Where every event went'), h('span', { class: 'tiny muted' }, `${num(t.events)} events read`)),
         h('div', { class: 'card-b stack' }, strip,
@@ -103,11 +127,12 @@ export async function unidentifiedPage(ctx, id) {
                 ...c.regions.map((r) => h('td', { class: 'right' }, num(r[k]))), h('td', { class: 'right' }, h('b', null, num(t[k]))))))))))),
       h('div', { class: 'tabs', role: 'tablist' }, [['todo', 'To settle'], ['identified', 'Identified'], ['unresolved', 'Can’t resolve']].map(([k, label]) =>
         h('button', { role: 'tab', class: 'tab', 'aria-selected': String(st.tab === k), onClick: () => { st.tab = k; draw(); } }, label, h('span', { class: 'mono tiny muted' }, ` ${groups[k].length}`)))),
-      !list.length ? h('div', { class: 'card empty' }, st.tab === 'todo' ? 'Nothing to settle. Every event name in this account is identified or marked.' : 'None.')
+      !list.length ? h('div', { class: 'card empty' }, st.tab === 'todo' ? `Nothing to settle. Every event name in ${one ? 'this account' : 'your accounts'} is identified or marked.` : 'None.')
         : h('div', { class: 'stack' }, list.map((u) => h('section', { class: 'card' },
-          h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'), h('b', { class: 'mono', style: 'overflow-wrap:anywhere' }, u.raw_action)), stateTag(u.state)),
+          h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'), h('b', { class: 'mono', style: 'overflow-wrap:anywhere' }, u.raw_action),
+            !one && h('a', { class: 'small', href: `#/unidentified?account=${u.account_id}` }, u.account_name)), stateTag(u.state)),
           h('div', { class: 'card-b', style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:20px' }, eventFacts(u),
-            identifyControls(u, { accountId: id, bedrock: c.bedrockEnabled, onChange }))))));
+            identifyControls(u, { accountId: u.account_id, bedrock: c.bedrockEnabled, onChange }))))));
   }
   await draw();
   return root;

@@ -5,9 +5,8 @@ import { overview } from './pages/overview.js';
 import { rolePage } from './pages/role.js';
 import { recommendationPage } from './pages/recommendation.js';
 import { accountsPage, newAccountPage, editAccountPage } from './pages/accounts.js';
-import { membersPage } from './pages/members.js';
-import { auditPage } from './pages/audit.js';
-import { opsPage } from './pages/ops.js';
+import { adminPage, adminTabs } from './pages/admin.js';
+import { operationsPage } from './pages/operations.js';
 import { radarPage } from './pages/radar.js';
 import { gcpConnectPage, gcpPrincipalPage } from './pages/gcp.js';
 import { usersPage, userPage } from './pages/users.js';
@@ -17,8 +16,6 @@ import { trustPage } from './pages/trust.js';
 import { sectorPage } from './pages/sector.js';
 import { trackPage } from './pages/track.js';
 import { unidentifiedPage } from './pages/unidentified.js';
-import { settingsPage } from './pages/settings.js';
-import { workersPage } from './pages/workers.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -41,15 +38,24 @@ const routes = [
   [/^#\/gcp\/new$/, () => (c) => gcpConnectPage(c), 'accounts'],
   [/^#\/gcp\/([\w-]+)\/edit$/, (m) => (c) => gcpConnectPage(c, m[1]), 'accounts'],
   [/^#\/gcp\/principals\/([\w-]+)$/, (m) => (c) => gcpPrincipalPage(c, m[1]), 'roles'],
-  [/^#\/accounts\/([\w-]+)\/(coverage|unidentified)$/, (m) => (c) => unidentifiedPage(c, m[1]), 'accounts'],
+  [/^#\/unidentified$/, () => unidentifiedPage, 'accounts'],
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
-  [/^#\/scans$/, () => opsPage, 'scans'],
-  [/^#\/workers$/, () => workersPage, 'workers'],
-  [/^#\/members$/, () => membersPage, 'members'],
-  [/^#\/audit$/, () => auditPage, 'audit'],
-  [/^#\/settings$/, () => settingsPage, 'settings'],
+  [/^#\/operations(?:\/(scans|workers|database))?$/, (m) => (c) => operationsPage(c, m[1]), 'operations'],
+  [/^#\/admin(?:\/(members|audit|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
 ];
+
+// Addresses that moved. They still open: the old one is swapped for the new one in the address bar (no extra history entry).
+const MOVED = [
+  [/^#\/scans$/, () => '#/operations/scans'], [/^#\/workers$/, () => '#/operations/workers'],
+  [/^#\/members$/, () => '#/admin/members'], [/^#\/audit$/, () => '#/admin/audit'], [/^#\/settings$/, () => '#/admin/config'],
+  [/^#\/accounts\/([\w-]+)\/(?:coverage|unidentified)$/, (m) => `#/unidentified?account=${m[1]}`],
+];
+const movedTo = (hash) => {
+  const [path, qs] = String(hash).split('?');
+  for (const [re, to] of MOVED) { const m = path.match(re); if (m) { const dest = to(m); return qs ? `${dest}${dest.includes('?') ? '&' : '?'}${qs}` : dest; } }
+  return null;
+};
 
 // inside a window (below) navigation stays in the window; otherwise it changes the page
 export function go(hash) { if (win) return void winGo(hash); location.hash = hash; }
@@ -60,10 +66,8 @@ const ICON = {
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
-  roles: 'M4 6h16M4 12h16M4 18h10', users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', scans: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
-  members: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6s7 2 7 6M17 11a3 3 0 1 0 0-6M22 20c0-3-2-5-4-5', audit: 'M6 3h9l4 4v14H6zM9 12h7M9 16h7M9 8h3',
-  workers: 'M5 5h14v6H5zM5 13h14v6H5zM8 8h.01M8 16h.01M12 8h4M12 16h4',
-  settings: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
+  roles: 'M4 6h16M4 12h16M4 18h10', users: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
+  admin: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
 };
 const mark = (size = 40) => svg('svg', { width: size, height: size, viewBox: '0 0 40 40', 'aria-hidden': 'true' },
   svg('circle', { cx: 20, cy: 20, r: 18, fill: 'none', stroke: '#1f4a35' }), svg('circle', { cx: 20, cy: 20, r: 11, fill: 'none', stroke: '#1f4a35' }),
@@ -79,11 +83,12 @@ const WIN_ICON = () => svg('svg', { class: 'win-ico', width: 12, height: 12, vie
   svg('path', { d: 'M1.5 3.5h7v7h-7zM4 3.5v-2h6.5V8h-2', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.2 }));
 export { WIN_ICON as windowIcon };
 let win = null;
-const routeOf = (hash) => { const [path, qs] = String(hash).split('?'); for (const [re, pick, , full] of routes) { const m = path.match(re); if (m) return { page: pick(m), full, params: new URLSearchParams(qs || '') }; } return null; };
+const routeOf = (hash) => { hash = movedTo(hash) ?? hash; const [path, qs] = String(hash).split('?'); for (const [re, pick, , full] of routes) { const m = path.match(re); if (m) return { page: pick(m), full, params: new URLSearchParams(qs || '') }; } return null; };
 async function winGo(hash, push = true) {
   const mine = win; if (!mine) return;
   mine.leave.forEach((f) => f()); mine.leave = [];
   if (push && mine.at && mine.at !== hash) mine.back.push(mine.at);
+  hash = movedTo(hash) ?? hash;
   mine.at = hash; mine.backBtn.hidden = !mine.back.length; mine.tab.href = hash;
   const r = routeOf(hash);
   mine.body.className = `win-body${r?.full ? ' full' : ''}`;
@@ -179,7 +184,7 @@ export async function refreshStatus() {
   const eta = s.etaSeconds == null ? null : s.etaSeconds < 3600 ? `about ${Math.max(1, Math.round(s.etaSeconds / 60))} min left` : `about ${Math.round(s.etaSeconds / 1800) / 2} h left`;
   // two questions, two answers: is the history all there (the dial), and how current is it (the line under it)
   const fr = s.complete && s.accounts > 0 ? freshness(s.freshAt, s.tailEveryMinutes, s.deliveryLagMinutes) : null;
-  const meter = h('a', { href: '#/scans', class: `meter${s.complete ? '' : ' reading'}`,
+  const meter = h('a', { href: '#/operations/scans', class: `meter${s.complete ? '' : ' reading'}`,
     title: fr ? `History: every account's lookback is read. Freshness: the least current account${s.stalest ? ` (${s.stalest.name})` : ''} is ${fr.text}.${s.tailEveryMinutes > 0 ? ` New events are read every ${s.tailEveryMinutes} min; CloudTrail itself delivers them ${s.deliveryLagMinutes} min or so late.` : ' Catch-up reads are off, so new events wait for the daily scan.'}` : null },
     svg('svg', { width: 26, height: 26, viewBox: '0 0 26 26', 'aria-hidden': 'true' },
       svg('circle', { cx: 13, cy: 13, r: 10, fill: 'none', stroke: '#1f4a35', 'stroke-width': 3 }),
@@ -188,10 +193,9 @@ export async function refreshStatus() {
       h('span', { class: fr ? `fresh-${fr.tone}` : null }, s.accounts === 0 ? 'Connect one to start' : fr ? fr.text : [upTo && `up to ${upTo}`, eta, 'results are provisional'].filter(Boolean).join(' · '))));
   meter.querySelector('b').style.color = paint(s.complete ? '#6fe3b0' : '#f6e016');
   if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = paint(TONE_COLOR[fr.tone]);
-  const firstAcct = s.reading?.[0]?.id;
   if (!bellEl.firstChild) drawBell();
   statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), can('view') ? bellEl : null,
-    s.unidentified > 0 && h('a', { class: 'unk-badge', href: firstAcct ? `#/accounts/${firstAcct}/unidentified` : '#/accounts', title: 'Calls under event names not yet identified' },
+    s.unidentified > 0 && h('a', { class: 'unk-badge', href: '#/unidentified', title: 'Calls under event names not yet identified' },
       svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: '#f0b45a', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }), svg('circle', { cx: 8, cy: 8, r: 1.8, fill: '#f0b45a' })),
       `${s.unidentified} UNIDENTIFIED`),
     meter, themeBtn());
@@ -209,17 +213,21 @@ function themeBtn() {
 }
 initTheme();
 
+// a labelled stretch of the rail; it is left out when nothing in it is allowed for this person
+const group = (label, ...items) => { const shown = items.filter(Boolean); return shown.length ? h('div', { class: 'rail-group', role: 'group', 'aria-label': label }, h('span', { class: 'rail-label', 'aria-hidden': 'true' }, label), shown) : null; };
+
 function shell(active, content, full) {
-  const item = (key, href, label, perm) => (!perm || can(perm)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
+  const item = (key, href, label, perm) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label);
-  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', roles: 'Roles', users: 'IAM users', scans: 'Scans', accounts: 'Accounts', members: 'Members', audit: 'Audit', settings: 'Configuration', workers: 'Health' }[active] || '');
+  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', roles: 'Roles', users: 'IAM users', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
-      item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('users', '#/users', 'IAM users', 'view'), item('scans', '#/scans', 'Scans', 'ops'), item('workers', '#/workers', 'Health', 'ops'),
-      item('accounts', '#/accounts', 'Accounts', 'view'), item('members', '#/members', 'Members', 'members'), item('audit', '#/audit', 'Audit', 'audit'), item('settings', '#/settings', 'Config', 'settings'),
+      group('Watch', item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
+      group('Investigate', item('events', '#/events', 'Events', 'view'), item('roles', '#/roles', 'Roles', 'view'), item('users', '#/users', 'IAM users', 'view')),
+      group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),
         h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
@@ -232,6 +240,8 @@ async function render() {
   if (notices) { notices = null; }
   bellOpen = false; drawBell();
   document.querySelectorAll('.modal-bg').forEach((m) => m.remove());   // a dialog belongs to the page it was opened on
+  const moved = movedTo(location.hash);
+  if (moved) history.replaceState(null, '', moved);        // an old address: show the new one, without a second history entry
   const hash = location.hash;
   const [path, qs] = hash.split('?'); const params = new URLSearchParams(qs || '');
   try {

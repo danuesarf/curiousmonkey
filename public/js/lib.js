@@ -108,6 +108,9 @@ export function whoControl(who, onPick, label = 'Show') {
   return h('div', { class: 'stack', style: 'gap:6px' }, h('h2', { class: 'eyebrow' }, label),
     h('div', { class: 'rtabs', role: 'radiogroup', 'aria-label': 'Which identities' }, WHO.map(([k, l]) => h('button', { role: 'radio', 'aria-checked': String(who === k), title: k === 'users' ? 'Only IAM users: long-lived access keys and console passwords' : k === 'roles' ? 'Only IAM roles' : 'Roles and IAM users', onClick: () => onPick(k) }, l))));
 }
+/** A row of tabs that are links, so each tab has its own address (same look as the AWS | Google Cloud tabs). tabs: [key, label, href]. */
+export const pageTabs = (label, tabs, current) => h('div', { class: 'tabs cloud-tabs', role: 'tablist', 'aria-label': label },
+  tabs.map(([k, text, href]) => h('a', { role: 'tab', href, 'aria-selected': String(current === k) }, text)));
 export const KIND = { custom: 'Custom', 'service-linked': 'Service-linked', 'identity-center': 'Identity Center', 'iam-user': 'IAM user' };
 export const riskBadge = (r) => h('span', { class: `badge b-${String(r).toLowerCase()}` }, r);
 export const teamBadge = (t, both) => h('span', { class: 'badge b-neutral' }, both ? 'Both teams' : TEAM[t] || t);

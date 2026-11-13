@@ -350,12 +350,12 @@ function accountCard(a, ctx, can) {
   det.addEventListener('toggle', () => { if (det.open) loadData(); });
   return h('section', { class: 'card' },
     h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${envName(a.environment)}`)),
-      h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
-        can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
+      h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/operations/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
+        can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/operations/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
         h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
         h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}` }, 'Trust map'),
         h('a', { class: 'btn sm', href: `#/events?account=${a.id}` }, 'Event history'),
-        h('a', { class: 'btn sm', href: `#/accounts/${a.id}/unidentified` }, 'Unidentified calls'),
+        h('a', { class: 'btn sm', href: `#/unidentified?account=${a.id}` }, 'Unidentified calls'),
         can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
         can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),
     a.status === 'error' && h('div', { class: 'card-b' }, h('div', { class: 'alert bad' }, a.status_detail?.message || 'The account could not be reached.')),
@@ -460,7 +460,7 @@ export async function newAccountPage(ctx) {
         const acct = from ? await api('PATCH', `/accounts/${from.id}`, { ...payload(m, { create: false }), onboard: true }) : await post('/accounts', payload(m, { create: true }));
         await post(`/accounts/${acct.id}/verify`);
         toast(`${acct.name} added. The first step checks access; if it fails, the reason shows here and on the account.`);
-        go('#/scans');
+        go('#/operations/scans');
       } catch (x) {
         connect.disabled = false; connect.textContent = 'Connect and start first scan';
         const f = x instanceof ApiError && x.field;
@@ -523,7 +523,7 @@ export async function editAccountPage(ctx, id) {
       const out = await api('PATCH', `/accounts/${a.id}`, payload(m, { create: false }));
       if (out.accessChanged || m.rebuildHistory) {
         const verify = await confirmDialog({ title: 'Saved. Verify now?', message: 'Access or source changed. Verifying runs a scan with the new settings, so you see at once whether they work.', confirmLabel: 'Verify and scan' });
-        if (verify) { await post(`/accounts/${a.id}/verify`).catch((x) => toast(x.message, true)); go('#/scans'); return; }
+        if (verify) { await post(`/accounts/${a.id}/verify`).catch((x) => toast(x.message, true)); go('#/operations/scans'); return; }
       }
       toast('Saved'); go('#/accounts');
     } catch (x) {

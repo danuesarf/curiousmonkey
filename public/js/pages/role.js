@@ -193,7 +193,7 @@ async function identifyPanel(r, raw, ctx) {
       : items.map((u) => h('section', { class: 'stack', style: 'border-top:1px solid var(--line);padding-top:14px' },
         h('div', { class: 'row' }, h('span', { class: 'unk-tag' }, 'UNK'), h('b', { class: 'mono small grow', style: 'overflow-wrap:anywhere' }, u.raw_action), h('span', { class: `state ${STATE[u.state]?.[1] || ''}` }, STATE[u.state]?.[0] || u.state)),
         eventFacts(u), identifyControls(u, { accountId: r.account_id, bedrock: c.bedrockEnabled, onChange: () => { changed = true; draw(); ctx.refreshStatus(); } }))),
-      h('a', { class: 'small', href: `#/accounts/${r.account_id}/unidentified` }, 'All unidentified calls in this account'));
+      h('a', { class: 'small', href: `#/unidentified?account=${r.account_id}` }, 'All unidentified calls in this account'));
   }
   await draw();
   panel.querySelector('button')?.focus();

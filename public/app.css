@@ -26,6 +26,9 @@ p{margin:0}
 .rail a.item{display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 0;text-decoration:none;color:var(--muted);border-left:2px solid transparent;font-size:10.5px;letter-spacing:.04em}
 .rail a.item:hover{color:var(--ink);background:var(--surface)}
 .rail a.item[aria-current=page]{color:var(--banana);border-left-color:var(--banana);background:var(--raise)}
+.rail-group{display:flex;flex-direction:column;gap:2px;padding-top:10px;margin-top:4px;border-top:1px solid var(--line)}
+.rail-group:first-of-type{border-top:0;margin-top:0;padding-top:0}
+.rail-label{font-family:var(--mono);font-size:8.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);text-align:center;padding:0 0 4px}
 .rail .me{margin-top:auto;display:flex;flex-direction:column;align-items:center;gap:6px}
 .avatar{width:34px;height:34px;border-radius:50%;border:1px solid var(--banana);color:var(--banana);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px}
 .rail .me button{background:none;border:0;color:var(--muted);font:inherit;font-size:10.5px;min-height:32px;cursor:pointer}.rail .me button:hover{color:var(--ink)}
