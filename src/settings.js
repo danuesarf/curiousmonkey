@@ -21,6 +21,8 @@ const DEFS = {
   'history.maxLookbackDays':  [z.number().int().min(EVENT_HISTORY_MAX_DAYS).max(LOOKBACK_CEILING_DAYS), ['scanner', 'maxLookbackDays']],
   'history.sliceHours':       [z.number().refine((v) => SLICE_CHOICES.includes(v), 'Pick one of the slice sizes.'), ['scanner', 'sliceHours']],
   'history.tailEveryMinutes': [z.number().int().min(0).max(1440), ['scanner', 'tailEveryMinutes']],
+  'risk.keyRotateDays':       [z.number().int().min(7).max(730), ['risk', 'keyRotateDays']],
+  'risk.keyUnusedDays':       [z.number().int().min(7).max(730), ['risk', 'keyUnusedDays']],
 };
 const at = (path) => path.reduce((o, k) => o?.[k], config);
 const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], config); o[path.at(-1)] = v; };

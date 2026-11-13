@@ -1,5 +1,6 @@
 import { rollupBackfillTick } from './rollups.js';
 import { gcpTick } from './gcp/scan.js';
+import { alertsTick } from './alerts.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -201,6 +202,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const gcpRun = () => { if (gcpBusy || stop.stopped) return; gcpBusy = true;
     gcpTick(workerId).then((r) => r && log(r.ok ? 'info' : 'error', r.ok ? 'gcp scan done' : 'gcp scan failed', r)).catch((e) => log('error', 'gcp scan failed', { error: e.message })).finally(() => { gcpBusy = false; }); };
   timers.push(setInterval(gcpRun, 30_000), setTimeout(gcpRun, 5_000));
+  // alerts: any worker may run them; an advisory lock lets one at a time
+  let alerting = false;
+  const alertRun = () => { if (alerting || stop.stopped) return; alerting = true;
+    alertsTick(new Date(), { log }).then((r) => r && (r.sent || r.failed) && log(r.failed ? 'warn' : 'info', 'alerts sent', r)).catch((e) => log('error', 'alerts failed', { error: e.message })).finally(() => { alerting = false; }); };
+  timers.push(setInterval(alertRun, config.alerts.everyMs), setTimeout(alertRun, 10_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });
   return {

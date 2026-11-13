@@ -1,11 +1,12 @@
 // IAM users: their access keys (ID, status, age, last use), console password and MFA, groups, and what they did.
 // A user is stored as a role of kind 'iam-user', so its permission analysis and calls are on the role page too.
+import { keyRules } from '../config.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { scopeSql, inScope } from '../auth/rbac.js';
-import { KEY_ROTATE_DAYS, KEY_STALE_DAYS } from '../analyzer/users.js';
+
 
 export const users = Router();
 users.use(requireUser);
@@ -15,14 +16,14 @@ const days = (d, now = Date.now()) => (d ? Math.floor((now - new Date(d).getTime
 const latest = (...ds) => ds.filter(Boolean).map((d) => new Date(d)).sort((a, b) => b - a)[0] || null;
 
 /** One key as the page shows it: when it was last used by either source, and what is wrong with it. */
-export function keyView(k, now = Date.now()) {
+export function keyView(k, now = Date.now(), { rotateDays, staleDays } = keyRules()) {
   const used = latest(k.last_used_at, k.trail_last_seen);
   const age = days(k.created_at, now), idle = used ? days(used, now) : null;
   const active = k.status === 'Active' && !k.deleted_at;
   return { id: k.key_id, status: k.deleted_at ? 'Deleted' : k.status || 'Unknown', created: k.created_at, ageDays: age, lastUsed: used, idleDays: idle,
     lastService: k.last_used_service, lastRegion: k.last_used_region, trailCalls: Number(k.trail_calls || 0), trailFirst: k.trail_first_seen, trailLast: k.trail_last_seen,
     sourceIps: k.source_ips || [], deletedAt: k.deleted_at,
-    old: active && age != null && age > KEY_ROTATE_DAYS, unused: active && (used ? idle > KEY_STALE_DAYS : (age ?? 0) > 14), neverUsed: !used };
+    old: active && age != null && age > rotateDays, unused: active && (used ? idle > staleDays : (age ?? 0) > 14), neverUsed: !used };
 }
 
 async function loadUsers(user, { id = null } = {}) {
@@ -46,7 +47,7 @@ async function loadUsers(user, { id = null } = {}) {
     const flags = {
       oldKey: active.some((k) => k.old), unusedKey: active.some((k) => k.unused), twoKeys: active.length > 1,
       console: !!r.password_enabled, noMfa: !!r.password_enabled && !mfa.length, hasKeys: active.length > 0,
-      inactive: !lastSeen || days(lastSeen, now) > KEY_STALE_DAYS,
+      inactive: !lastSeen || days(lastSeen, now) > keyRules().staleDays,
     };
     return {
       id: r.id, name: r.name, arn: r.arn, userId: r.aws_id, account: { id: r.account_id, name: r.account_name, awsAccountId: r.aws_account_id, environment: r.environment },
@@ -86,7 +87,7 @@ users.get('/iam-users', requirePerm('view'), wrap(async (req, res) => {
       unusedKeys: keys.filter((k) => k.unused).length, consoleNoMfa: scope.filter((u) => u.flags.noMfa).length, console: scope.filter((u) => u.flags.console).length,
       inactive: scope.filter((u) => u.flags.inactive).length },
     counts: Object.fromEntries(FLAGS.map((f) => [f, scope.filter((u) => u.flags[f]).length])),
-    rules: { rotateDays: KEY_ROTATE_DAYS, staleDays: KEY_STALE_DAYS },
+    rules: keyRules(),
   });
 }));
 

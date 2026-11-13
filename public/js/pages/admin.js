@@ -1,11 +1,12 @@
-// Admin: members, the audit log and the configuration, as tabs of one page. A tab shows only to someone who may use it.
+// Admin: members, the audit log, alerts and the configuration, as tabs of one page. A tab shows only to someone who may use it.
 import { h, pageTabs } from '../lib.js';
 import { session } from '../main.js';
 import { membersPage } from './members.js';
 import { auditPage } from './audit.js';
 import { settingsPage } from './settings.js';
+import { alertsPage } from './alerts.js';
 
-const TABS = [['members', 'Members', 'members', membersPage], ['audit', 'Audit log', 'audit', auditPage], ['config', 'Configuration', 'settings', settingsPage]];
+const TABS = [['members', 'Members', 'members', membersPage], ['audit', 'Audit log', 'audit', auditPage], ['alerts', 'Alerts', 'settings', alertsPage], ['config', 'Configuration', 'settings', settingsPage]];
 /** The Admin tabs this person may open. */
 export const adminTabs = (user) => TABS.filter(([, , perm]) => user?.permissions.includes(perm));
 

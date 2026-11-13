@@ -11,7 +11,6 @@ const IMPERSONATE = ['iam.serviceAccounts.getAccessToken', 'iam.serviceAccounts.
 const ACT_AS = 'iam.serviceAccounts.actAs';
 const MINT_KEY = 'iam.serviceAccountKeys.create';
 const SET_IAM = /^resourcemanager\.(organizations|folders|projects)\.setIamPolicy$/;
-const KEY_OLD_DAYS = 90;
 
 /** What kind of identity an IAM member string names, and what is known about it from the string alone. */
 export function parseMember(member) {
@@ -64,7 +63,9 @@ const severityRank = { high: 3, medium: 2, low: 1, info: 0 };
  * @param s { org: {domain}, projects: [{project_id, ancestors}], bindings, roleDefs: Map(name -> string[]), serviceAccounts: [{email, project_id, unique_id, keys, disabled}], providers, now }
  * @returns Map(member -> { kind, roles, permissions, reach, sources, origin, risk, risk_score, risk_reasons })
  */
+/** `s.keyRotateDays`: a user-managed key older than this is a medium finding (90 unless the caller says). */
 export function analyzeGcp(s) {
+  const keyRotateDays = s.keyRotateDays ?? 90;
   const now = s.now || Date.now();
   const projects = new Map(s.projects.map((p) => [p.project_id, p]));
   // the projects a binding reaches
@@ -140,7 +141,7 @@ export function analyzeGcp(s) {
       const age = (k) => Math.floor((now - new Date(k.created).getTime()) / 864e5);
       const oldest = Math.max(...keys.map(age)), forever = keys.some((k) => !k.expires || new Date(k.expires).getFullYear() > 9000);
       const strong = x.reasons.some((r) => r.severity === 'high');
-      f('key', strong && forever ? 'high' : oldest > KEY_OLD_DAYS ? 'medium' : 'low', `${keys.length} user-managed key${keys.length === 1 ? '' : 's'}`,
+      f('key', strong && forever ? 'high' : oldest > keyRotateDays ? 'medium' : 'low', `${keys.length} user-managed key${keys.length === 1 ? '' : 's'}`,
         `Oldest ${oldest} days${forever ? ', never expires' : ''}. A key is a password that works from anywhere until someone deletes it; prefer workload identity federation.`);
     }
     // where it can come from

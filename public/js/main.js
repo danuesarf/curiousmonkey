@@ -40,7 +40,7 @@ const routes = [
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
   [/^#\/operations(?:\/(scans|workers|database))?$/, (m) => (c) => operationsPage(c, m[1]), 'operations'],
-  [/^#\/admin(?:\/(members|audit|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
+  [/^#\/admin(?:\/(members|audit|alerts|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
 ];
 
 // Addresses that moved. They still open: the old one is swapped for the new one in the address bar (no extra history entry).

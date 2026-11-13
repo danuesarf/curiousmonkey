@@ -222,6 +222,24 @@ Connect a Google Cloud organization, folder or project on the Accounts page, *Go
 - **Environments:** a project lands in the environment set for it on the Accounts page, otherwise its `env`/`environment` label, otherwise the connection's default.
 - Members limited to some AWS accounts do not see Google Cloud.
 
+## Alerts
+
+**Admin → Alerts** (`#/admin/alerts`, owners and admins) posts to Slack or any HTTPS webhook so nobody has to keep the app open. Add a **destination** (a Slack Incoming Webhook URL, or a webhook such as n8n or a SIEM; the URL is stored encrypted and never shown again) and send it a test. Then add **rules**:
+
+| When | Posts |
+|---|---|
+| New finding | a finding at or above the severity you pick |
+| Radar change | the changes Radar pings, by kind and severity: a new caller entered a role, a role gained permissions, first denied calls… |
+| Access key past its rotation age | an active key older than the rotation age (below) |
+| Console password without MFA | an IAM user who can sign in to the console without MFA |
+| Scan failed | a scan job that failed with no retry left |
+
+Each rule can be limited to some environments, and posts either at once (checked every minute) or as a daily digest at `ALERT_DIGEST_AT` (09:00, in `SCAN_TZ`). Everything a rule finds together goes out as one message (up to 50 lines, then a count and a link). Events count only from when the rule was created or switched on, so a new rule does not post the backlog; conditions (an old key, no MFA) post what is true now once, and again only if they clear and come back. A message that fails is retried once two minutes later; the log on the page shows each one. The worker runs the rules; any number of workers can run, one evaluates at a time.
+
+A webhook receives `{ source, kind, title, rule, count, items: [{ title, subject, account, environment, severity, url, at }], more, sentAt }`. In production, URLs must be https and may not point at loopback or the cloud metadata service; redirects are not followed. The worker needs egress to `hooks.slack.com` (or your webhook's host).
+
+**Risk thresholds** (Admin → Configuration, or `KEY_ROTATE_DAYS` / `KEY_UNUSED_DAYS`): when an access key should be rotated (90 days by default; Google Cloud service account keys too) and when an unused key or console password should go. The IAM users list follows a change at once; risk levels follow at each identity's next analysis.
+
 ## Findings
 
 **Review → Findings** (`#/findings`) lists every open finding on the roles and IAM users you can see, so a reviewer works through one queue instead of opening each role. It opens on what *Needs a decision*, most severe first; the rail shows how many wait. Filter by severity (the tiles), type, account, roles or IAM users, and *My team's* (the roles your review team signs off, plus those both teams must); every filter is in the address, so a filtered queue can be shared. Pick a finding to see its evidence and decide beside the list. Tick several to decide them at once with one note, or to clear their decisions. A bulk decision is all or nothing: findings that take different decisions (keep / remove for an action, accept / investigate for the rest) must be decided separately. Each decision is recorded per finding, with the reviewer and team, exactly as on the role page.

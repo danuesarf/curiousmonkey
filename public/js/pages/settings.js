@@ -118,10 +118,25 @@ export async function settingsPage(ctx) {
           h('p', { class: 'small muted' }, 'Raising a limit makes the next scan backfill the extra days; history already read is kept and not read again.'))),
       historyTable(d.history));
 
+    // ---- risk thresholds ----
+    const rotate = bind(h('input', { type: 'number', min: 7, max: 730, step: 1, value: draft['risk.keyRotateDays'] }), 'risk.keyRotateDays', Number);
+    const unused = bind(h('input', { type: 'number', min: 7, max: 730, step: 1, value: draft['risk.keyUnusedDays'] }), 'risk.keyUnusedDays', Number);
+    const risk = h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Risk thresholds'), h('p', { class: 'muted small' }, 'When an IAM user\'s credentials count against it. Used by the analysis, the IAM users list and alerts.'))),
+      h('div', { class: 'card-b settings-grid' },
+        h('div', { class: 'stack' },
+          h('div', { class: 'field' }, h('label', null, 'Rotate access keys after (days)', rotate),
+            h('span', { class: 'hint' }, 'An active key older than this is flagged "rotate it" (Google Cloud service account keys too). Many policies ask for 90.'), origin('risk.keyRotateDays')),
+          h('div', { class: 'field' }, h('label', null, 'Unused after (days)', unused),
+            h('span', { class: 'hint' }, 'A key or console password not used for this long is flagged for removal, and a user with no activity this long counts as inactive.'), origin('risk.keyUnusedDays')),
+          saveBar(['risk.keyRotateDays', 'risk.keyUnusedDays'])),
+        h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'The IAM users list follows a change at once. Risk levels and findings follow at each identity\'s next analysis: the next catch-up read, or the daily scan.'),
+          h('p', { class: 'small muted' }, h('a', { href: '#/admin/alerts' }, 'Alerts'), ' can post when a key passes the rotation age.'))));
+
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, environmentsCard(d.environments, load));
+      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, risk, environmentsCard(d.environments, load));
     refreshSave();
   }
 

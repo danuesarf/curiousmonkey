@@ -1,3 +1,4 @@
+import { keyRules } from '../config.js';
 import { query, tx, pool } from '../db.js';
 import { analyze } from '../analyzer/analyze.js';
 import { matchTrust } from '../analyzer/trust.js';
@@ -38,7 +39,7 @@ export async function analyzeRole(role, windowStart, now = new Date(), maps = nu
   if (role.kind !== 'iam-user') return out;
   // an IAM user's credentials count as much as its permissions
   const [d, k] = await Promise.all([query('SELECT * FROM iam_user_details WHERE role_id=$1', [role.id]), query('SELECT * FROM iam_access_keys WHERE role_id=$1', [role.id])]);
-  return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime() }));
+  return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime(), rules: keyRules() }));
 }
 
 export async function persistAnalysis(roleId, r) {

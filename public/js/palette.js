@@ -10,7 +10,8 @@ const PAGES = [
   ['Identities · Google Cloud', '#/identities?type=gcp', 'view', 'gcp service accounts', 'unscoped'],
   ['Unidentified calls', '#/unidentified', 'view', 'unknown event names'], ['Accounts', '#/accounts', 'view', 'aws onboarding connect'],
   ['Operations · Scans', '#/operations/scans', 'ops', 'queue jobs'], ['Operations · Workers', '#/operations/workers', 'ops', 'health'], ['Operations · Database', '#/operations/database', 'ops', 'postgres disk'],
-  ['Admin · Members', '#/admin/members', 'members', 'users invite password'], ['Admin · Audit log', '#/admin/audit', 'audit', ''], ['Admin · Configuration', '#/admin/config', 'settings', 'settings sso environments'],
+  ['Admin · Members', '#/admin/members', 'members', 'users invite password'], ['Admin · Audit log', '#/admin/audit', 'audit', ''],
+  ['Admin · Alerts', '#/admin/alerts', 'settings', 'slack webhook notify digest'], ['Admin · Configuration', '#/admin/config', 'settings', 'settings sso environments'],
 ];
 const GCP_KIND = { serviceAccount: 'SA', user: 'USER', group: 'GROUP', federated: 'FEDERATED' };
 

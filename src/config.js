@@ -18,6 +18,18 @@ export const config = {
   // 'aws' talks to real AWS. 'demo' generates a believable fake estate so the portal can be tried without credentials.
   awsMode: env.AWS_MODE || 'aws',
 
+  alerts: {
+    digestAt: env.ALERT_DIGEST_AT || '09:00',        // local time (SCAN_TZ) the daily digests go out
+    timeoutMs: Number(env.ALERT_TIMEOUT_SECONDS || 10) * 1000,
+    everyMs: Number(env.ALERT_EVERY_SECONDS || 60) * 1000,
+  },
+
+  // IAM user credentials: when an access key should be rotated, and when an unused key or password should go
+  risk: {
+    keyRotateDays: Number(env.KEY_ROTATE_DAYS || 90),
+    keyUnusedDays: Number(env.KEY_UNUSED_DAYS || 90),
+  },
+
   scanner: {
     principalArn: env.SCANNER_PRINCIPAL_ARN || '',
     roleName: env.SCANNER_ROLE_NAME || 'CuriousMonkeyScanner',
@@ -70,3 +82,6 @@ export function assertConfig() {
     if (config.dataEncryptionKey.length < 32) throw new Error('DATA_ENCRYPTION_KEY must be at least 32 characters in production');
   }
 }
+
+/** The IAM user credential thresholds in force now (Configuration → Risk thresholds). */
+export const keyRules = () => ({ rotateDays: config.risk.keyRotateDays, staleDays: config.risk.keyUnusedDays });

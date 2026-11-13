@@ -606,3 +606,179 @@ test('environments: the defaults, accounts by name, rename in place, and removin
   assert.equal((await put({ environments: [{ name: 'A', color: 'red' }] })).status, 400);
   assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='settings.environments'`)).rowCount >= 2);
 });
+
+// ---------- alerts and thresholds ----------
+import http from 'node:http';
+/** A stand-in for Slack or a webhook: records each POST; a path with /fail answers 500. */
+async function receiver() {
+  const got = [];
+  const srv = http.createServer((req, res) => {
+    let body = ''; req.on('data', (c) => { body += c; });
+    req.on('end', () => { got.push({ path: req.url, body: JSON.parse(body || 'null') }); res.writeHead(req.url.includes('/fail') ? 500 : 200).end('ok'); });
+  }).listen(0);
+  await new Promise((r) => srv.once('listening', r));
+  return { got, url: (p) => `http://127.0.0.1:${srv.address().port}${p}`, close: () => srv.close() };
+}
+
+test('risk thresholds are workspace settings: the IAM users list follows them; out-of-range values are refused', async () => {
+  const before = (await owner.get('/api/iam-users?limit=100')).json;
+  assert.deepEqual(before.rules, { rotateDays: 90, staleDays: 90 });
+  assert.equal((await owner.call('PUT', '/api/settings', { 'risk.keyRotateDays': 3 })).status, 400);
+  assert.equal((await owner.call('PUT', '/api/settings', { 'risk.keyRotateDays': 700 })).status, 200);
+  try {
+    const after = (await owner.get('/api/iam-users?limit=100')).json;
+    assert.equal(after.rules.rotateDays, 700);
+    assert.ok(after.totals.oldKeys < before.totals.oldKeys, 'fewer keys are past a longer rotation age');
+    assert.equal((await owner.get('/api/settings')).json.settings['risk.keyRotateDays'].value, 700);
+  } finally { await owner.call('PUT', '/api/settings', { 'risk.keyRotateDays': null }); }
+  assert.equal((await owner.get('/api/iam-users?limit=1')).json.rules.rotateDays, 90);
+});
+
+test('alert destinations: URL checked, stored encrypted, never shown; test message; only settings holders', async () => {
+  const rx = await receiver();
+  try {
+    const slackBad = await owner.post('/api/alerts/destinations', { name: 'sec', kind: 'slack', url: rx.url('/hook') });
+    assert.equal(slackBad.status, 400); assert.equal(slackBad.json.field, 'url'); assert.match(slackBad.json.message, /hooks\.slack\.com/);
+    assert.equal((await owner.post('/api/alerts/destinations', { name: 'x', kind: 'webhook', url: 'not a url' })).status, 400);
+    assert.equal((await reviewerClient.post('/api/alerts/destinations', { name: 'x', kind: 'webhook', url: rx.url('/a') })).status, 403);
+    assert.equal((await reviewerClient.get('/api/alerts')).status, 403);
+    const d = await owner.post('/api/alerts/destinations', { name: 'n8n', kind: 'webhook', url: rx.url('/ok/secret-token-123') });
+    assert.equal(d.status, 201); assert.equal(d.json.urlHint.endsWith('…-123'), true);
+    const page = await owner.get('/api/alerts');
+    assert.ok(!page.text.includes('secret-token'), 'the URL is never returned');
+    assert.ok(!(await db.query('SELECT url_enc FROM alert_destinations WHERE id=$1', [d.json.id])).rows[0].url_enc.includes('secret-token'), 'stored encrypted');
+    const t = await owner.post(`/api/alerts/destinations/${d.json.id}/test`);
+    assert.deepEqual([t.json.ok, t.json.status], [true, 200]);
+    assert.equal(rx.got.at(-1).path, '/ok/secret-token-123'); assert.equal(rx.got.at(-1).body.kind, 'test'); assert.equal(rx.got.at(-1).body.source, 'curious-monkey');
+    // a failing endpoint: reported, logged as failed (a test is not retried)
+    const bad = await owner.post('/api/alerts/destinations', { name: 'broken', kind: 'webhook', url: rx.url('/fail') });
+    const tb = await owner.post(`/api/alerts/destinations/${bad.json.id}/test`);
+    assert.deepEqual([tb.json.ok, tb.json.status], [false, 500]);
+    const log = (await owner.get('/api/alerts')).json.deliveries;
+    assert.equal(log[0].status, 'failed'); assert.equal(log[0].kind, 'test'); assert.equal(log[1].status, 'sent');
+    assert.ok((await owner.get('/api/audit?action=alert.destination.test')).json.items.length >= 2);
+    for (const id of [d.json.id, bad.json.id]) assert.equal((await owner.call('DELETE', `/api/alerts/destinations/${id}`)).status, 200);
+  } finally { rx.close(); }
+});
+
+test('alert URL rules in production: https only, no loopback or metadata service; private addresses allowed', async () => {
+  const { urlProblem } = await import('../src/alerts.js');
+  const { config } = await import('../src/config.js');
+  const was = config.env; config.env = 'production';
+  try {
+    for (const u of ['http://hooks.example.com/x', 'https://169.254.169.254/latest', 'https://[::1]/x', 'https://[::ffff:127.0.0.1]/x', 'https://localhost/x', 'https://2130706433/x', 'https://metadata.google.internal/x', 'https://u:p@example.com/x'])
+      assert.ok(urlProblem(u, 'webhook'), `refused: ${u}`);
+    for (const u of ['https://n8n.internal.example/webhook/abc', 'https://10.0.4.12/hook', 'https://hooks.example.com/x']) assert.equal(urlProblem(u, 'webhook'), null, `allowed: ${u}`);
+    assert.equal(urlProblem('https://hooks.slack.com/services/T0/B0/xyz', 'slack'), null);
+    assert.ok(urlProblem('https://hooks.slack.com.evil.example/services/x', 'slack'));
+  } finally { config.env = was; }
+});
+
+test('alert rules: new findings only (no backlog), one message per batch, sent once; a condition posts what is true now', async () => {
+  const rx = await receiver();
+  const { alertsTick } = await import('../src/alerts.js');
+  const rules = [];
+  try {
+    const dest = (await owner.post('/api/alerts/destinations', { name: 'hook', kind: 'webhook', url: rx.url('/ok/1') })).json;
+    const mk = async (b) => { const r = await owner.post('/api/alerts/rules', { destinationId: dest.id, ...b }); assert.equal(r.status, 201, r.text); rules.push(r.json.id); return r.json; };
+    assert.equal((await owner.post('/api/alerts/rules', { name: 'x', trigger: 'finding', destinationId: '00000000-0000-4000-8000-000000000000' })).status, 400);
+    await mk({ name: 'New High finding', trigger: 'finding', minSeverity: 'high' });
+    await alertsTick();
+    assert.equal(rx.got.length, 0, 'findings from before the rule are not posted');
+    // two findings appear: one high, one low
+    const hi = (await db.query(`SELECT f.id, f.title FROM flags f WHERE status='open' AND severity='high' LIMIT 1`)).rows[0];
+    const lo = (await db.query(`SELECT f.id FROM flags f WHERE status='open' AND severity='low' LIMIT 1`)).rows[0];
+    await db.query(`UPDATE flags SET created_at = now() WHERE id = ANY($1::uuid[])`, [[hi.id, lo?.id].filter(Boolean)]);
+    let r = await alertsTick();
+    assert.equal(r.sent, 1); assert.equal(rx.got.length, 1);
+    const msg = rx.got[0].body;
+    assert.equal(msg.count, 1); assert.equal(msg.items[0].title, hi.title); assert.equal(msg.items[0].severity, 'high');
+    assert.match(msg.items[0].url, /#\/identities\/[\w-]+\?tab=findings$/); assert.equal(msg.rule.trigger, 'finding');
+    await alertsTick(); assert.equal(rx.got.length, 1, 'each finding is posted once');
+
+    // a condition: every active key past the rotation age, in one message, once
+    await mk({ name: 'Old keys', trigger: 'key-age' });
+    r = await alertsTick();
+    const old = (await db.query(`SELECT k.key_id FROM iam_access_keys k JOIN roles r ON r.id=k.role_id WHERE k.status='Active' AND k.deleted_at IS NULL AND r.deleted_at IS NULL AND k.created_at < now() - interval '90 days'`)).rows;
+    assert.ok(old.length > 1); assert.equal(rx.got.length, 2); assert.equal(rx.got[1].body.count, old.length);
+    await alertsTick(); assert.equal(rx.got.length, 2);
+    // rotated: forgotten; old again: posted again
+    const k = old[0].key_id;
+    const was = (await db.query(`UPDATE iam_access_keys SET created_at = now() WHERE key_id=$1 RETURNING (SELECT created_at FROM iam_access_keys WHERE key_id=$1) AS prev`, [k])).rows[0].prev;
+    await alertsTick();
+    await db.query(`UPDATE iam_access_keys SET created_at = $2 WHERE key_id=$1`, [k, was]);
+    await alertsTick();
+    assert.equal(rx.got.length, 3); assert.equal(rx.got[2].body.count, 1); assert.match(rx.got[2].body.items[0].title, new RegExp(k));
+
+    // the page: rules with their destination, the log newest first
+    const page = (await owner.get('/api/alerts')).json;
+    assert.equal(page.rules.length, 2); assert.ok(page.rules.every((x) => x.destinationName === 'hook'));
+    assert.equal(page.deliveries.filter((x) => x.status === 'sent' && x.kind === 'instant').length, 3);
+    assert.equal((await owner.call('DELETE', `/api/alerts/destinations/${dest.id}`)).status, 409, 'a destination in use cannot be removed');
+  } finally {
+    for (const id of rules) await owner.call('DELETE', `/api/alerts/rules/${id}`);
+    await db.query('DELETE FROM alert_destinations'); rx.close();
+  }
+});
+
+test('alert rules: Radar changes by kind; a failed post is retried once, then marked failed; daily digests wait for their hour', async () => {
+  const rx = await receiver();
+  const { alertsTick } = await import('../src/alerts.js');
+  const rules = [];
+  try {
+    const ok = (await owner.post('/api/alerts/destinations', { name: 'ok', kind: 'webhook', url: rx.url('/ok/2') })).json;
+    const bad = (await owner.post('/api/alerts/destinations', { name: 'down', kind: 'webhook', url: rx.url('/fail') })).json;
+    const mk = async (b) => { const r = await owner.post('/api/alerts/rules', b); assert.equal(r.status, 201, r.text); rules.push(r.json.id); return r.json; };
+    const role = (await db.query(`SELECT id, account_id FROM roles WHERE kind <> 'iam-user' AND deleted_at IS NULL LIMIT 1`)).rows[0];
+    const change = (kind, sev, key) => db.query(`INSERT INTO changes(account_id, role_id, kind, severity, title, detail, dedupe) VALUES ($1,$2,$3,$4,$5,'d',$6)`, [role.account_id, role.id, kind, sev, `${kind} happened`, key]);
+    await change('new-caller', 'high', 'old-one');                  // before the rule: not posted
+    await mk({ name: 'Callers', trigger: 'change', changeKinds: ['new-caller'], minSeverity: 'high', destinationId: ok.id });
+    await change('new-caller', 'high', 'a'); await change('new-caller', 'warn', 'b'); await change('grew', 'high', 'c');
+    await alertsTick();
+    assert.equal(rx.got.length, 1); assert.equal(rx.got[0].body.count, 1); assert.equal(rx.got[0].body.items[0].kind, 'new-caller');
+
+    // retry: first failure waits, second is final
+    const mfa = await mk({ name: 'No MFA', trigger: 'console-no-mfa', destinationId: bad.id });
+    await alertsTick();
+    let d = (await db.query(`SELECT * FROM alert_deliveries WHERE rule_id=$1`, [mfa.id])).rows;
+    assert.equal(d.length, 1); assert.deepEqual([d[0].status, d[0].attempts, d[0].http_status], ['pending', 1, 500]);
+    await alertsTick();
+    assert.equal((await db.query(`SELECT attempts FROM alert_deliveries WHERE id=$1`, [d[0].id])).rows[0].attempts, 1, 'not before its time');
+    await db.query(`UPDATE alert_deliveries SET next_attempt_at = now() WHERE id=$1`, [d[0].id]);
+    const r = await alertsTick();
+    d = (await db.query(`SELECT * FROM alert_deliveries WHERE id=$1`, [d[0].id])).rows;
+    assert.deepEqual([d[0].status, d[0].attempts, d[0].error], ['failed', 2, 'Answered 500.']); assert.equal(r.failed, 1);
+    await owner.call('PUT', `/api/alerts/rules/${mfa.id}`, { enabled: false });
+
+    // daily: collected all day, sent once after the digest hour (09:00 Jakarta = 02:00 UTC)
+    const daily = await mk({ name: 'Keys daily', trigger: 'key-age', mode: 'daily', destinationId: ok.id });
+    const n = rx.got.length;
+    await alertsTick(new Date('2030-01-02T00:30:00Z'));                // 07:30 local
+    assert.equal(rx.got.length, n);
+    assert.ok((await owner.get('/api/alerts')).json.rules.find((x) => x.id === daily.id).waiting > 0);
+    await alertsTick(new Date('2030-01-02T02:30:00Z'));                // 09:30 local
+    assert.equal(rx.got.length, n + 1); assert.equal(rx.got.at(-1).body.kind, 'daily'); assert.match(rx.got.at(-1).body.title, /^Daily digest · Keys daily/);
+    await alertsTick(new Date('2030-01-02T05:00:00Z'));
+    assert.equal(rx.got.length, n + 1, 'one digest a day');
+
+    // switched off and on: starts again from now
+    await owner.call('PUT', `/api/alerts/rules/${rules[0]}`, { enabled: false });
+    await change('new-caller', 'high', 'while-off');
+    await owner.call('PUT', `/api/alerts/rules/${rules[0]}`, { enabled: true });
+    const m = rx.got.length; await alertsTick(); assert.equal(rx.got.length, m, 'what happened while off is not posted');
+  } finally {
+    for (const id of rules) await owner.call('DELETE', `/api/alerts/rules/${id}`);
+    await db.query(`DELETE FROM changes WHERE dedupe IN ('old-one','a','b','c','while-off')`);
+    await db.query('DELETE FROM alert_destinations'); rx.close();
+  }
+});
+
+test('alert messages for Slack: escaped, one line per match, the rest counted with a link', async () => {
+  const { slackBody } = await import('../src/alerts.js');
+  const items = Array.from({ length: 3 }, (_, i) => ({ title: `<b>&${i}|x`, subject: 'role', account: 'prod', environment: 'production', severity: 'high', url: `https://cm/#/i/${i}` }));
+  const b = slackBody({ kind: 'instant', rule: { name: 'R' }, count: 60, items, more: 'https://cm/#/findings' });
+  assert.match(b.text, /^\*R · 60 new\*/);
+  assert.ok(b.text.includes('<https://cm/#/i/0|&lt;b&gt;&amp;0/x>'), b.text);
+  assert.equal(b.text.split('\n').filter((l) => l.startsWith('•')).length, 3);
+  assert.match(b.text, /…and 57 more\. <https:\/\/cm\/#\/findings\|See them all>/);
+});

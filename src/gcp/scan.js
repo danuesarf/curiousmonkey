@@ -90,7 +90,7 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
 
   await progress({ stage: 'analysis' });
   const snap = { org: { domain: org?.displayName || null }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
-  const result = analyzeGcp(snap);
+  const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays });
   return { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result };
 }
 
