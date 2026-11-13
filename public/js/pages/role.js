@@ -48,7 +48,22 @@ export async function rolePage(ctx, id) {
     h('div', { class: 'card' }, h('div', { class: 'card-b stack' }, h('h3', null, 'Why this risk level'),
       r.risk_reasons.length ? h('ul', { class: 'plain' }, r.risk_reasons.map((x) => h('li', null, x))) : h('p', { class: 'muted' }, 'Nothing stands out.'),
       d.window?.first && h('p', { class: 'small muted' }, `Evidence window: ${fmtDay(d.window.first)} to ${fmtDay(d.window.last)}. Anything older is invisible to this tool.`))),
+    gcpCard(r.id),
     tabs, panel);
+}
+/** Where this role reaches into Google Cloud, or which Google service accounts can become it. Filled in when known. */
+function gcpCard(roleId) {
+  const box = h('div');
+  get(`/gcp/aws-role/${roleId}`).then((x) => {
+    if (!x.into.length && !x.from.length) return;
+    const li = (label, meta, href, bad) => h('li', null, h('a', { href }, label), h('span', { class: 'small muted' }, ` · ${meta}`), bad ? h('span', { class: 'badge b-high', style: 'margin-left:6px' }, 'any role in the account') : null);
+    box.replaceChildren(h('section', { class: 'card' }, h('div', { class: 'card-b stack' }, h('h3', null, 'Across clouds · Google Cloud'),
+      x.into.length > 0 && h('div', null, h('p', { class: 'small muted' }, 'Through workload identity federation, this role can act in Google Cloud as:'),
+        h('ul', { class: 'plain stack', style: 'gap:4px' }, x.into.map((l) => li(l.gcpEmail || `${l.grant} on ${l.gcpProject}`, `${l.gcpProject} · pool ${l.pool}${l.awsRole ? '' : ' (open to the whole AWS account)'}`, `#/gcp/principals/${l.gcpPrincipal}`, l.broad)))),
+      x.from.length > 0 && h('div', null, h('p', { class: 'small muted' }, 'Its trust policy lets these Google service accounts in:'),
+        h('ul', { class: 'plain stack', style: 'gap:4px' }, x.from.map((l) => li(l.gcpEmail || `unknown service account ${l.uniqueId}`, `${l.gcpProject || 'not in a connected organization'} · statement ${l.statement + 1}`, l.gcpPrincipal ? `#/gcp/principals/${l.gcpPrincipal}` : `#/trust?q=${encodeURIComponent('provider:google')}`)))))));
+  }).catch(() => {});
+  return box;
 }
 const tile = (l, v, s) => h('div', { class: 'tile' }, h('span', { class: 'small muted' }, l), h('b', null, v), h('span', { class: 'tiny muted' }, s));
 

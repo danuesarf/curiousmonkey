@@ -1,5 +1,6 @@
 import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR, loadEnvironments, envName, envs, paint } from '../lib.js';
 import { session, go } from '../main.js';
+import { gcpSection } from './gcp.js';
 
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
 // the environments set on the Configuration page; an account whose environment was removed keeps it until edited
@@ -268,7 +269,8 @@ export async function accountsPage(ctx) {
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS'), h('h1', null, 'Cloud accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
       can('accounts') && h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => planDialog(ctx) }, 'Add planned account'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account'))),
     live.length ? live.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'),
-    planned.length > 0 && plannedCard(planned, ctx, can));
+    planned.length > 0 && plannedCard(planned, ctx, can),
+    await gcpSection(ctx));
 }
 
 function plannedCard(planned, ctx, can) {

@@ -235,6 +235,17 @@ gcp.get('/gcp/roles/permissions', requirePerm('view'), unscoped, wrap(async (req
   res.json(r);
 }));
 
+/** The Google Cloud side of one AWS role: what it can become there, and which service accounts can become it. */
+gcp.get('/gcp/aws-role/:id', requirePerm('view'), wrap(async (req, res) => {
+  const id = uuid.parse(req.params.id);
+  if (req.user.scope_accounts) return res.json({ into: [], from: [], hidden: true });
+  const role = (await query('SELECT r.id, r.name, r.account_id, a.account_id AS aws FROM roles r JOIN cloud_accounts a ON a.id = r.account_id WHERE r.id=$1', [id])).rows[0]; if (!role) throw NotFound();
+  const links = await crossLinks();
+  // a pool open to the whole AWS account counts for every role in it
+  const into = links.awsToGcp.filter((l) => l.awsAccount === role.account_id && (l.awsRoleId === role.id || !l.awsRole));
+  res.json({ into, from: links.gcpToAws.filter((l) => l.awsRoleId === role.id) });
+}));
+
 // ---------- Space: Google Cloud's field and the paths between the clouds ----------
 export async function spaceGcp() {
   const [projects, principals, wif] = await Promise.all([

@@ -9,6 +9,7 @@ import { membersPage } from './pages/members.js';
 import { auditPage } from './pages/audit.js';
 import { opsPage } from './pages/ops.js';
 import { radarPage } from './pages/radar.js';
+import { gcpConnectPage, gcpPrincipalPage } from './pages/gcp.js';
 import { spacePage } from './pages/space.js';
 import { eventsPage } from './pages/events.js';
 import { trustPage } from './pages/trust.js';
@@ -34,6 +35,9 @@ const routes = [
   [/^#\/roles\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'roles'],
   [/^#\/roles\/([\w-]+)$/, (m) => (c) => rolePage(c, m[1]), 'roles'],
   [/^#\/accounts\/new$/, () => newAccountPage, 'accounts'],
+  [/^#\/gcp\/new$/, () => (c) => gcpConnectPage(c), 'accounts'],
+  [/^#\/gcp\/([\w-]+)\/edit$/, (m) => (c) => gcpConnectPage(c, m[1]), 'accounts'],
+  [/^#\/gcp\/principals\/([\w-]+)$/, (m) => (c) => gcpPrincipalPage(c, m[1]), 'roles'],
   [/^#\/accounts\/([\w-]+)\/(coverage|unidentified)$/, (m) => (c) => unidentifiedPage(c, m[1]), 'accounts'],
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],

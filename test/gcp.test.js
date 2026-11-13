@@ -189,6 +189,17 @@ test('space: projects in their environments, outside identities, and the paths b
   assert.equal((await owner.get('/api/gcp/projects')).json.items.find((p) => p.projectId === 'acme-shared-ci').environment, 'production');
 });
 
+test('an AWS role page learns where the role reaches in Google Cloud, and who comes in from there', async () => {
+  const roles = (await owner.get('/api/roles?limit=100')).json.items;
+  const etl = roles.find((r) => r.name === 'data-etl' && r.aws_account_id === '222222222222');
+  const into = (await owner.get(`/api/gcp/aws-role/${etl.id}`)).json.into.map((l) => l.gcpEmail);
+  assert.deepEqual(into, ['lake-sync@acme-data-stg.iam.gserviceaccount.com']);
+  const any = roles.find((r) => r.name === 'monitoring-reader' && r.aws_account_id === '111111111111');
+  assert.ok((await owner.get(`/api/gcp/aws-role/${any.id}`)).json.into.some((l) => l.broad && /etl-runner/.test(l.gcpEmail)));   // a pool open to the whole account
+  const lake = roles.find((r) => r.name === 'lake-reader' && r.aws_account_id === '111111111111');
+  assert.equal((await owner.get(`/api/gcp/aws-role/${lake.id}`)).json.from[0].gcpEmail, 'bq-exporter@acme-payments-prod.iam.gserviceaccount.com');
+});
+
 test('the trust map names the Google service account an AWS role trusts', async () => {
   const t = (await owner.get('/api/trust?q=provider:google')).json;
   const e = t.rows.find((x) => x.role === 'lake-reader' && /Google/.test(x.source));

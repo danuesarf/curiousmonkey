@@ -21,7 +21,8 @@ const useEnvironments = (list) => { ENV = Object.fromEntries(list.map((e) => [e.
 const RED = '#ff5a4f', WARN = '#fab219', COLD = '#7a8780', OUT = '#c3cbd9';
 const TONE = { high: RED, warn: WARN, info: '#ffffff', good: '#6fe3b0', medium: WARN, low: '#d5dceb' };
 const KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
-const CM = '#c79a6b', CM_ID = 'cm';                 // Curious Monkey, this portal's own scanner: its own colour and shape
+const CM = '#c79a6b', CM_ID = 'cm';
+const GCP = '#7fb2ff', DY = 440;          // Google Cloud: its colour, and how far apart the two fields sit                 // Curious Monkey, this portal's own scanner: its own colour and shape
 const GLYPH = { oidc: 'oidc', saml: 'saml', 'external-account': 'account', public: 'web' };
 
 const f = (n) => Math.round(n * 10) / 10;
@@ -113,6 +114,63 @@ function estateModel(d) {
     defaultSel: events[0]?.target || [...groups].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
 }
 
+// ---------- Google Cloud: a second field behind the AWS one, the same zones, paths between the two ----------
+// AWS moves forward, Google Cloud sits behind. A project is a ring; each service account a star, higher the more it
+// can do, red when it is high risk. Paths between the fields are where one cloud can sign in to the other.
+const isGcp = (id) => String(id).startsWith('gcp:');
+function withGcp(M, g) {
+  const aws = { id: 'aws', label: 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 };
+  if (!g?.projects?.length) { M.planes = [aws]; return M; }
+  for (const x of M.groups) { x.y += DY; x.stars.forEach((st) => { st.y += DY; }); }
+  for (const z of M.zones) { z.y0 += DY; z.y1 += DY; z.cloud = 'aws'; }
+  for (const x of M.sources) x.y += DY;
+  if (M.scanner) M.scanner.y += DY;
+  M.planes = [{ ...aws, y0: -380 + DY, y1: 380 + DY }, { id: 'gcp', label: 'GOOGLE CLOUD', x0: -560, x1: 560, y0: -380 - DY, y1: 380 - DY }];
+  const envs = ORDER.filter((e) => g.projects.some((p) => p.environment === e));
+  const weight = (e) => Math.max(1, g.projects.filter((p) => p.environment === e).length) ** 0.75;
+  const totalW = envs.reduce((n, e) => n + weight(e), 0);
+  let x1 = 560;
+  const gz = [], gg = [];
+  for (const env of envs) {
+    const w = (1120 * weight(env)) / totalW, x0 = x1 - w, list = g.projects.filter((p) => p.environment === env);
+    gz.push({ id: env, x0, x1, y0: -380 - DY, y1: 380 - DY, cloud: 'gcp' });
+    const cols = Math.max(1, Math.round(Math.sqrt((list.length * w) / 760))), rows = Math.ceil(list.length / cols), cw = w / cols, ch = 760 / rows;
+    list.forEach((p, i) => {
+      const cx = x0 + cw * (i % cols + 0.5), cy = 380 - ch * (Math.floor(i / cols) + 0.5) - DY;
+      const R = Math.max(14, Math.min(18 + Math.sqrt(p.accounts.length) * 5.5, 0.4 * Math.min(cw, ch)));
+      const stars = cloud(cx, cy, R, p.accounts.filter((a) => !a.managed).map((a) => ({ id: `gsa:${a.id}`, sa: a, risk: a.risk, calls7: a.permissions })), 0, hash(p.projectId));
+      gg.push({ id: `gcp:${p.projectId}`, cloud: 'gcp', project: p, name: p.projectId, label: p.projectId, env, x: cx, y: cy, R, coldShare: 0, prof: Array(24).fill(0), hourly: [], stars,
+        roles: p.accounts.length, cold: 0, high: p.risky, calls7: 0, keys: p.keys });
+    });
+    x1 = x0;
+  }
+  M.zones.push(...gz); M.groups.push(...gg);
+  for (const x of gg) M.by.set(x.id, x);
+  // identities from outside the organization, off the far edge of the Google Cloud field
+  const outs = g.outside.filter((o) => o.targets.some((t) => M.by.has(`gcp:${t.projectId}`)));
+  const srcs = outs.map((o, i) => {
+    const deg = outs.length === 1 ? 270 : 222 + (96 * i) / (outs.length - 1), [gap, z] = PLACE[o.worst] || PLACE.none, at = off(deg, gap, z);
+    return { id: `gsrc:${o.key}`, key: o.key, gcp: true, label: o.label, sub: o.sub, group: o.group, kind: o.group === 'oidc' ? 'oidc' : o.group === 'public' ? 'web' : 'account', risk: o.worst, findings: [],
+      principal: o.principal || null, targets: o.targets.map((t) => ({ accountId: `gcp:${t.projectId}`, roles: t.principals, edges: [] })), sessions: 0, ...at, y: at.y - DY };
+  });
+  M.sources.push(...srcs);
+  for (const x of srcs) for (const t of x.targets) M.links.push({ from: x.id, to: t.accountId, kind: x.risk === 'high' ? 'extHigh' : x.risk === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: [], roles: t.roles.length, gcp: true });
+  // the paths between the clouds, one per pair of account and project
+  const pairs = new Map();
+  const add = (from, to, dir, l) => {
+    if (!M.by.has(from) || !M.by.has(to)) return;
+    const k = `${from}|${to}`;
+    if (!pairs.has(k)) pairs.set(k, { from, to, kind: 'xcloud', dir, vol: 1, at: null, pairs: [] });
+    const x = pairs.get(k); x.pairs.push(l); if (l.broad) x.kind = 'xcloudHigh';
+  };
+  for (const l of g.links.awsToGcp) if (l.awsAccount && l.gcpProject) add(l.awsAccount, `gcp:${l.gcpProject}`, 'aws-gcp', l);
+  for (const l of g.links.gcpToAws) if (l.awsAccount && l.gcpProject) add(`gcp:${l.gcpProject}`, l.awsAccount, 'gcp-aws', l);
+  M.links.push(...pairs.values());
+  M.links.forEach((l, i) => { l.id = `link:${i}`; });
+  M.gcp = { projects: gg, sources: srcs, xlinks: [...pairs.values()], providers: g.providers };
+  return M;
+}
+
 // ---------- one account: services at the core, roles clustered round the service they call most ----------
 function accountModel(d) {
   const env = d.account.environment;
@@ -181,12 +239,17 @@ export async function spacePage(ctx) {
   // both views are fetched together and remembered briefly, so zooming into an account and back does not wait twice
   const wanted = view === 'account' && ctx.params.get('account') ? getCached(`/space/account/${ctx.params.get('account')}`) : null;
   wanted?.catch(() => {});
-  const [est, envs] = await Promise.all([getCached('/space'), loadEnvironments()]);
+  const [est, envs, gcpData] = await Promise.all([getCached('/space'), loadEnvironments(), view === 'estate' ? getCached('/space/gcp').catch(() => null) : null]);
   useEnvironments(envs);
+  // a Google service account an AWS role trusts is drawn as a path between the fields, not as an outside identity
+  const hasGcp = !!gcpData?.projects?.length;
+  if (hasGcp) est.outside = { ...est.outside, items: est.outside.items.filter((x) => !/^Google Cloud · /.test(x.label)) };
   if (!est.accounts.length) return h('div', { class: 'stack' }, h('h1', null, 'Space'), h('p', { class: 'muted' }, 'No accounts yet. Connect one to see it here.'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an account'));
   const live = est.accounts.filter((a) => !a.planned);
   const accountId = ctx.params.get('account') || [...(live.length ? live : est.accounts)].sort((a, b) => b.calls7 - a.calls7)[0].id;
-  const M = view === 'estate' ? estateModel(est) : accountModel(await (wanted || getCached(`/space/account/${accountId}`)));
+  const M = view === 'estate' ? withGcp(estateModel(est), gcpData) : accountModel(await (wanted || getCached(`/space/account/${accountId}`)));
+  if (!M.planes) M.planes = [{ id: 'aws', label: 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 }];
+  const awsGroups = () => M.groups.filter((x) => x.cloud !== 'gcp');
   ctx.setCrumbs(h('a', { href: '#/space' }, 'Space'), ...(view === 'account' ? [M.account.name] : []));
   const st = { dir: 'both', sel: null, lit: false, hour: 23, playing: false, az: -14, el: 33, zoom: 1.15, px: 0, py: 0, zone: '', timer: null, fit: null, dragging: false };
   // the bell (and links) can open Space on one thing at one hour; otherwise nothing is picked and the overview shows
@@ -202,7 +265,7 @@ export async function spacePage(ctx) {
   const page = h('div', { class: 'stack space-page', style: 'gap:0' }, h('div', { class: 'scene-layout space-layout' }, left, scene, right));
   // the page opens with something described in the sidebar but the whole scene lit; once the user picks something,
   // everything not connected to it fades so what belongs to what is plain
-  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; if (M.view === 'estate' && M.by.has(patch.sel) && !M.by.get(patch.sel).planned) getCached(`/space/account/${patch.sel}`).catch(() => {}); } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
+  const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; if (M.view === 'estate' && M.by.has(patch.sel) && !M.by.get(patch.sel).planned && !isGcp(patch.sel)) getCached(`/space/account/${patch.sel}`).catch(() => {}); } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
   ctx.onLeave(() => stop());
 
@@ -299,9 +362,9 @@ export async function spacePage(ctx) {
     for (const s of M.sources) ent.set(s.id, { p3: [s.x, s.y, s.z], env: 'outer' });
     if (M.scanner) ent.set(CM_ID, { p3: [M.scanner.x, M.scanner.y, M.scanner.z], env: 'scanner' });
     if (M.view === 'account') { for (const t of M.towers) ent.set(t.id, { p3: [t.x, t.y, t.h], env: 'svc' }); for (const r of M.roles) ent.set(r.id, { p3: [r.x, r.y, r.z], env: r.cluster.env }); for (const n of M.fars) ent.set(`far:${n.id}`, { p3: [n.x, n.y, 8], env: n.env }); for (const g of M.gates) ent.set(g.id, { p3: [g.x, g.y, 4], env: 'outer' }); for (const d of M.doors) ent.set(d.id, { p3: [d.x, d.y, 4], env: d.env }); }
-    const liftOf = (l, a, b) => (l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
-    const fitPts = [[-560, -380, 0], [560, -380, 0], [560, 380, 0], [-560, 380, 0], [0, -440, 0], ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0]]), ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
-    if (M.view === 'estate') fitPts.push([-760, 0, 0], [760, 0, 0]);
+    const liftOf = (l, a, b) => (/^xcloud/.test(l.kind) ? 70 + 0.12 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
+    const fitPts = [...M.planes.flatMap((q) => [[q.x0, q.y0, 0], [q.x1, q.y0, 0], [q.x1, q.y1, 0], [q.x0, q.y1, 0], [0, q.y0 - 60, 0]]), ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0]]), ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
+    if (M.view === 'estate') for (const q of M.planes) fitPts.push([-760 - (M.planes.length > 1 ? 120 : 0), (q.y0 + q.y1) / 2, 0], [760, (q.y0 + q.y1) / 2, 0]);
     if (M.scanner) fitPts.push([M.scanner.x, M.scanner.y, M.scanner.z + 20]);
     for (const l of M.links) { const a = ent.get(l.from), b = ent.get(l.to); if (a && b) fitPts.push(apex3(a.p3, b.p3, l.from < l.to ? 1 : -1, liftOf(l, a.p3, b.p3))); }
     const P = camera(fitPts), ref = (st.fit.F * st.zoom) / st.fit.D, sinEl = Math.sin((st.el * Math.PI) / 180);
@@ -313,12 +376,16 @@ export async function spacePage(ctx) {
     const fits = (r) => r[0] >= 4 && r[2] <= W - 4 && r[1] >= 4 && r[3] <= H - 4 && !blocks.some((o) => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
 
     // the plane, its grid, the zones
-    const corners = [[-560, -380], [560, -380], [560, 380], [-560, 380]].map(([x, y]) => P(x, y, 0));
-    out.floor.push(svg('path', { d: `${path(corners)} Z`, fill: 'url(#sp-floor)', stroke: '#2a8a5c', 'stroke-width': 1.2 }));
-    for (let i = 1; i < 14; i++) { const x = -560 + i * 80, a = P(x, -380), b = P(x, 380); out.floor.push(svg('line', { x1: f(a[0]), y1: f(a[1]), x2: f(b[0]), y2: f(b[1]), stroke: '#1d6a45', 'stroke-width': 0.7, opacity: 0.4 })); }
-    for (let i = 1; i < 10; i++) { const y = -380 + i * 76, a = P(-560, y), b = P(560, y); out.floor.push(svg('line', { x1: f(a[0]), y1: f(a[1]), x2: f(b[0]), y2: f(b[1]), stroke: '#1d6a45', 'stroke-width': 0.7, opacity: 0.4 })); }
+    for (const q of M.planes) {
+      const g = q.id === 'gcp', edge = g ? '#3d7bd6' : '#2a8a5c', grid = g ? '#1d4a7a' : '#1d6a45';
+      const corners = [[q.x0, q.y0], [q.x1, q.y0], [q.x1, q.y1], [q.x0, q.y1]].map(([x, y]) => P(x, y, 0));
+      out.floor.push(svg('path', { d: `${path(corners)} Z`, fill: g ? 'url(#sp-floor-g)' : 'url(#sp-floor)', stroke: edge, 'stroke-width': 1.2 }));
+      for (let i = 1; i < 14; i++) { const x = q.x0 + i * 80, a = P(x, q.y0), b = P(x, q.y1); out.floor.push(svg('line', { x1: f(a[0]), y1: f(a[1]), x2: f(b[0]), y2: f(b[1]), stroke: grid, 'stroke-width': 0.7, opacity: 0.4 })); }
+      for (let i = 1; i < 10; i++) { const y = q.y0 + i * 76, a = P(q.x0, y), b = P(q.x1, y); out.floor.push(svg('line', { x1: f(a[0]), y1: f(a[1]), x2: f(b[0]), y2: f(b[1]), stroke: grid, 'stroke-width': 0.7, opacity: 0.4 })); }
+      if (M.planes.length > 1) { const l = P(q.x0 - 30, (q.y0 + q.y1) / 2, 0); blocks.push([l[0] - q.label.length * 9.6 - 4, l[1] - 13, l[0] + 4, l[1] + 5]); out.floor.push(svg('text', { x: f(l[0]), y: f(l[1]), 'text-anchor': 'end', fill: g ? GCP : '#6fe3b0', class: 'sp-plane' }, q.label)); }
+    }
     for (const z of M.zones) {
-      const E = ENV[z.id], pts = [[z.x0 + 8, -372], [z.x1 - 8, -372], [z.x1 - 8, 372], [z.x0 + 8, 372]].map(([x, y]) => P(x, y, 0)), l = P((z.x0 + z.x1) / 2, -380, 0);
+      const E = ENV[z.id], pts = [[z.x0 + 8, z.y0 + 8], [z.x1 - 8, z.y0 + 8], [z.x1 - 8, z.y1 - 8], [z.x0 + 8, z.y1 - 8]].map(([x, y]) => P(x, y, 0)), l = P((z.x0 + z.x1) / 2, z.y0, 0);
       const label = E.name.toUpperCase(), w = label.length * 8.7;
       blocks.push([l[0] - w / 2 - 4, l[1] + 12, l[0] + w / 2 + 4, l[1] + 29]);
       out.floor.push(svg('g', { opacity: !focus || focus === z.id ? 1 : 0.35 }, svg('path', { d: `${path(pts)} Z`, fill: E.base, 'fill-opacity': 0.06, stroke: E.base, 'stroke-dasharray': '4 5' }),
@@ -345,7 +412,7 @@ export async function spacePage(ctx) {
       g.stars.forEach((s, i) => {
         const p = P(s.x, s.y, s.z), lv = lg(s.calls7) / maxLog, k = Math.max(0.72, p[3] / ref) * k0;
         const sd = M.view === 'account' ? dimOf(g.env) * fade(s.id) : dim;
-        out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f((s.cold ? 1 : 0.8 + 0.42 * lg(s.calls7)) * k), fill: s.cold ? COLD : lv > 0.8 ? E.hot : lv > 0.45 ? E.base : E.dim, opacity: o2((s.cold ? 0.7 : 0.95) * sd), filter: !s.cold && i < 3 && sd === 1 ? 'url(#sp-glow)' : null })]);
+        out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f((s.cold ? 1 : 0.8 + 0.42 * lg(s.calls7)) * k), fill: s.cold ? COLD : s.risk === 'High' ? RED : lv > 0.8 ? E.hot : lv > 0.45 ? E.base : E.dim, opacity: o2((s.cold ? 0.7 : 0.95) * sd), filter: !s.cold && i < 3 && sd === 1 ? 'url(#sp-glow)' : null })]);
         if (!s.cold && i < (M.view === 'account' ? 6 : 3)) { const b = P(s.x, s.y, 0); out.stems.push(svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(p[0]), y2: f(p[1]), stroke: E.base, 'stroke-width': 0.8, opacity: o2(0.4 * sd) })); }
         bx0 = Math.min(bx0, p[0]); by0 = Math.min(by0, p[1]); bx1 = Math.max(bx1, p[0]); by1 = Math.max(by1, p[1]); topZ = Math.max(topZ, s.z);
       });
@@ -353,7 +420,7 @@ export async function spacePage(ctx) {
       tops.set(g.id, t);
       const target = M.view === 'estate' ? g.id : g.roles[0]?.id;
       const hc = P(g.x, g.y, 30);
-      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
+      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, g.cloud === 'gcp' ? `${g.name} · Google Cloud · ${ENV[g.env].name} · ${g.roles} service accounts${g.high ? ` · ${g.high} high risk` : ''}` : M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
         svg('circle', { cx: f(hc[0]), cy: f(hc[1]), r: f(Math.max(16, g.R * c[3] * 1.15)), fill: '#000', opacity: 0 })));
       const isSel = M.view === 'estate' ? sel === g.id : selRole?.cluster === g;
       cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0) + (g.planned ? -200 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : g.planned ? '#8d9a93' : E.base, faded: dim < 0.5, pick: pick(target), below: fp[2][1] - t[1] + 14 });
@@ -430,6 +497,8 @@ export async function spacePage(ctx) {
       else if (l.kind === 'extHigh') { color = RED; w = 1.4; o = t ? 1 : 0.5; flow = t ? 1 : 0; if (t) flag = { text: '⚠ RISKY TRUST', bg: RED }; }
       else if (l.kind === 'use') { color = ENV[a.env].base; w = 0.5 + 1.6 * l.vol; o = selRole ? 0.12 : 0.28; }
       else if (l.kind === 'use1') { show = t; color = ENV[a.env].hot; w = 1.4; o = 0.95; flow = 1; }
+      else if (l.kind === 'xcloud') { color = GCP; w = 1.5; o = t ? 1 : 0.6; flow = t ? 2 : 1; if (t) flag = { text: l.dir === 'aws-gcp' ? 'AWS → GOOGLE CLOUD' : 'GOOGLE CLOUD → AWS', bg: GCP }; }
+      else if (l.kind === 'xcloudHigh') { color = RED; w = 1.7; o = t ? 1 : 0.7; flow = t ? 2 : 1; flag = t || !sel ? { text: '⚠ ANY AWS ROLE', bg: RED } : null; }
       else if (l.kind === 'scan') { color = CM; w = 1.1; dash = '1.5 4'; o = t || now ? 0.95 : 0.3; flow = now ? 1 : 0; }
       else if (l.kind === 'in' || l.kind === 'out') {
         color = l.worst === 'high' ? RED : ENV[(ent.get(l.kind === 'in' ? l.from : l.to)).env]?.base || OUT;
@@ -456,7 +525,7 @@ export async function spacePage(ctx) {
           svg('animateMotion', { path: g3.d, dur: `${dur}s`, begin, repeatCount: 'indefinite', keyPoints: cut < 1 ? `0;${cut}` : '0;1', keyTimes: '0;1', calcMode: 'linear' }),
           svg('animate', { attributeName: 'opacity', values: '0;0.95;0.95;0', keyTimes: '0;0.1;0.8;1', dur: `${dur}s`, begin, repeatCount: 'indefinite' })));
       }
-      if (flag && (now || t)) { const q = g3.pts[cut < 1 ? 10 : ext ? 6 : 12]; flagC.push({ x: q[0], y: q[1], text: flag.text, bg: flag.bg, pr: (sel === l.id ? 2 : 0) + (now ? 1 : 0), pick: pick(l.id) }); }
+      if (flag && (now || t || l.kind === 'xcloudHigh')) { const q = g3.pts[cut < 1 ? 10 : ext ? 6 : 12]; flagC.push({ x: q[0], y: q[1], text: flag.text, bg: flag.bg, pr: (sel === l.id ? 2 : 0) + (now ? 1 : 0), pick: pick(l.id) }); }
     }
 
     // the selection is marked on the map; its details are in the sidebar
@@ -527,12 +596,13 @@ export async function spacePage(ctx) {
 
     out.stars.sort((a, c) => c[0] - a[0]);
     stage.setAttribute('aria-label', M.view === 'estate'
-      ? `Your organization as a tilted plane: ${M.groups.length} accounts in zones by environment, one star per busy role, higher the more it is called; identities outside the org float off the plane. Showing ${hourLabel(hour)}.`
+      ? `Your organization as a tilted plane${M.gcp ? ', with Google Cloud as a second plane behind it' : ''}: ${awsGroups().length} accounts in zones by environment, one star per busy role, higher the more it is called; identities outside the org float off the plane. Showing ${hourLabel(hour)}.`
       : `${M.account.name} as a plane: services as towers in the middle, roles clustered round the service they call most, cold roles grey round the edge. Showing ${hourLabel(hour)}.`);
     stage.replaceChildren(
       svg('defs', null,
         svg('filter', { id: 'sp-glow', x: '-100%', y: '-100%', width: '300%', height: '300%' }, svg('feGaussianBlur', { stdDeviation: 1.8, result: 'b' }), svg('feMerge', null, svg('feMergeNode', { in: 'b' }), svg('feMergeNode', { in: 'SourceGraphic' }))),
         svg('linearGradient', { id: 'sp-floor', x1: 0, y1: 0, x2: 0, y2: 1 }, svg('stop', { offset: 0, 'stop-color': '#031009' }), svg('stop', { offset: 1, 'stop-color': '#072a1b' })),
+        svg('linearGradient', { id: 'sp-floor-g', x1: 0, y1: 0, x2: 0, y2: 1 }, svg('stop', { offset: 0, 'stop-color': '#030a14' }), svg('stop', { offset: 1, 'stop-color': '#0a1f3a' })),
         ...Object.entries(ENV).map(([k, e]) => svg('radialGradient', { id: `sp-h-${k}` }, svg('stop', { offset: 0, 'stop-color': e.base, 'stop-opacity': 0.8 }), svg('stop', { offset: 0.5, 'stop-color': e.base, 'stop-opacity': 0.24 }), svg('stop', { offset: 1, 'stop-color': e.base, 'stop-opacity': 0 })))),
       svg('g', { 'pointer-events': 'none' }, ...out.floor), svg('g', { 'pointer-events': 'none' }, ...out.halo), ...out.rings, svg('g', { 'pointer-events': 'none' }, ...out.towers, ...out.stems, ...out.stars.map(([, el]) => el)),
       svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.paths, ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels);
@@ -557,6 +627,8 @@ export async function spacePage(ctx) {
   }
   function linkTitle(l) {
     const a = nameOf(l.from), b = nameOf(l.to);
+    if (/^xcloud/.test(l.kind)) return `${a} → ${b} · ${l.pairs.length} way${l.pairs.length === 1 ? '' : 's'} between the clouds${l.kind === 'xcloudHigh' ? ' · any AWS role can use it' : ''} · click for which`;
+    if (/^ext/.test(l.kind) && l.gcp) return `${a} can get into ${b} in Google Cloud · click for who`;
     if (/^ext/.test(l.kind)) return `${a} can enter ${b}${l.kind === 'extHigh' ? ' · risky trust' : l.kind === 'extWarn' ? ' · loose trust' : ''} · click for the trust statement`;
     if (l.kind === 'chain' || l.kind === 'new') return `${a} entered ${b} · ${num(l.sessions)} sessions in 90 days${l.today ? ` · ${l.today} today` : ''}${l.kind === 'new' ? ' · first seen today' : ''} · click for who`;
     if (l.kind === 'denied') return `${a} → ${b} · ${l.denied} calls refused in 7 days`;
@@ -568,6 +640,28 @@ export async function spacePage(ctx) {
   function linkDetail(l) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
     const a = nameOf(l.from), b = nameOf(l.to);
+    if (/^xcloud/.test(l.kind)) {
+      const into = l.dir === 'aws-gcp';
+      const items = l.pairs.map((x) => into
+        ? { label: `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : `${x.grant} on ${x.gcpProject}`}`, meta: [x.via === 'direct' ? 'holds roles itself' : 'becomes the service account', `pool ${x.pool}`, x.conditions.length ? `when ${x.conditions[0]}` : 'no condition'].join(' · '),
+          tone: x.broad ? 'bad' : null, window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY', href: !x.gcpPrincipal && x.awsRoleId ? `#/roles/${x.awsRoleId}` : null }
+        : { label: `${x.gcpEmail ? x.gcpEmail.split('@')[0] : x.uniqueId} → ${x.awsRole}`, meta: `trusted by unique ID ${x.uniqueId} in statement ${x.statement + 1}`, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' });
+      const broad = l.pairs.filter((x) => x.broad).length;
+      return { eyebrow: into ? 'ACROSS CLOUDS · AWS → GOOGLE CLOUD' : 'ACROSS CLOUDS · GOOGLE CLOUD → AWS', title: `${a} → ${b}`, swatch: l.kind === 'xcloudHigh' ? RED : GCP, round: true,
+        sub: into ? `${l.pairs.length} way${l.pairs.length === 1 ? '' : 's'} for AWS identities to act in Google Cloud through workload identity federation` : `${l.pairs.length} AWS role${l.pairs.length === 1 ? '' : 's'} trusting a Google service account`,
+        tags: broad ? [{ t: `⚠ ANY ROLE IN ${a.toUpperCase()}`, c: RED }] : [],
+        summary: into ? (broad ? `The pool has no attribute condition, so every role and user in ${a} can use ${broad === 1 ? 'one of these' : `${broad} of these`}. Pin it to the role that needs it.` : 'Each is pinned to one AWS role.')
+          : 'Code running as these service accounts can get an AWS session in the role, with no AWS key.',
+        rows: [], lists: [{ title: into ? 'AWS role → Google Cloud identity' : 'Service account → AWS role', items }],
+        actions: into ? [['Identities from AWS', '#/roles?cloud=gcp&source=aws', true]] : [['Trust map', `#/trust?q=${encodeURIComponent('provider:google')}`, true]] };
+    }
+    if (/^ext/.test(l.kind) && l.gcp) {
+      const src = M.sources.find((x) => x.id === l.from), g = M.by.get(l.to);
+      return { eyebrow: 'GOOGLE CLOUD · FROM OUTSIDE', title: `${a} → ${b}`, sub: src.sub, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
+        tags: l.kind === 'extHigh' ? [{ t: '⚠ ANY IDENTITY', c: RED }] : l.kind === 'extWarn' ? [{ t: 'OUTSIDE YOUR DOMAIN', c: WARN }] : [], rows: [],
+        lists: [{ title: `In ${g.name}`, items: (src.targets.find((t) => t.accountId === l.to)?.roles || []).map((pid) => ({ label: gcpName(pid), window: `#/gcp/principals/${pid}`, winTitle: gcpName(pid), winEyebrow: 'GOOGLE CLOUD · IDENTITY' })) }],
+        actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(g.name)}`, true]] };
+    }
     if (/^ext/.test(l.kind)) {
       const s = M.sources.find((x) => x.id === l.from), edges = l.edges || [];
       const acct = M.view === 'estate' ? M.by.get(l.to) : M.account;
@@ -615,17 +709,20 @@ export async function spacePage(ctx) {
   // nothing picked: what the whole scene says, and where to start
   function overview() {
     const order = { high: 0, medium: 1 };
-    const ways = [...M.sources].sort((a, b) => (order[a.risk] ?? 2) - (order[b.risk] ?? 2) || (b.sessions || 0) - (a.sessions || 0)).slice(0, 6)
+    const ways = [...M.sources].filter((x) => !x.gcp || x.risk === 'high').sort((a, b) => (order[a.risk] ?? 2) - (order[b.risk] ?? 2) || (b.sessions || 0) - (a.sessions || 0)).slice(0, 6)
       .map((x) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, meta: [x.sub, x.findings[0] || 'conditions pinned', x.sessions ? `used ${num(x.sessions)}×` : 'never used'].join(' · '), pick: x.id }));
     const risky = M.sources.filter((x) => x.risk === 'high').length, loose = M.sources.filter((x) => x.risk === 'medium').length;
     if (M.view === 'estate') {
-      const live = M.groups.filter((g) => !g.planned), roles = live.reduce((n, g) => n + g.roles, 0), cold = live.reduce((n, g) => n + g.cold, 0), high = live.reduce((n, g) => n + g.high, 0);
+      const live = awsGroups().filter((g) => !g.planned), roles = live.reduce((n, g) => n + g.roles, 0), cold = live.reduce((n, g) => n + g.cold, 0), high = live.reduce((n, g) => n + g.high, 0);
       return { eyebrow: 'OVERVIEW', title: 'Your estate', sub: 'Click anything on the map for its details', swatch: '#2a8a5c', closable: false, tags: [],
-        summary: `${live.length} account${live.length === 1 ? '' : 's'} with ${num(roles)} roles. ${roles ? Math.round((100 * cold) / roles) : 0}% of the roles were never called. ${M.sources.length + M.hidden} identities outside your org can get in${risky ? `, ${risky} through risky trust` : ''}.`,
+        summary: `${live.length} account${live.length === 1 ? '' : 's'} with ${num(roles)} roles. ${roles ? Math.round((100 * cold) / roles) : 0}% of the roles were never called. ${M.sources.filter((x) => !x.gcp).length + M.hidden} identities outside your org can get in${risky ? `, ${risky} through risky trust` : ''}.${M.gcp ? ` Behind it, Google Cloud: ${M.gcp.projects.length} projects, ${num(M.gcp.projects.reduce((n, g) => n + g.roles, 0))} service accounts, ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} paths between the clouds.` : ''}`,
         stats: [{ k: 'Accounts', v: num(live.length) }, { k: 'Roles', v: num(roles) }, { k: 'Never called', v: num(cold), tone: roles && cold / roles > 0.5 ? 'warn' : null },
           { k: 'High-risk roles', v: num(high), tone: high ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Loose ways in', v: num(loose), tone: loose ? 'warn' : null }],
         rows: [],
         lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.' },
+          ...(M.gcp ? [{ title: 'Between AWS and Google Cloud', hint: 'Where an identity in one cloud can act in the other. Red: any role in the AWS account can use it.',
+            items: M.gcp.xlinks.map((l) => ({ label: `${nameOf(l.from)} → ${nameOf(l.to)}`, meta: l.pairs.map((x) => (l.dir === 'aws-gcp' ? `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'direct'}` : `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`)).join(' · '),
+              tone: l.kind === 'xcloudHigh' ? 'bad' : null, pick: l.id })), empty: 'No path between the clouds.' }] : []),
           { title: 'Accounts with high-risk roles', items: live.filter((g) => g.high).sort((a, b) => b.high - a.high).slice(0, 6).map((g) => ({ label: g.name, icon: 'account', meta: `${ENV[g.env].name} · ${num(g.roles)} roles`, value: `${g.high} high`, tone: 'bad', pick: g.id })), empty: 'No account has a high-risk role.' }],
         actions: [['Trust map', '#/trust', true], ['All roles', '#/roles'], ['All calls', '#/events']] };
     }
@@ -655,6 +752,7 @@ export async function spacePage(ctx) {
         lists: [{ title: 'Where it reads', items: [...sc.targets].sort((a, b) => b.sessions - a.sessions).map((t) => ({ label: acctName(t.accountId), meta: `${pretty(t.role).label} · ${t.sessions ? `last ${ago(t.lastSeen)}` : 'no sign-in seen yet'}`, value: num(t.sessions), pick: linkOf(t), href: linkOf(t) ? null : `#/roles/${t.roleId}` })), empty: 'no scanner role found' }],
         actions: [['Workers', '#/workers', true], ['Accounts', '#/accounts']] };
     }
+    if (M.view === 'estate' && isGcp(id) && M.by.has(id)) return projectDetail(M.by.get(id));
     if (M.view === 'estate') {
       const g = M.by.get(id);
       if (g?.planned) return { eyebrow: `PLANNED · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base, tags: [tag('NOT ONBOARDED', '#d5dceb')],
@@ -686,11 +784,23 @@ export async function spacePage(ctx) {
               ...(scan ? [{ label: 'Curious Monkey', icon: 'cm', meta: `this portal's scanner · ${scan.sessions ? `last ${ago(scan.lastSeen)}` : 'no sign-in seen yet'}`, value: num(scan.sessions), pick: CM_ID }] : [])], empty: 'None of your other accounts entered it in 90 days.' },
             { title: 'Where it goes', hint: 'Accounts a role or user here entered in the last 90 days. Click one to replay those sessions.',
               items: outs.map((l) => ({ label: M.by.get(l.to).name, icon: 'account', meta: `${plural(l.roles.length, 'role pair')} · last ${ago(l.lastSeen)}`, value: num(l.sessions), pick: l.id,
-                window: `#/track?account=${l.to}&from=${g.id}`, winTitle: `${g.name} → ${M.by.get(l.to).name}`, winEyebrow: 'TRACK · SESSIONS THAT WENT OUT' })), empty: 'It entered no other account in 90 days.' }],
+                window: `#/track?account=${l.to}&from=${g.id}`, winTitle: `${g.name} → ${M.by.get(l.to).name}`, winEyebrow: 'TRACK · SESSIONS THAT WENT OUT' })), empty: 'It entered no other account in 90 days.' },
+            ...(M.gcp ? [{ title: 'Google Cloud', hint: 'Where roles here can act in Google Cloud, and which Google service accounts can sign in here.',
+              items: M.links.filter((l) => /^xcloud/.test(l.kind) && (l.from === g.id || l.to === g.id)).flatMap((l) => l.pairs.map((x) => (l.dir === 'aws-gcp'
+                ? { label: `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : `${x.gcpProject} (direct)`}`, meta: `in ${x.gcpProject}${x.broad ? ' · the pool has no condition' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
+                  window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }
+                : { label: `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`, meta: `from ${x.gcpProject}`, pick: l.id, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))),
+              empty: 'No path to or from Google Cloud.' }] : [])],
           actions: [['Zoom in', `#/space?view=account&account=${g.id}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
     const s = M.sources.find((x) => x.id === id);
+    if (s?.gcp) {
+      return { eyebrow: `GOOGLE CLOUD · ${s.group === 'oidc' ? 'FEDERATED' : s.group === 'public' ? 'PUBLIC' : 'OUTSIDE YOUR DOMAIN'}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
+        tags: s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag('OUTSIDE', WARN)] : [], rows: [],
+        lists: [{ title: 'Projects it can get into', items: s.targets.map((t) => ({ label: M.by.get(t.accountId)?.name || t.accountId, meta: `${t.roles.length} identit${t.roles.length === 1 ? 'y' : 'ies'}`, pick: t.accountId })) }],
+        actions: s.principal ? [['Open identity', `#/gcp/principals/${s.principal}`, true]] : [['Federated identities', '#/roles?cloud=gcp&source=wif', true]] };
+    }
     if (s) {
       const items = M.view === 'estate'
         ? s.targets.map((t) => ({ label: M.by.get(t.accountId)?.name || 'an account', meta: `${t.roles.length} role${t.roles.length === 1 ? '' : 's'}${t.sessions ? ` · ${num(t.sessions)} sessions` : ''}`, pick: t.accountId }))
@@ -747,6 +857,34 @@ export async function spacePage(ctx) {
         actions: [['Open in Space', `#/space?view=account&account=${n.id}`, true], ['Trust map', `#/trust?q=${encodeURIComponent(`from:${n.awsAccountId || ''}`)}`]] };
     }
     return null;
+  }
+  function gcpName(pid) {
+    for (const g of M.gcp?.projects || []) { const a = g.project.accounts.find((x) => x.id === pid); if (a) return a.email; }
+    return 'an identity';
+  }
+  // one Google Cloud project: its service accounts, and the paths to and from AWS and outside
+  function projectDetail(g) {
+    const p = g.project, plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`, tag = (t, c) => ({ t, c });
+    const ins = M.links.filter((l) => l.to === g.id && l.kind.startsWith('xcloud')), outs = M.links.filter((l) => l.from === g.id && l.kind.startsWith('xcloud'));
+    const fromOut = M.sources.filter((x) => x.gcp && x.targets.some((t) => t.accountId === g.id));
+    const broad = ins.some((l) => l.kind === 'xcloudHigh');
+    const sa = (a) => ({ label: a.email.split('@')[0], meta: [a.reasons[0]?.title, a.keys ? `${a.keys} key${a.keys === 1 ? '' : 's'}` : null, ...(a.sources.aws || []).map((x) => `from ${x}`), `${num(a.permissions)} permissions`].filter(Boolean).join(' · '),
+      tone: a.risk === 'High' ? 'bad' : a.risk === 'Medium' ? 'warn' : null, window: `#/gcp/principals/${a.id}`, winTitle: a.email, winEyebrow: 'GOOGLE CLOUD · SERVICE ACCOUNT' });
+    return { eyebrow: `GOOGLE CLOUD PROJECT · ${ENV[g.env].name.toUpperCase()}`, title: p.projectId, sub: p.name !== p.projectId ? p.name : `project ${p.number}`, swatch: ENV[g.env].base,
+      tags: [...(p.risky ? [{ t: `⚠ ${p.risky} HIGH-RISK SERVICE ACCOUNT${p.risky === 1 ? '' : 'S'}`, c: RED, href: `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}` }] : []), ...(broad ? [tag('⚠ ANY AWS ROLE CAN GET IN', RED)] : [])],
+      summary: `${plural(p.accounts.length, 'service account')}${p.keys ? `, ${plural(p.keys, 'user-managed key')}` : ''}. ${ins.length ? `${plural(ins.reduce((n, l) => n + l.pairs.length, 0), 'way')} in from AWS` : 'Nothing from AWS gets in'}${outs.length ? `; it reaches ${plural(outs.length, 'AWS account')}` : ''}${fromOut.length ? `; ${plural(fromOut.length, 'identity', 'identities')} from outside your organization` : ''}.`,
+      stats: [{ k: 'Service accounts', v: num(p.accounts.length) }, { k: 'High risk', v: num(p.risky), tone: p.risky ? 'bad' : null }, { k: 'Keys', v: num(p.keys), tone: p.keys ? 'warn' : null },
+        { k: 'From AWS', v: num(ins.reduce((n, l) => n + l.pairs.length, 0)), tone: broad ? 'bad' : null }, { k: 'Into AWS', v: num(outs.reduce((n, l) => n + l.pairs.length, 0)) }, { k: 'From outside', v: num(fromOut.length), tone: fromOut.some((x) => x.risk === 'high') ? 'bad' : null }],
+      rows: [],
+      lists: [
+        { title: 'From AWS · into this project', hint: 'AWS roles that can become a service account here, or hold roles here, through workload identity federation.',
+          items: ins.flatMap((l) => l.pairs.map((x) => ({ label: `${x.awsAccountName} · ${x.awsRole || 'any role'}`, meta: `→ ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'holds roles directly'}${x.broad ? ' · no condition on the pool' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
+            window: x.gcpPrincipal ? `#/gcp/principals/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }))), empty: 'No AWS identity can get in.' },
+        { title: 'Into AWS · from this project', hint: 'AWS roles whose trust policy accepts a service account here.',
+          items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${x.gcpEmail.split('@')[0]} → ${x.awsRole}`, meta: x.awsAccountName, pick: l.id, window: `#/roles/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
+        ...(fromOut.length ? [{ title: 'From outside your organization', items: fromOut.map((x) => ({ label: x.label, icon: x.kind, meta: x.sub, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id })) }] : []),
+        { title: 'Service accounts', hint: 'Riskiest first. Click one for what it can do and who can become it.', items: p.accounts.filter((a) => !a.managed).map(sa), empty: 'None.' }],
+      actions: [['Identities', `#/roles?cloud=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts']] };
   }
   // roles an outside identity can enter, readable: permission-set names, what was flagged, whether it was used
   function roleItems(edges, ids) {
@@ -839,16 +977,22 @@ export async function spacePage(ctx) {
     const tabs = h('div', { class: 'stack', style: 'gap:12px' }, views, dirs);
     if (M.view === 'estate') {
       const zones = M.zones.map((z) => {
-        const gs = M.groups.filter((g) => g.env === z.id), roles = gs.reduce((s, g) => s + g.roles, 0), cold = gs.reduce((s, g) => s + g.cold, 0);
+        if (z.cloud === 'gcp') return null;
+        const gs = awsGroups().filter((g) => g.env === z.id), roles = gs.reduce((s, g) => s + g.roles, 0), cold = gs.reduce((s, g) => s + g.cold, 0);
+        if (!gs.length) return null;
         const planned = gs.filter((g) => g.planned).length;
         return card(focus === z.id, `background:${ENV[z.id].base}`, ENV[z.id].name, kfmt(gs.reduce((s, g) => s + g.calls7, 0)), `${gs.length - planned} accounts · ${roles ? Math.round((100 * cold) / roles) : 0}% cold${planned ? ` · ${planned} planned` : ''}`, () => set({ zone: focus === z.id ? '' : z.id }));
       });
       const highs = M.sources.filter((s) => s.risk === 'high').length, loose = M.sources.filter((s) => s.risk === 'medium').length;
-      zones.push(card(focus === 'outer', 'background:#d5dceb;transform:rotate(45deg);width:10px;height:10px;margin:0 1px', 'Outside your org', String(M.sources.length + M.hidden), `${highs} risky · ${loose} loose trust`, () => set({ zone: focus === 'outer' ? '' : 'outer' })));
-      const list = M.groups.filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.calls7 - a.calls7);
-      left.replaceChildren(tabs, h('h2', { class: 'eyebrow' }, 'Zones · click to focus'), h('div', { class: 'sp-cards' }, ...zones),
+      const zcards = zones.filter(Boolean);
+      zcards.push(card(focus === 'outer', 'background:#d5dceb;transform:rotate(45deg);width:10px;height:10px;margin:0 1px', 'Outside your org', String(M.sources.length + M.hidden), `${highs} risky · ${loose} loose trust`, () => set({ zone: focus === 'outer' ? '' : 'outer' })));
+      const list = awsGroups().filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.calls7 - a.calls7);
+      const projects = (M.gcp?.projects || []).filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.high - a.high || b.roles - a.roles);
+      left.replaceChildren(tabs, h('h2', { class: 'eyebrow' }, M.gcp ? 'Zones · both clouds · click to focus' : 'Zones · click to focus'), h('div', { class: 'sp-cards' }, ...zcards),
         h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Accounts · 7-day calls'), h('span', { class: 'mono faint' }, String(list.length))),
-        h('div', { class: 'sp-list' }, ...list.map((g) => row(st.sel === g.id, g.planned ? `border:1.5px dashed ${ENV[g.env].hot}` : `background:${ENV[g.env].base}`, g.name, g.planned ? `${g.awsAccountId} · planned` : g.awsAccountId, g.planned ? '—' : kfmt(g.calls7), () => set({ sel: st.sel === g.id ? null : g.id })))));
+        h('div', { class: 'sp-list' }, ...list.map((g) => row(st.sel === g.id, g.planned ? `border:1.5px dashed ${ENV[g.env].hot}` : `background:${ENV[g.env].base}`, g.name, g.planned ? `${g.awsAccountId} · planned` : g.awsAccountId, g.planned ? '—' : kfmt(g.calls7), () => set({ sel: st.sel === g.id ? null : g.id })))),
+        ...(M.gcp ? [h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Google Cloud projects · service accounts'), h('span', { class: 'mono faint' }, String(projects.length))),
+          h('div', { class: 'sp-list' }, ...projects.map((g) => row(st.sel === g.id, `background:${ENV[g.env].base};border-radius:2px;outline:1px solid ${GCP}`, g.name, `${ENV[g.env].name}${g.high ? ` · ${g.high} high risk` : ''}`, String(g.roles), () => set({ sel: st.sel === g.id ? null : g.id }))))] : []));
     } else {
       const cur = selRole?.cluster || M.groups[0];
       const accounts = h('select', { class: 'sp-select', 'aria-label': 'Account', onChange: (ev) => go(`#/space?view=account&account=${ev.target.value}`) },
@@ -860,7 +1004,10 @@ export async function spacePage(ctx) {
     }
     const sw = (style) => h('span', { class: 'sp-sw', style });
     const legend = M.view === 'estate' ? [
-      [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), 'The green plane is your organization; each ring on it is one account'],
+      [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), M.gcp ? 'The green plane in front is AWS; each ring on it is one account' : 'The green plane is your organization; each ring on it is one account'],
+      ...(M.gcp ? [[sw('width:30px;height:12px;background:linear-gradient(180deg,#030a14,#0a1f3a);border:1px solid #3d7bd6'), 'The blue plane behind is Google Cloud; each ring is a project, each dot a service account, higher the more it can do, red when high risk'],
+        [sw(`width:30px;border-top:2px solid ${GCP}`), 'Blue arc between the planes: an AWS role can act in Google Cloud through federation, or a Google service account can sign in to an AWS role'],
+        [sw(`width:30px;border-top:2px solid ${RED}`), 'Red arc between the planes: any role in that AWS account can use it (the pool has no condition)']] : []),
       ...M.zones.map((z) => [sw(`width:12px;height:12px;margin:0 9px;background:${ENV[z.id].base}`), ENV[z.id].name]),
       [sw('width:8px;height:8px;margin:0 11px;border-radius:50%;background:#ffd27f'), 'One dot per busy role. Higher and brighter = more calls in 7 days'],
       [sw(`width:30px;border-top:2px dashed ${COLD}`), 'Grey on the floor: cold, never called. The dashed grey part of a ring is the cold share'],
@@ -909,7 +1056,7 @@ export async function spacePage(ctx) {
       h('div', { class: 'sp-ticks' }, ...[0, 6, 12, 18, 23].map((i) => h('span', null, i === 23 ? 'now' : hourLabel(i))))));
     if (focused) input.focus();
     hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} WIB`),
-      h('div', null, M.view === 'estate' ? `${M.groups.length} ACCOUNTS · ${num(M.groups.reduce((s, g) => s + g.roles, 0))} ROLES · ${M.sources.length + M.hidden} OUTSIDE` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
+      h('div', null, M.view === 'estate' ? `${awsGroups().length} ACCOUNTS · ${num(awsGroups().reduce((s, g) => s + g.roles, 0))} ROLES · ${M.sources.filter((x) => !x.gcp).length + M.hidden} OUTSIDE${M.gcp ? ` · GOOGLE CLOUD ${M.gcp.projects.length} PROJECTS · ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} CROSS-CLOUD` : ''}` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
       h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM'));
     const btn = ([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon);
     const moved = st.px || st.py || st.az !== -14 || st.el !== 33 || st.zoom !== 1.15;

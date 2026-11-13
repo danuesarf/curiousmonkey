@@ -178,6 +178,19 @@ role:deploy has:findings used:no          …
 
 Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `cond` `env` `has` `no` `used`; prefix `-` to exclude; anything else is free text.
 
+## Google Cloud
+
+Connect a Google Cloud organization, folder or project on the Accounts page (*Connect Google Cloud*). Curious Monkey reads IAM only: the hierarchy, every IAM policy (organization, folders, projects, service accounts), service accounts and their user-managed key metadata, custom and predefined role definitions, and workload identity pools and providers. **Audit logs are not read yet**, so Google Cloud shows what each identity *can* do and where it can come from, not what it used.
+
+- **Sign-in:** workload identity federation from this app's own AWS role (recommended: no Google secret is stored; the provider's attribute condition pins it to that one role), or a service account key (stored encrypted). The page generates the `gcloud` commands: a custom role `curiousMonkeyReader` with 18 read permissions (`roles/iam.securityReviewer`, `roles/browser` and `roles/iam.workloadIdentityPoolViewer` for a folder, which cannot hold custom roles), the reader service account, and the pool and AWS provider. *Test connection* signs in and reads the scope before saving.
+- **Scans:** a worker reads each due connection every 24 hours (*Scan now* to run it sooner). Each scan replaces the previous snapshot in one transaction; a failed scan keeps the last good one and retries in an hour.
+- **Analysis:** roles are inherited down the hierarchy and their permissions combined. For every service account it lists who can become it: key holders, Token Creator and similar (impersonation), Service Account User (`actAs`), key creators, GKE workload identity and federated identities. Findings: Owner and Editor, the right to change IAM policy, impersonating every service account in a project or folder, old or never-expiring keys, the default compute service account with Editor, users outside your domain, `allUsers`, bindings to deleted identities, and federation pools with no attribute condition. Group membership is not expanded and IAM conditions are shown but not evaluated.
+- **Roles page:** an *AWS | Google Cloud* tab. The Google Cloud tab lists identities riskiest first, filtered by kind, risk, project and way in (keys, federated, from AWS, impersonated, GKE). One identity shows what it can do (each role, where it is granted, how many projects it reaches, the full permission list), where it can come from, who it can become, and its paths to and from AWS.
+- **Across clouds:** AWS roles that can act in Google Cloud (an AWS provider plus a binding to `attribute.aws_role` or the whole account), and AWS roles that trust a Google service account (`accounts.google.com` with its unique ID in `:sub`, `:aud` or `:oaud`). Both show on the AWS role's page and the Google identity's page, and the Trust map names the service account.
+- **Space:** with Google Cloud connected, the estate shows two fields. AWS is the green plane at the back and Google Cloud the blue plane in front, with the same environment zones. A project is a ring and each service account a dot, higher the more it can do and red when it is high risk. Blue arcs between the planes are paths between the clouds; a red arc means any role in that AWS account can use it. Click a project or an arc for the details.
+- **Environments:** a project lands in the environment set for it on the Accounts page, otherwise its `env`/`environment` label, otherwise the connection's default.
+- Members limited to some AWS accounts do not see Google Cloud.
+
 ## Unidentified calls
 
 Each account has an **Unidentified calls** page. It accounts for every CloudTrail event read: role sessions, role calls, and events outside scope (IAM users, root, services, roles the account doesn't have). It also covers three cases that need care:
@@ -221,7 +234,8 @@ Reviewed exceptions live next to the tool, each with its reason: `.checkov.yaml`
 - It never changes your AWS accounts. Approved policies are exported as JSON or Terraform for you to apply.
 - Data events (S3 objects, DynamoDB items) are not in Event History. Those permissions show as *unconfirmed*, not unused. Data-event source discovery is informational.
 - Not built: SAML, SCP analysis, pull request creation, email delivery of invites (the invite is a link you send).
-- Not tested against live services: the real AWS SDK paths, OIDC sign-in, and live Bedrock. Everything else is covered by tests run on a real Postgres with a built-in fake AWS estate (`npm test`).
+- Google Cloud: no audit logs yet (permissions only), groups are not expanded, IAM conditions and deny policies are not evaluated, resource-level policies below service accounts (buckets, datasets) are not read.
+- Not tested against live services: the real AWS SDK paths, the real Google Cloud APIs, OIDC sign-in, and live Bedrock. Everything else is covered by tests run on a real Postgres with a built-in fake AWS estate (`npm test`).
 
 ## Develop
 

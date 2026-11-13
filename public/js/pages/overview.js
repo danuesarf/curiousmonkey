@@ -1,10 +1,14 @@
 import { h, get, post, num, riskBadge, teamBadge, usageBar, ago, toast, KIND, TEAM, loadEnvironments, envName } from '../lib.js';
 import { session, go } from '../main.js';
+import { cloudTabs, gcpRolesTab } from './gcp.js';
 
 const DEFAULT = { q: '', accounts: new Set(), kinds: new Set(), risks: new Set(), teams: new Set(), unconfirmed: false, idle: false, openFlags: false, unidentified: false, policy: '', sort: 'risk', dir: 'desc', page: 1 };
 const saved = { ...DEFAULT };   // survives navigating to a role and back
 
 export async function overview(ctx) {
+  // AWS and Google Cloud on one page, switched by a tab; members limited to some AWS accounts see AWS only
+  const tabs = !session.user.scope_accounts;
+  if (tabs && ctx.params.get('cloud') === 'gcp') return h('div', { class: 'stack-lg' }, cloudTabs('gcp'), await gcpRolesTab(ctx));
   const f = saved;
   // a link can open the list already filtered: #/roles?accounts=<id>,<id>&risks=High
   const ids = (k) => (ctx.params.get(k) || '').split(',').filter(Boolean);
@@ -118,6 +122,7 @@ export async function overview(ctx) {
   } }, f.accounts.size ? `Scan ${f.accounts.size} selected` : 'Scan all accounts');
 
   const body = h('div', { class: 'stack-lg' },
+    tabs && cloudTabs('aws'),
     h('header', { class: 'head' },
       h('div', null, h('div', { class: 'eyebrow' }, 'ROLES'), title,
         h('p', { class: 'muted' }, 'Results stay provisional until each account’s CloudTrail history is fully read. History is stored, so it grows past the first read over time.')),
