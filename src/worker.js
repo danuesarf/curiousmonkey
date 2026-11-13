@@ -1,4 +1,5 @@
 import { rollupBackfillTick } from './rollups.js';
+import { gcpTick } from './gcp/scan.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -195,6 +196,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   // count calls stored before the hourly rollups existed; a no-op once every account is covered
   let rolling = false;
   timers.push(setInterval(() => { if (rolling) return; rolling = true; rollupBackfillTick({ log }).catch((e) => log('error', 'rollup backfill failed', { error: e.message })).finally(() => { rolling = false; }); }, 30_000));
+  // Google Cloud: one due connection at a time per worker (leased, so replicas share the work)
+  let gcpBusy = false;
+  const gcpRun = () => { if (gcpBusy || stop.stopped) return; gcpBusy = true;
+    gcpTick(workerId).then((r) => r && log(r.ok ? 'info' : 'error', r.ok ? 'gcp scan done' : 'gcp scan failed', r)).catch((e) => log('error', 'gcp scan failed', { error: e.message })).finally(() => { gcpBusy = false; }); };
+  timers.push(setInterval(gcpRun, 30_000), setTimeout(gcpRun, 5_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });
   return {

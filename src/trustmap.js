@@ -120,6 +120,13 @@ export function edgesOf(role, ctx) {
           identityCenterEdge(e, f, p.raw, role, ctx);
         }
         else {
+          if (pv.label === 'Google') {
+            // a Google service account named by its unique ID: if it is one Curious Monkey reads, say which
+            const ids = conds.filter((c) => /^accounts\.google\.com:(sub|aud|oaud)$/i.test(c.key)).flatMap((c) => c.values).filter((v) => /^\d{15,25}$/.test(v));
+            const sa = ids.map((id) => ctx.gcp?.get(id)).find(Boolean);
+            if (sa) Object.assign(e, { source: `Google Cloud · ${sa.email}`, gcp: { id: sa.id, email: sa.email, project: sa.project_id, uniqueId: sa.unique_id } });
+            else if (ids.length) e.source = `Google · service account ${ids[0]}`;
+          }
           const subs = conds.filter((c) => /:sub$/i.test(c.key) || /^accounts\.google\.com:(sub|oaud)$/i.test(c.key));
           if (!subs.length) f('oidc-no-sub', pv.noSubSeverity || 'high', pv.label === 'GitHub Actions' ? 'Any GitHub repository in the world can get a token for this role. Pin token.actions.githubusercontent.com:sub to your repo and branch.'
             : `Any workload that ${pv.label} issues a token for can assume this role. Add a :sub condition.`);
@@ -271,8 +278,10 @@ export async function trustMap(user, q = '', { limit = 500, mentions = null } = 
   // SAML providers of every account, not only the viewer's: which Identity Center is the organisation's is decided
   // across the estate
   const samlRows = (await query('SELECT account_id, arn, name, issuer FROM saml_providers')).rows;
+  // Google service accounts by unique ID, so a role that trusts one names it (Google Cloud is shown to unscoped members only)
+  const gcpRows = user?.scope_accounts ? [] : (await query(`SELECT DISTINCT ON (unique_id) id, unique_id, email, project_id FROM gcp_principals WHERE unique_id IS NOT NULL`).catch(() => ({ rows: [] }))).rows;
   const ctx = { connected, seen, complete, windowDays, accountState: new Map(states.map((a) => [a.account_id, a.status])),
-    saml: new Map(samlRows.map((x) => [`${x.account_id}|${x.arn}`, x])), idc: identityCenters(samlRows) };
+    saml: new Map(samlRows.map((x) => [`${x.account_id}|${x.arn}`, x])), idc: identityCenters(samlRows), gcp: new Map(gcpRows.map((x) => [x.unique_id, x])) };
   const all = roles.flatMap((r) => edgesOf(r, ctx));
   const terms = parseQuery(q);
   const rows = all.filter((e) => matchesQuery(e, terms))

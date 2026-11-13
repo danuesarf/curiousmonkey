@@ -11,6 +11,7 @@ import { auth } from './routes/auth.js';
 import { data } from './routes/data.js';
 import { admin } from './routes/admin.js';
 import { settings } from './routes/settings.js';
+import { gcp } from './routes/gcp.js';
 import { refreshSettings } from './settings.js';
 import { metricsText } from './queue.js';
 
@@ -37,6 +38,7 @@ export function createApp() {
   app.use('/api', data);
   app.use('/api', admin);
   app.use('/api', settings);
+  app.use('/api', gcp);
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found' }));
 
   // Page code (HTML, JS modules, CSS) is revalidated on every load: the files carry no version in their names, so a

@@ -25,6 +25,9 @@ export function samlProvidersOf(acct) {
 // the two demo accounts trust each other a little, as real estates do: monitoring from the whole other account, and
 // the other account's ETL role reading the lake
 const SIBLING = { '111111111111': '222222222222', '222222222222': '111111111111' };
+// the demo Google Cloud estate's BigQuery exporter (gcp/demo.js) reads the payments lake: an AWS role trusting a
+// Google service account by its unique ID, the way GCP -> AWS federation is set up
+const GCP_EXPORTER_ID = '104857600000000000001';
 
 export function buildEstate(acct) {
   const arn = (name, path = '/') => `arn:aws:iam::${acct}:role${path}${name}`;
@@ -110,7 +113,9 @@ export function buildEstate(acct) {
       advisor: { logs: 0, ecs: 400, sts: 0 } },
     { name: 'lake-reader', path: '/', kind: 'custom',
       trust: P([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: arn('data-etl') }, Condition: { StringEquals: { 'aws:PrincipalTag/team': 'data' } } },
-        ...alsoFrom([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${sib}:role/data-etl` } }])]),
+        ...alsoFrom([{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: `arn:aws:iam::${sib}:role/data-etl` } }]),
+        ...(acct === '111111111111' ? [{ Effect: 'Allow', Action: 'sts:AssumeRoleWithWebIdentity', Principal: { Federated: 'accounts.google.com' },
+          Condition: { StringEquals: { 'accounts.google.com:aud': GCP_EXPORTER_ID, 'accounts.google.com:sub': GCP_EXPORTER_ID } } }] : [])]),
       inline: [{ name: 'lake', document: P([A(['s3:GetObject', 's3:ListBucket', 's3:DeleteObject', 's3:GetIntelligentTieringConfiguration'], ['arn:aws:s3:::acme-lake', 'arn:aws:s3:::acme-lake/*'])]) }], attached: [],
       principals: [{ key: 'role:data-etl', type: 'AssumedRole', arn: `arn:aws:sts::${acct}:assumed-role/data-etl/dag`, hours: [2], sessions: 'lake', viaRole: 'data-etl', viaPr: 'role:airflow-worker' }],
       // S3 logs ListBucketIntelligentTieringConfigurations, but the permission is s3:GetIntelligentTieringConfiguration:
