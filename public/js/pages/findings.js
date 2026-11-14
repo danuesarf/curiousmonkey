@@ -3,7 +3,7 @@
 import { h, get, post, api, num, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { session } from '../main.js';
 
-export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
+export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', trust: 'Trust policy', 'role-idle': 'Idle role' };
 export const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 /** The decisions a finding takes, in the order the buttons and the 1–3 keys use. */
 export const OPTIONS = { action: [['keep_scoped', 'Keep, scoped'], ['keep', 'Keep as is'], ['remove', 'Remove']], other: [['accept', 'Accept'], ['investigate', 'Investigate']] };

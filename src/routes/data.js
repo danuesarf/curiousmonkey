@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
-import { trustMap, trustWays, toCsv, sourcesCsv } from '../trustmap.js';
+import { trustMap, trustWays, toCsv, sourcesCsv, expectedRules, trustIndex } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -577,6 +577,42 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 data.get('/trust/sources.csv', requirePerm('view'), wrap(async (req, res) => {
   const m = await trustMap(req.user, trustQ(req), { limit: 0 });
   sendCsv(res, 'trust-map-sources', sourcesCsv(m.summary));
+}));
+
+// expected trust: a way in a reviewer has looked at and accepts (left out of "needs attention" until it changes)
+data.get('/trust/expected', requirePerm('view'), wrap(async (req, res) => { res.json({ items: await expectedRules(req.user) }); }));
+data.post('/trust/expected', requirePerm('decide'), wrap(async (req, res) => {
+  const b = z.object({
+    source: z.string().min(1).max(300).regex(/^(src:|svc:|same:|[0-9a-f-]{36}$)/),
+    sourceLabel: z.string().min(1).max(300),
+    roles: z.string().min(1).max(200).default('*'),
+    accounts: z.array(z.string().regex(/^\d{12}$/)).max(200).default([]),
+    findings: z.array(z.string().regex(/^[a-z0-9-]{1,60}$/)).max(40).default([]),
+    note: z.string().trim().min(3).max(1000),
+    reviewBy: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  }).parse(req.body);
+  // someone who sees some accounts only accepts trust into those
+  if (req.user.scope_accounts) {
+    const ix = await trustIndex();
+    const mine = new Set(ix.accounts.filter((a) => inScope(req.user, a.id)).map((a) => a.account_id));
+    if (!b.accounts.length || b.accounts.some((a) => !mine.has(a))) return res.status(403).json({ error: 'out_of_scope', message: 'Name the accounts it covers; you can only accept trust into accounts you look after.' });
+  }
+  const r = (await query(`INSERT INTO trust_expected(source, source_label, roles, accounts, findings, note, review_by, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [b.source, b.sourceLabel, b.roles, b.accounts, b.findings, b.note, b.reviewBy || null, req.user.id])).rows[0];
+  await audit(req, 'trust.expect', { type: 'trust_expected', id: r.id }, { source: b.sourceLabel, roles: b.roles, accounts: b.accounts, findings: b.findings, reviewBy: b.reviewBy || null });
+  res.json({ ok: true, id: r.id });
+}));
+data.delete('/trust/expected/:id', requirePerm('decide'), wrap(async (req, res) => {
+  const r = (await query('SELECT * FROM trust_expected WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
+  if (!r) throw NotFound();
+  if (req.user.scope_accounts) {
+    const ix = await trustIndex();
+    const mine = new Set(ix.accounts.filter((a) => inScope(req.user, a.id)).map((a) => a.account_id));
+    if (!r.accounts.length || r.accounts.some((a) => !mine.has(a))) return res.status(403).json({ error: 'out_of_scope', message: 'This rule covers accounts you do not look after.' });
+  }
+  await query('DELETE FROM trust_expected WHERE id=$1', [r.id]);
+  await audit(req, 'trust.unexpect', { type: 'trust_expected', id: r.id }, { source: r.source_label, roles: r.roles, note: r.note });
+  res.json({ ok: true });
 }));
 
 // ---- radar v3 ----

@@ -20,7 +20,7 @@ export const TRIGGERS = {
   'console-no-mfa': { label: 'Console password without MFA', more: '#/identities?type=users&flag=noMfa', hint: 'An IAM user who can sign in to the console with no MFA device.' },
   'scan-failed': { label: 'Scan failed', more: '#/operations/scans', hint: 'A scan job that failed for good (no retry left).' },
 };
-export const CHANGE_KINDS = { 'new-caller': 'New caller entered a role', grew: 'Role gained permissions', denied: 'First denied calls', 'new-role': 'Role created', unidentified: 'New event name not identified', dead: 'Role went idle (90 days)', cleaned: 'Role trimmed' };
+export const CHANGE_KINDS = { 'new-caller': 'New caller entered a role', grew: 'Role gained permissions', denied: 'First denied calls', 'new-role': 'Role created', unidentified: 'New event name not identified', dead: 'Role went idle (90 days)', cleaned: 'Role trimmed', 'new-trust': 'New way into a role', 'trust-weakened': 'Guard taken off a trust policy' };
 const SEVERITIES = ['high', 'medium', 'low'];
 const atLeast = (min) => SEVERITIES.slice(0, SEVERITIES.indexOf(min) + 1);
 // Radar changes have their own scale: high, warn, info, good

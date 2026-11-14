@@ -195,7 +195,7 @@ test('history: a changed trust policy, a changed and a detached policy, a deacti
   assert.equal((await owner.get(`/api/roles/${other}/history/${trust.id}`)).status, 404, 'an event is only read through its own identity');
 
   // a decision shows, with who made it
-  const flag = (await db.query(`SELECT id, category FROM flags WHERE role_id=$1 AND status='open' AND category IN ('wildcard','role-idle','trust-wildcard','external-principal') LIMIT 1`, [id])).rows[0]
+  const flag = (await db.query(`SELECT id, category FROM flags WHERE role_id=$1 AND status='open' AND category IN ('wildcard','role-idle','trust','external-principal') LIMIT 1`, [id])).rows[0]
     || (await db.query(`SELECT id, category FROM flags WHERE role_id=$1 AND status='open' LIMIT 1`, [id])).rows[0];
   if (flag) {
     const decision = ['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event'].includes(flag.category) ? 'keep' : 'accept';

@@ -1,6 +1,7 @@
 import { rollupBackfillTick } from './rollups.js';
 import { gcpTick } from './gcp/scan.js';
 import { alertsTick } from './alerts.js';
+import { trustTick } from './trustSync.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -207,6 +208,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const alertRun = () => { if (alerting || stop.stopped) return; alerting = true;
     alertsTick(new Date(), { log }).then((r) => r && (r.sent || r.failed) && log(r.failed ? 'warn' : 'info', 'alerts sent', r)).catch((e) => log('error', 'alerts failed', { error: e.message })).finally(() => { alerting = false; }); };
   timers.push(setInterval(alertRun, config.alerts.everyMs), setTimeout(alertRun, 10_000));
+  // trust findings and the change feed, from the Trust map's rules (only when the ways in were worked out again)
+  let trusting = false;
+  const trustRun = () => { if (trusting || stop.stopped) return; trusting = true;
+    trustTick({ log }).catch((e) => log('error', 'trust findings failed', { error: e.message })).finally(() => { trusting = false; }); };
+  timers.push(setInterval(trustRun, 60_000), setTimeout(trustRun, 15_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });
   return {

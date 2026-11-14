@@ -125,7 +125,7 @@ export function freshness(at, everyMinutes = 0, lagMinutes = 15) {
 export const COLOR = { high: '#ff5a4f', warn: '#f0b45a', info: '#8ec5ff', good: '#6fe3b0' };
 export const TONE_COLOR = { good: COLOR.good, warn: COLOR.warn, bad: COLOR.high };
 /** What a change on the Radar feed and in the bell is called. */
-export const CHANGE_KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH' };
+export const CHANGE_KIND = { 'new-caller': 'NEW CALLER', denied: '⚠ DENIED', grew: 'GREW', unidentified: 'UNIDENTIFIED', 'new-role': 'NEW ROLE', dead: 'COLD', cleaned: 'CLEANED', 'new-path': 'NEW PATH', 'new-trust': 'NEW WAY IN', 'trust-weakened': '⚠ GUARD OFF' };
 export const num = (n) => Number(n || 0).toLocaleString('en-US');
 export const TEAM = { infrasec: 'Infrastructure Security', infosec: 'Information Security' };
 export const ROLE_LABEL = { owner: 'Owner', admin: 'Admin', reviewer: 'Security reviewer', account_owner: 'Account owner', auditor: 'Auditor' };
