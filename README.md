@@ -90,9 +90,15 @@ The **Connect an AWS account** wizard has four steps. Nothing is saved until the
 
 Edit an account at any time. Switching source keeps the stored history. Widening the lookback backfills only the older days. The worker logs which AWS identity it runs as at startup, and the wizard shows it.
 
+## Home
+
+After sign-in the portal opens on **Home** (`#/`). It tells each member what to do first: up to five actions, most urgent first, each with why and one button to the page that does it. Failed scans come first; then high findings on roles the member's review team signs off, least-privilege drafts and access reviews waiting for that team; then old access keys, console passwords without MFA, unidentified calls and medium findings; then setup steps not done yet (members and review teams, alerts, single sign-on, a periodic access review). Only what the member can act on is listed, and *Not now* hides an item for them for a week. Beside the list: their queue as counts, the changes they have not seen, the estate at a glance, and one card per part of the rail saying what question it answers.
+
+With no account connected yet, Home is a six-step setup checklist. While history is still read, what needs none of it comes first (the Trust map, inviting the team, alerts). Auditors see where the evidence is instead. **Wall view** (`#/?wall=1`) shows the team's version, large, refreshing itself every 5 minutes.
+
 ## The radar
 
-The portal opens on a **radar** with two views:
+**Radar** (`#/radar`) has two views:
 
 - **Estate:** each contact is an AWS account. Distance from the centre is its share of permissions never called; size is its excess permissions (granted minus used). A trail shows where it was 7 and 30 days ago: amber when drifting outward (getting worse), green when moving inward. Brightness is activity: the busier the account in the last 24 hours, the brighter its contact. Pings mark changes that matter. Sectors are environments, or the OU / group you set on each account.
 - **Account:** the same for one account's roles, sectored by role kind.
@@ -253,6 +259,7 @@ The **Roles** and **IAM users** lists also download as CSV with their current fi
 | Access key past its rotation age | an active key older than the rotation age (below) |
 | Console password without MFA | an IAM user who can sign in to the console without MFA |
 | Scan failed | a scan job that failed with no retry left |
+| What to do first | once a day at its own time, on the weekdays you pick: the list Home shows a review team (or both), with the kinds of item and how many you choose; skipped when nothing is waiting, unless you say otherwise. Off until you add one. |
 
 Each rule can be limited to some environments, to some accounts, or both (an account must then match both), and posts either at once (checked every minute) or as a daily digest at `ALERT_DIGEST_AT` (09:00, in `SCAN_TZ`). Everything a rule finds together goes out as one message (up to 50 lines, then a count and a link). Events count only from when the rule was created or switched on, so a new rule does not post the backlog; conditions (an old key, no MFA) post what is true now once, and again only if they clear and come back. A message that fails is retried once two minutes later; the log on the page shows each one. Sent and failed messages are removed after 90 days (*Keep for* on the page, or `ALERT_KEEP_DAYS`); a match whose message is gone is still never posted again. The worker runs the rules; any number of workers can run, one evaluates at a time.
 

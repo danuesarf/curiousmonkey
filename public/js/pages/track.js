@@ -16,8 +16,8 @@ export async function trackPage(ctx) {
   const v = await trackView({ role: roleId, account, from, session: ctx.params.get('session'),
     // in a window over another page the address bar belongs to that page
     onSelect: (id) => ctx.inWindow || history.replaceState(null, '', `#/track?${new URLSearchParams({ ...(roleId ? { role: roleId } : {}), ...(account ? { account } : {}), ...(from ? { from } : {}), session: id })}`),
-    empty: ctx.inWindow ? null : h('a', { class: 'btn sm', href: '#/' }, 'Back to radar') });
-  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), 'Track', v.title);
+    empty: ctx.inWindow ? null : h('a', { class: 'btn sm', href: '#/radar' }, 'Back to radar') });
+  ctx.setCrumbs(h('a', { href: '#/radar' }, 'Radar'), 'Track', v.title);
   ctx.onLeave(() => v.stop());
   return v.el;
 }

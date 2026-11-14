@@ -999,3 +999,94 @@ test('change feed: the bell counts what is new by when it was recorded, Radar sh
     assert.equal((await owner.get('/api/space/flags')).status, 404, 'the old bell endpoint is gone');
   } finally { await db.query(`DELETE FROM changes WHERE dedupe LIKE 'feedtest:%'`); }
 });
+
+// ---------- Home: the page after sign-in ----------
+test('home: what to do first, ranked, only what the member can act on; drafts waiting by team; snoozes and the checklist are per person', async () => {
+  const TIERS = ['blocking', 'urgent', 'hygiene', 'setup'];
+  const o = (await owner.get('/api/home')).json;
+  assert.ok(['steady', 'reading'].includes(o.state), o.state);
+  assert.equal(o.setup.total, 6); assert.equal(o.setup.steps[0].key, 'accounts'); assert.equal(o.setup.steps[0].done, true);
+  assert.ok(o.actions.length > 0);
+  assert.deepEqual(o.actions.map((a) => TIERS.indexOf(a.tier)), [...o.actions.map((a) => TIERS.indexOf(a.tier))].sort((a, b) => a - b), 'ranked by tier');
+  for (const a of o.actions) { assert.match(a.href, /^#\//); assert.ok(a.title && a.why && a.cta && a.key); }
+  assert.ok(o.estate.identities.roles > 0); assert.equal(typeof o.queue.findingsMine, 'number');
+
+  // a draft for a role infrasec reviews: waiting for the reviewer's team, listed for them, and on their Home
+  const role = (await owner.get(`/api/roles?accounts=${accA}&q=ci-deployer`)).json.items[0];
+  const rec = await reviewerClient.post(`/api/roles/${role.id}/recommend`, { useAi: false });
+  assert.equal(rec.status, 201, rec.text);
+  try {
+    const mine = (await reviewerClient.get('/api/recommendations?mine=1')).json;
+    const d = mine.items.find((x) => x.id === rec.json.id);
+    assert.ok(d, 'a current draft that passes its checks is listed');
+    assert.deepEqual([d.role.name, d.waitingFor], ['ci-deployer', ['infrasec']]); assert.ok(d.removed > 0);
+    assert.ok((await reviewerClient.get('/api/home')).json.actions.some((a) => a.key === 'drafts'));
+    // once the reviewer's team approves, it is no longer theirs to do
+    const ap = await reviewerClient.post(`/api/recommendations/${rec.json.id}/approve`);
+    assert.equal(ap.status, 200, ap.text);
+    assert.ok(!(await reviewerClient.get('/api/recommendations?mine=1')).json.items.some((x) => x.id === rec.json.id));
+    assert.equal((await reviewerClient.get('/api/recommendations?status=approved')).status, 400, 'drafts only');
+  } finally { await db.query('DELETE FROM recommendations WHERE id = $1', [rec.json.id]); }
+
+  // what a scoped account owner sees: hygiene in their account, nothing to approve, no setup they cannot do
+  const onlyB = await memberOfB('home-b@kbi.id');
+  const b = (await onlyB.get('/api/home')).json;
+  assert.ok(!b.actions.some((a) => a.tier === 'setup' || a.key === 'drafts' || a.key.startsWith('review:') || a.key === 'findings-high'), JSON.stringify(b.actions.map((a) => a.key)));
+  assert.equal(b.queue.drafts, 0);
+  assert.ok(b.estate.identities.roles <= o.estate.identities.roles);
+  assert.equal(b.setup.steps.find((s) => s.key === 'accounts').canDo, false);
+
+  // "Not now" hides an item for that person only; it comes back when cleared
+  const first = o.actions[0];
+  assert.equal((await owner.post('/api/home/snooze', { key: first.key })).status, 200);
+  const after = (await owner.get('/api/home')).json;
+  assert.ok(!after.actions.some((a) => a.key === first.key)); assert.equal(after.snoozed, 1);
+  assert.equal((await owner.post('/api/home/snooze', { key: 'no spaces allowed' })).status, 400);
+  await owner.call('DELETE', '/api/home/snooze');
+  assert.ok((await owner.get('/api/home')).json.actions.some((a) => a.key === first.key));
+
+  // the setup checklist is hidden per person
+  await owner.post('/api/home/setup', { hidden: true });
+  assert.equal((await owner.get('/api/home')).json.setup.hidden, true);
+  assert.equal((await reviewerClient.get('/api/home')).json.setup.hidden, false);
+  await owner.post('/api/home/setup', { hidden: false });
+
+  // the wall view: the team's list, no setup items, no per-person parts
+  const wall = (await owner.get('/api/home?wall=1')).json;
+  assert.ok(!wall.actions.some((a) => a.tier === 'setup')); assert.ok(!('setup' in wall)); assert.ok(!('snoozed' in wall));
+});
+
+test('what to do first digest: an alert rule, off until made; posts the team list once on its days after its time', async () => {
+  const rx = await receiver();
+  const { alertsTick, slackBody } = await import('../src/alerts.js');
+  let rule;
+  try {
+    const dest = (await owner.post('/api/alerts/destinations', { name: 'todo', kind: 'webhook', url: rx.url('/ok/todo') })).json;
+    assert.equal((await owner.post('/api/alerts/rules', { name: 'Bad', trigger: 'todo', digestAt: '25:00', destinationId: dest.id })).status, 400);
+    assert.equal((await owner.post('/api/alerts/rules', { name: 'Bad', trigger: 'todo', digestDays: [], destinationId: dest.id })).status, 400);
+    const r = await owner.post('/api/alerts/rules', { name: 'Morning list', trigger: 'todo', mode: 'instant', digestAt: '08:00', digestDays: [5], todoTeam: 'infrasec',
+      todoTiers: ['blocking', 'urgent', 'hygiene', 'setup'], todoMax: 3, skipEmpty: false, destinationId: dest.id });
+    assert.equal(r.status, 201, r.text); rule = r.json;
+    assert.deepEqual([rule.mode, rule.digestAt, rule.digestDays, rule.todoTeam, rule.todoMax], ['daily', '08:00', [5], 'infrasec', 3], 'a digest is always daily');
+    const n = rx.got.length;
+    await alertsTick(new Date('2030-01-04T00:30:00Z'));               // Friday 07:30 in Jakarta: too early
+    assert.equal(rx.got.length, n);
+    await alertsTick(new Date('2030-01-04T01:30:00Z'));               // Friday 08:30
+    assert.equal(rx.got.length, n + 1);
+    const body = rx.got.at(-1).body;
+    assert.match(body.title, /^What to do first · Infrastructure Security · /); assert.ok(body.items.length <= 3);
+    for (const i of body.items) assert.match(i.url, /\/#\//);
+    await alertsTick(new Date('2030-01-04T05:00:00Z'));
+    assert.equal(rx.got.length, n + 1, 'once a day');
+    await alertsTick(new Date('2030-01-05T03:00:00Z'));               // Saturday: not one of its days
+    assert.equal(rx.got.length, n + 1);
+    // changed: weekends too, and skip when nothing is waiting
+    const u = await owner.call('PUT', `/api/alerts/rules/${rule.id}`, { digestDays: [6, 7], todoTeam: null, skipEmpty: true });
+    assert.equal(u.status, 200, u.text); assert.deepEqual([u.json.digestDays, u.json.todoTeam, u.json.skipEmpty], [[6, 7], null, true]);
+    const s = slackBody({ kind: 'daily', todo: true, team: 'Everyone', count: 4, items: [{ title: '<x>', subject: 'a|b', severity: 'Urgent', url: 'https://cm/#/findings' }], more: 'https://cm/#/' });
+    assert.match(s.text, /^\*What to do first · Everyone · 4 waiting\*\n1\. \*URGENT\* <https:\/\/cm\/#\/findings\|&lt;x&gt;> · a\|b\n…and 3 more\. <https:\/\/cm\/#\/\|Open Home>$/);
+  } finally {
+    if (rule) await owner.call('DELETE', `/api/alerts/rules/${rule.id}`);
+    await db.query('DELETE FROM alert_destinations'); rx.close();
+  }
+});

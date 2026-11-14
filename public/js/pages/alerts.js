@@ -12,7 +12,10 @@ const STARTERS = [
   { name: 'Access key past its rotation age', trigger: 'key-age', mode: 'daily' },
   { name: 'Console password without MFA', trigger: 'console-no-mfa', mode: 'daily' },
   { name: 'Scan failed', trigger: 'scan-failed' },
+  { name: 'What to do first, every weekday morning', trigger: 'todo', digestAt: '08:30', digestDays: [1, 2, 3, 4, 5] },
 ];
+const DAYS = [[1, 'Mon'], [2, 'Tue'], [3, 'Wed'], [4, 'Thu'], [5, 'Fri'], [6, 'Sat'], [7, 'Sun']];
+const TIER = { blocking: 'Blocking: failed scans', urgent: 'Urgent: findings, drafts', hygiene: 'Hygiene: keys, MFA', setup: 'Setup steps' };
 
 export async function alertsPage(ctx) {
   await loadEnvironments().catch(() => {});
@@ -63,7 +66,8 @@ export async function alertsPage(ctx) {
   // ---- rules ----
   function ruleForm(prev, preset = {}) {
     if (!d.destinations.length) return toast('Add a destination first: rules need somewhere to post.', true);
-    const v = { mode: 'instant', minSeverity: 'high', changeKinds: [], environments: [], accounts: [], enabled: true, ...preset, ...(prev || {}) };
+    const v = { mode: 'instant', minSeverity: 'high', changeKinds: [], environments: [], accounts: [], enabled: true,
+      digestAt: d.digestAt, digestDays: [1, 2, 3, 4, 5], todoTiers: ['blocking', 'urgent', 'hygiene'], todoMax: 5, todoTeam: null, skipEmpty: true, ...preset, ...(prev || {}) };
     const name = h('input', { value: v.name || '', maxlength: 80 });
     const trigger = h('select', { disabled: !!prev }, Object.entries(d.triggers).map(([k, t]) => h('option', { value: k, selected: v.trigger === k }, t.label)));
     const triggerHint = h('span', { class: 'hint' });
@@ -81,11 +85,28 @@ export async function alertsPage(ctx) {
     const picker = accountPicker({ accounts, selected: pickedAccts, onChange: acctNote }); acctNote();
     const acctField = h('div', { class: 'field' }, h('span', { class: 'label' }, 'Accounts'), picker.el, picker.chips, acctHint);
     const dest = h('select', null, d.destinations.map((x) => h('option', { value: x.id, selected: v.destinationId === x.id }, `${x.name} (${KIND[x.kind]})`)));
+    // the "what to do first" digest: its own time, days, team and what goes in
+    const at = h('input', { type: 'time', value: v.digestAt || d.digestAt, required: true });
+    const dayBoxes = DAYS.map(([k, l]) => { const cb = h('input', { type: 'checkbox', value: k, checked: (v.digestDays || []).includes(k) }); return [cb, h('label', { class: 'row small', style: 'gap:6px' }, cb, l)]; });
+    const tierBoxes = (d.todoTiers || []).map((k) => { const cb = h('input', { type: 'checkbox', value: k, checked: (v.todoTiers || []).includes(k) }); return [cb, h('label', { class: 'row small', style: 'gap:6px' }, cb, TIER[k] || k)]; });
+    const team = h('select', null, h('option', { value: '', selected: !v.todoTeam }, 'Everyone (both review teams)'), ...Object.entries(d.teams || {}).map(([k, l]) => h('option', { value: k, selected: v.todoTeam === k }, l)));
+    const max = h('input', { type: 'number', min: 3, max: 10, value: v.todoMax ?? 5 });
+    const skip = h('input', { type: 'checkbox', checked: v.skipEmpty !== false });
+    const todoField = h('div', { class: 'stack' },
+      field('For', team, 'The list as that team sees it on Home: their findings, the drafts and reviews waiting for them.'),
+      field(`At (${d.tz})`, at),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'On'), h('div', { class: 'check-grid' }, dayBoxes.map(([, l]) => l))),
+      h('div', { class: 'field' }, h('span', { class: 'label' }, 'Include'), h('div', { class: 'check-grid' }, tierBoxes.map(([, l]) => l))),
+      field('At most', max, 'Items listed; the rest are counted, with a link to Home.'),
+      h('label', { class: 'row small', style: 'gap:6px' }, skip, 'Skip the message when nothing is waiting'));
     const mode = h('select', null, h('option', { value: 'instant', selected: v.mode === 'instant' }, 'At once (within a minute)'), h('option', { value: 'daily', selected: v.mode === 'daily' }, `Daily digest at ${d.digestAt}`));
+    const modeField = field('How often', mode, 'A digest gathers everything since the last one into one message.');
     const show = () => {
       const t = d.triggers[trigger.value];
       triggerHint.textContent = `${t.hint}${['key-age', 'console-no-mfa'].includes(trigger.value) ? ' The first message lists everything true now; after that, only what is new.' : ' Only what happens after the rule is saved is posted.'}${trigger.value === 'key-age' ? ` Rotation age now: ${d.keyRules.rotateDays} days.` : ''}`;
-      sevField.hidden = !t.severity; kindsField.hidden = trigger.value !== 'change';
+      const todo = trigger.value === 'todo';
+      triggerHint.textContent = todo ? t.hint : triggerHint.textContent;
+      sevField.hidden = !t.severity; kindsField.hidden = trigger.value !== 'change'; todoField.hidden = !todo; modeField.hidden = todo;
       if (!prev && !name.dataset.typed) name.value = preset.name && preset.trigger === trigger.value ? preset.name : t.label;
     };
     name.addEventListener('input', () => { name.dataset.typed = '1'; });
@@ -97,11 +118,13 @@ export async function alertsPage(ctx) {
       const body = { name: name.value, minSeverity: sev.value, changeKinds: kinds.filter(([c]) => c.checked).map(([c]) => c.value),
         environments: envBoxes.filter(([c]) => c.checked).map(([c]) => c.value), accounts: [...pickedAccts].filter((id) => accounts.some((a) => a.id === id)),
         destinationId: dest.value, mode: mode.value };
+      if (trigger.value === 'todo') Object.assign(body, { mode: 'daily', minSeverity: undefined, changeKinds: undefined, digestAt: at.value, digestDays: dayBoxes.filter(([c]) => c.checked).map(([c]) => Number(c.value)),
+        todoTiers: tierBoxes.filter(([c]) => c.checked).map(([c]) => c.value), todoTeam: team.value || null, todoMax: Number(max.value) || 5, skipEmpty: skip.checked });
       try {
         if (prev) await api('PUT', `/alerts/rules/${prev.id}`, body); else await post('/alerts/rules', { ...body, trigger: trigger.value });
         close(); toast(prev ? 'Rule saved' : 'Rule added. It is checked every minute.'); load();
       } catch (x) { err.textContent = x.message; save.disabled = false; }
-    } }, field('When', trigger), triggerHint, sevField, kindsField, envField, acctField, field('Send to', dest), field('How often', mode, 'A digest gathers everything since the last one into one message.'), field('Name', name), err,
+    } }, field('When', trigger), triggerHint, sevField, kindsField, todoField, envField, acctField, field('Send to', dest), modeField, field('Name', name), err,
     h('div', { class: 'actions' }, save, h('button', { class: 'btn', type: 'button', onClick: () => close() }, 'Cancel'))), h('span'));
     // the picker listens on the document; stop when the dialog goes, however it is closed
     const close = () => m.remove();
@@ -115,7 +138,9 @@ export async function alertsPage(ctx) {
     if (!confirm(`Remove the rule "${r.name}"? Its messages stay in the log.`)) return;
     try { await api('DELETE', `/alerts/rules/${r.id}`); toast('Rule removed'); load(); } catch (e) { toast(e.message, true); }
   }
+  const dayText = (ds) => (ds?.length === 7 ? 'Every day' : ds?.join(',') === '1,2,3,4,5' ? 'Weekdays' : (ds || []).map((k) => DAYS.find(([n]) => n === k)?.[1]).join(' '));
   const filters = (r) => [
+    r.trigger === 'todo' && `for ${r.todoTeam ? d.teams[r.todoTeam] : 'everyone'}, up to ${r.todoMax}`,
     d.triggers[r.trigger].severity && SEV.find(([k]) => k === r.minSeverity)?.[1],
     r.trigger === 'change' && (r.changeKinds.length ? r.changeKinds.map((k) => d.changeKinds[k]).join(', ') : 'every change'),
     r.environments.length ? r.environments.map(envName).join(', ') : 'every environment',
@@ -151,7 +176,7 @@ export async function alertsPage(ctx) {
       return h('tr', { class: r.enabled ? '' : 'muted' },
         h('td', null, h('label', { class: 'switch' }, cb, h('span'))),
         h('td', null, h('div', { class: 'name' }, r.name), h('div', { class: 'tiny muted' }, `${d.triggers[r.trigger].label} · ${filters(r)}`)),
-        h('td', null, r.destinationName), h('td', { class: 'nowrap' }, r.mode === 'daily' ? `Daily, ${d.digestAt}` : 'At once'),
+        h('td', null, r.destinationName), h('td', { class: 'nowrap' }, r.trigger === 'todo' ? `${dayText(r.digestDays)}, ${r.digestAt || d.digestAt}` : r.mode === 'daily' ? `Daily, ${d.digestAt}` : 'At once'),
         h('td', { class: 'nowrap small' }, r.waiting ? `${num(r.waiting)} waiting` : '', r.waiting && r.lastSentAt ? ' · ' : '', r.lastSentAt ? `last sent ${ago(r.lastSentAt)}` : !r.waiting ? h('span', { class: 'muted' }, 'nothing sent yet') : ''),
         h('td', { class: 'actions-cell' }, h('button', { class: 'btn sm', onClick: () => ruleForm(r) }, 'Edit'), h('button', { class: 'btn sm', onClick: () => removeRule(r) }, 'Remove')));
     });
