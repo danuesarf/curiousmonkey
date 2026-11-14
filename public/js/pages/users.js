@@ -79,7 +79,8 @@ export async function usersPage(ctx) {
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IDENTITIES · IAM USERS'), h('h1', null, 'IAM users and access keys'),
       h('p', { class: 'muted' }, 'Long-lived credentials: every access key with its ID, status, age and last use, console passwords and MFA. Secret keys are never readable, here or in AWS; only their IDs.')),
-    h('div', { class: 'actions' }, h('a', { class: 'btn', href: '#/space?who=users' }, 'In Space'), h('a', { class: 'btn', href: '#/?who=users' }, 'On the radar'))),
+    h('div', { class: 'actions' }, h('a', { class: 'btn', download: '', href: '/api/iam-users.csv', title: 'One line per access key, for every user the filters match', onClick: (e) => { e.currentTarget.href = `/api/iam-users.csv?${qs()}`; } }, 'Download CSV'),
+      h('a', { class: 'btn', href: '#/space?who=users' }, 'In Space'), h('a', { class: 'btn', href: '#/?who=users' }, 'On the radar'))),
     tiles, h('section', { class: 'card' }, filters, list));
 }
 

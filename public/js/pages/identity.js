@@ -1,7 +1,7 @@
 // One identity, one page. An IAM role, an IAM user or a Google Cloud identity opens here, with tabs:
 //   Overview · Activity · Permissions · Credentials · Policies and trust · Findings
 // Tabs that do not apply to a kind of identity are left out. The tab is kept in the address (?tab=), so a link opens it.
-import { h, svg, get, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, copy, KIND, searchBox, pager, tile, envName, loadEnvironments } from '../lib.js';
+import { h, svg, get, num, fmtDate, fmtDay, ago, riskBadge, teamBadge, usageBar, copy, modal, KIND, searchBox, pager, tile, envName, loadEnvironments, TZ, TZ_LABEL } from '../lib.js';
 import { session, go } from '../main.js';
 import { identifyControls, eventFacts, STATE } from './unidentified.js';
 import { findingCard } from './findings.js';
@@ -61,6 +61,7 @@ export async function identityPage(ctx, id) {
     ['permissions', 'Permissions', () => permsTab(d)],
     isUser && ['credentials', 'Credentials', () => h('div', { class: 'stack-lg' }, parts.keys, parts.consoleBox)],
     ['policies', isUser ? 'Policies' : 'Policies and trust', () => policiesTab(d, parts)],
+    ['history', 'History', () => historyTab(d)],
     ['findings', () => `Findings${d.flags.length ? ` ${waiting() ? `${waiting()} of ${d.flags.length}` : d.flags.length}` : ''}`, () => findingsTab(d, ctx, openIdentify, () => shell.relabel())],
   ].filter(Boolean);
 
@@ -86,6 +87,92 @@ export async function identityPage(ctx, id) {
   ctx.setCrumbs(h('a', { href: isUser ? '#/identities?type=users' : '#/identities' }, 'Identities'), r.account_name, r.name);
   if (ctx.params.has('identify')) setTimeout(() => openIdentify(ctx.params.get('identify') || null));
   return shell.el;
+}
+
+// ---------- History ----------
+const GROUPS = [['', 'Everything'], ['policy', 'Permissions'], ['access', 'Who can get in'], ['credentials', 'Credentials'], ['risk', 'Risk'], ['review', 'Reviews'], ['lifecycle', 'Created or removed']];
+const MARK = { 'policy-added': '+', 'policy-removed': '−', 'policy-changed': '~', 'trust-changed': '~', 'boundary-changed': '~', risk: '▲', 'key-status': '•', 'key-created': '+', 'key-deleted': '−',
+  password: '•', mfa: '•', deleted: '×', restored: '+', created: '+', 'radar-new-caller': '→', 'radar-grew': '▲', 'radar-cleaned': '▼', 'radar-denied': '!', 'radar-dead': '·',
+  decision: '✓', undecided: '↺', approval: '✓' };
+
+async function historyTab(d) {
+  const r = d.role, isUser = r.kind === 'iam-user';
+  const { items, since } = await get(`/roles/${r.id}/history`);
+  let group = '';
+  const list = h('div', { class: 'timeline' });
+  const day = (t) => new Date(t).toLocaleDateString('en-GB', { timeZone: TZ, day: '2-digit', month: 'short', year: 'numeric' });
+  const time = (t) => new Date(t).toLocaleTimeString('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit' });
+  const draw = () => {
+    const shown = items.filter((x) => !group || x.group === group);
+    if (!shown.length) { list.replaceChildren(h('div', { class: 'empty' }, group ? 'Nothing of this kind.' : 'Nothing recorded yet.')); return; }
+    const out = []; let last = null;
+    for (const x of shown) {
+      const dd = day(x.at);
+      if (dd !== last) { out.push(h('div', { class: 'tl-day' }, dd)); last = dd; }
+      const sub = [x.by && `by ${x.by}`, x.detail?.bulk && 'from the Findings inbox', x.detail?.text, x.detail?.from && x.detail?.to && x.kind === 'boundary-changed' && `${x.detail.from || 'none'} → ${x.detail.to || 'none'}`,
+        x.kind === 'risk' && x.detail?.reasons?.length && x.detail.reasons.slice(0, 2).join(' · '), x.kind === 'key-deleted' && 'seen gone at this scan'].filter(Boolean).join(' · ');
+      out.push(h('div', { class: `tl-item g-${x.group || 'other'}${x.kind === 'risk' && x.detail?.to === 'High' ? ' bad' : ''}` },
+        h('span', { class: 'tl-mark', 'aria-hidden': 'true' }, MARK[x.kind] || '•'),
+        h('span', { class: 'tl-time mono tiny muted' }, time(x.at)),
+        h('div', { class: 'tl-body' }, h('div', null, x.title), sub && h('div', { class: 'tiny muted' }, sub)),
+        x.diff && h('button', { class: 'btn sm', onClick: () => showDiff(r.id, x) }, x.kind === 'policy-added' || x.kind === 'policy-removed' ? 'View document' : 'Compare')));
+    }
+    list.replaceChildren(...out);
+  };
+  const chips = h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Kind of change' }, GROUPS.filter(([g]) => g !== 'credentials' || isUser).map(([g, l]) => {
+    const n = items.filter((x) => !g || x.group === g).length;
+    const b = h('button', { class: 'chip', type: 'button', 'aria-pressed': String(group === g), disabled: !n && !!g }, `${l} ${n}`);
+    b.addEventListener('click', () => { group = g; chips.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); draw(); });
+    return b;
+  }));
+  draw();
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'History'),
+      h('p', { class: 'muted small' }, `Policy, trust, credential and risk changes are compared at each daily scan${since ? `, recorded since ${day(since)}` : ' from the next scan on'}. Callers and decisions come from their own records. Times in ${TZ_LABEL}.`))),
+    h('div', { class: 'card-b stack' }, chips, list));
+}
+
+/** Pretty JSON with keys sorted, so a reordering alone is not a change. */
+const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+const pretty = (v) => (v == null ? '' : JSON.stringify(sortKeys(v), null, 2));
+/** Line diff: [' '|'+'|'-', text]. Common ends are trimmed first; a very large middle is shown as removed then added. */
+export function lineDiff(a, b) {
+  const A = a ? a.split('\n') : [], B = b ? b.split('\n') : [];
+  let s = 0; while (s < A.length && s < B.length && A[s] === B[s]) s++;
+  let e = 0; while (e < A.length - s && e < B.length - s && A[A.length - 1 - e] === B[B.length - 1 - e]) e++;
+  const a2 = A.slice(s, A.length - e), b2 = B.slice(s, B.length - e), mid = [];
+  if (a2.length * b2.length > 4e6) { a2.forEach((x) => mid.push(['-', x])); b2.forEach((x) => mid.push(['+', x])); }
+  else {
+    const n = a2.length, m = b2.length, L = new Uint32Array((n + 1) * (m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i * (m + 1) + j] = a2[i] === b2[j] ? L[(i + 1) * (m + 1) + j + 1] + 1 : Math.max(L[(i + 1) * (m + 1) + j], L[i * (m + 1) + j + 1]);
+    let i = 0, j = 0;
+    while (i < n && j < m) {
+      if (a2[i] === b2[j]) { mid.push([' ', a2[i]]); i++; j++; }
+      else if (L[(i + 1) * (m + 1) + j] >= L[i * (m + 1) + j + 1]) mid.push(['-', a2[i++]]);
+      else mid.push(['+', b2[j++]]);
+    }
+    while (i < n) mid.push(['-', a2[i++]]); while (j < m) mid.push(['+', b2[j++]]);
+  }
+  return [...A.slice(0, s).map((x) => [' ', x]), ...mid, ...A.slice(A.length - e).map((x) => [' ', x])];
+}
+async function showDiff(roleId, x) {
+  const ev = await get(`/roles/${roleId}/history/${x.id}`);
+  const lines = lineDiff(pretty(ev.detail.before), pretty(ev.detail.after));
+  // long unchanged runs fold, keeping three lines of context next to each change
+  const rows = []; let run = [], changed = false;
+  const flush = (end) => {
+    const head = changed ? 3 : 0, tail = end ? 0 : 3;
+    if (run.length > head + tail + 2) rows.push(...run.slice(0, head), ['…', `${run.length - head - tail} unchanged lines`], ...run.slice(run.length - tail));
+    else rows.push(...run);
+    run = [];
+  };
+  for (const l of lines) { if (l[0] === ' ') run.push(l); else { flush(false); rows.push(l); changed = true; } }
+  flush(true);
+  const added = lines.filter((l) => l[0] === '+').length, removed = lines.filter((l) => l[0] === '-').length;
+  modal(x.title, h('div', { class: 'stack' },
+    h('p', { class: 'small muted' }, `${new Date(ev.at).toLocaleString('en-GB', { timeZone: TZ })} · `, ev.detail.before && ev.detail.after ? `${added} line${added === 1 ? '' : 's'} added, ${removed} removed` : ev.detail.after ? 'the document as attached' : 'the document as it was before', ev.detail.arn ? ` · ${ev.detail.arn}` : ''),
+    h('pre', { class: 'diff' }, rows.map(([t, s]) => h('span', { class: t === '+' ? 'add' : t === '-' ? 'del' : t === '…' ? 'fold' : '' }, `${t === '…' ? '' : `${t} `}${s}\n`)))),
+  h('div', { class: 'actions' }, ev.detail.after && h('button', { class: 'btn', onClick: () => copy(JSON.stringify(ev.detail.after, null, 2)) }, 'Copy new document'), h('button', { class: 'btn', onClick: (e) => e.target.closest('.modal-bg').remove() }, 'Close')));
 }
 
 function overviewTab(d, u, hist, open) {

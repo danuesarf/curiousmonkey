@@ -42,8 +42,11 @@ export async function analyzeRole(role, windowStart, now = new Date(), maps = nu
   return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime(), rules: keyRules() }));
 }
 
-export async function persistAnalysis(roleId, r) {
+/** Stores one analysis. With `recordRisk`, a change of risk level from the last analysis goes to the identity's history. */
+export async function persistAnalysis(roleId, r, { recordRisk = false } = {}) {
   await tx(async (c) => {
+    // a role's first analysis has no previous level (the column's default is not one)
+    const before = recordRisk ? (await c.query('SELECT risk FROM roles WHERE id=$1 AND analyzed_at IS NOT NULL', [roleId])).rows[0]?.risk : null;
     await c.query('DELETE FROM role_actions WHERE role_id=$1', [roleId]);
     const A = r.actions;
     const CH = 5000;
@@ -72,6 +75,11 @@ export async function persistAnalysis(roleId, r) {
               last_activity_at=(SELECT max(day) FROM activity_daily WHERE role_id=$1 AND count>0)
         WHERE id=$1`,
       [roleId, r.counts.granted, r.counts.used, r.counts.unused, r.counts.unconfirmed, r.risk, r.riskScore, JSON.stringify(r.riskReasons), r.reviewerTeam, r.requiresBoth, r.analysisHash]);
+    if (before && before !== r.risk) {
+      const RANK = { Low: 0, Medium: 1, High: 2 };
+      await c.query(`INSERT INTO identity_events(role_id, kind, title, detail) VALUES ($1,'risk',$2,$3)`,
+        [roleId, `Risk ${RANK[r.risk] > RANK[before] ? 'rose' : 'fell'}: ${before} → ${r.risk}`, JSON.stringify({ from: before, to: r.risk, reasons: r.riskReasons.slice(0, 5) })]);
+    }
   });
 }
 
@@ -83,10 +91,12 @@ export async function analyzeAccount(accountId, { alive = () => {}, progress = a
   const windowStart = cp.t ? new Date(cp.t) : new Date(Date.now() - 90 * DAY);
   await applyBuiltins();                 // names learned by a newer version settle before history is credited
   const maps = await loadMappings();
+  // while history is still being read, results are provisional and the risk level can swing: only record it once complete
+  const recordRisk = await accountComplete(accountId);
   let done = 0;
   for (const role of roles) {
     alive();
-    await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps));
+    await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps), { recordRisk });
     await progress({ phase: 'analyze', done: ++done, total: roles.length });
   }
   return { roles: roles.length };

@@ -31,7 +31,32 @@ async function managedDoc(gw, a) {
     [a.arn, m.versionId, JSON.stringify(m.document)]);
   return { ...a, document: m.document };
 }
-async function savePolicies(c, roleId, docs) {
+/** Records one change on an identity (History tab). */
+const event = (c, roleId, kind, title, detail = {}) =>
+  c.query('INSERT INTO identity_events(role_id, kind, title, detail) VALUES ($1,$2,$3,$4)', [roleId, kind, title, JSON.stringify(detail)]);
+const POLICY_KIND = { inline: 'Inline policy', managed: 'Managed policy', group: 'Group policy' };
+
+/**
+ * Saves an identity's policies. With `record`, what differs from the stored set is written to its history:
+ * a policy added, removed, or whose document changed (an AWS managed one changes when AWS publishes a version).
+ */
+async function savePolicies(c, roleId, docs, { record = false } = {}) {
+  if (record) {
+    const prev = new Map((await c.query('SELECT kind, name, arn, aws_managed, doc_hash, document FROM role_policies WHERE role_id=$1', [roleId])).rows.map((p) => [`${p.kind}:${p.name}`, p]));
+    const next = new Map(docs.map((d) => [`${d.kind}:${d.name}`, d]));
+    for (const [k, d] of next) {
+      const p = prev.get(k), label = `${POLICY_KIND[d.kind] || 'Policy'} ${d.name}`;
+      const base = { name: d.name, policyKind: d.kind, arn: d.arn, awsManaged: !!d.aws };
+      if (!p) await event(c, roleId, 'policy-added', `${label} ${d.kind === 'inline' ? 'added' : 'attached'}`, { ...base, after: d.document });
+      else if (p.doc_hash !== docHash(d.document)) {
+        await event(c, roleId, 'policy-changed', d.aws ? `AWS updated the managed policy ${d.name}` : `${label} changed`, { ...base, before: p.document, after: d.document });
+      }
+    }
+    for (const [k, p] of prev) {
+      if (!next.has(k)) await event(c, roleId, 'policy-removed', `${POLICY_KIND[p.kind] || 'Policy'} ${p.name} ${p.kind === 'inline' ? 'deleted' : 'detached'}`,
+        { name: p.name, policyKind: p.kind, arn: p.arn, awsManaged: p.aws_managed, before: p.document });
+    }
+  }
   await c.query(`DELETE FROM role_policies WHERE role_id=$1 AND NOT (kind||':'||name = ANY($2))`, [roleId, docs.map((d) => `${d.kind}:${d.name}`)]);
   for (const d of docs) {
     const hash = docHash(d.document);
@@ -77,6 +102,10 @@ export async function inventoryUsers(ctx, account, gw) {
     const lastUsed = [lastKey, u.passwordLastUsed].filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
     const lastRegion = lastKey ? detail.keys.find((k) => k.lastUsed === lastKey)?.region || null : null;
     await tx(async (c) => {
+      // what was stored before, to record what changed (nothing is recorded the first time a user is seen)
+      const prev = (await c.query(`SELECT r.id, r.deleted_at, d.password_enabled, d.mfa FROM roles r LEFT JOIN iam_user_details d ON d.role_id = r.id
+                                    WHERE r.account_id=$1 AND r.arn=$2 FOR UPDATE OF r`, [account.id, u.arn])).rows[0];
+      const prevKeys = prev ? new Map((await c.query('SELECT key_id, status FROM iam_access_keys WHERE role_id=$1 AND deleted_at IS NULL', [prev.id])).rows.map((k) => [k.key_id, k.status])) : new Map();
       const row = (await c.query(
         `INSERT INTO roles(account_id, arn, name, path, kind, trust_policy, tags, created_in_aws, last_used_at, last_used_region, inline_count, attached_count, aws_id, deleted_at)
          VALUES ($1,$2,$3,$4,'iam-user',NULL,$5,$6,$7,$8,$9,$10,$11,NULL)
@@ -85,7 +114,18 @@ export async function inventoryUsers(ctx, account, gw) {
          RETURNING id`,
         [account.id, u.arn, u.name, u.path || '/', JSON.stringify(detail.tags || {}), u.createDate, lastUsed, lastRegion,
          docs.filter((d) => d.kind === 'inline').length, docs.filter((d) => d.kind !== 'inline').length, u.userId || null])).rows[0];
-      await savePolicies(c, row.id, docs);
+      await savePolicies(c, row.id, docs, { record: !!prev });
+      if (prev) {
+        if (prev.deleted_at) await event(c, row.id, 'restored', 'IAM user seen again after it was gone');
+        if (prev.password_enabled != null && prev.password_enabled !== !!detail.password) await event(c, row.id, 'password', detail.password ? 'Console password created' : 'Console password removed');
+        const was = (prev.mfa || []).map((m) => m.serial), now = (detail.mfa || []).map((m) => m.serial);
+        for (const s of now.filter((x) => !was.includes(x))) await event(c, row.id, 'mfa', 'MFA device added', { serial: s });
+        for (const s of was.filter((x) => !now.includes(x))) await event(c, row.id, 'mfa', 'MFA device removed', { serial: s });
+        for (const k of detail.keys) {
+          const before = prevKeys.get(k.id);
+          if (before && k.status && before !== k.status) await event(c, row.id, 'key-status', `Access key ${k.id} ${k.status === 'Inactive' ? 'deactivated' : 'activated'}`, { key: k.id, from: before, to: k.status });
+        }
+      }
       await c.query(
         `INSERT INTO iam_user_details(role_id, user_id, password_enabled, password_created, password_last_used, mfa, groups, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,now())
          ON CONFLICT (role_id) DO UPDATE SET user_id=EXCLUDED.user_id, password_enabled=EXCLUDED.password_enabled, password_created=EXCLUDED.password_created,
@@ -101,6 +141,61 @@ export async function inventoryUsers(ctx, account, gw) {
     await ctx.progress({ done: ++done });
   }); } catch (e) { return skip(e); }
   return users.map((u) => u.arn);
+}
+
+/** Marks identities no longer in AWS as gone (their history is kept) and records it. */
+async function markGone(accountId, kindSql, seen, title) {
+  const gone = (await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND ${kindSql} AND deleted_at IS NULL AND NOT (arn = ANY($2)) RETURNING id`, [accountId, seen])).rows;
+  if (gone.length) await query(`INSERT INTO identity_events(role_id, kind, title) SELECT id, 'deleted', $2 FROM unnest($1::uuid[]) AS id`, [gone.map((g) => g.id), title]);
+}
+
+/**
+ * Roles with their trust policy, boundary and policies. For a role already stored, what changed is written to its
+ * history. Returns the ARNs seen.
+ */
+export async function inventoryRoles(ctx, account, gw) {
+  const roles = await gw.listRoles();
+  await ctx.progress({ phase: 'inventory', total: roles.length, done: 0 });
+  const seen = [];
+  let done = 0;
+  await limited(roles, 4, async (r) => {
+    const detail = await gw.getRoleDetail(r.name);
+    const pol = await gw.getRolePolicies(r.name);
+    const managed = [];
+    for (const a of pol.attached) managed.push(await managedDoc(gw, a));
+    const kind = roleKind(r.name, r.path);
+    await tx(async (c) => {
+      const prev = (await c.query('SELECT id, trust_policy, boundary_arn, deleted_at FROM roles WHERE account_id=$1 AND arn=$2 FOR UPDATE', [account.id, r.arn])).rows[0];
+      const row = (await c.query(
+        `INSERT INTO roles(account_id, arn, name, path, kind, permission_set, trust_policy, boundary_arn, tags, created_in_aws,
+                           last_used_at, last_used_region, inline_count, attached_count, aws_id, deleted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULL)
+         ON CONFLICT (account_id, arn) DO UPDATE SET trust_policy=EXCLUDED.trust_policy, boundary_arn=EXCLUDED.boundary_arn, tags=EXCLUDED.tags,
+           kind=EXCLUDED.kind, permission_set=EXCLUDED.permission_set, last_used_at=EXCLUDED.last_used_at, last_used_region=EXCLUDED.last_used_region,
+           inline_count=EXCLUDED.inline_count, attached_count=EXCLUDED.attached_count, aws_id=COALESCE(EXCLUDED.aws_id, roles.aws_id), deleted_at=NULL
+         RETURNING id`,
+        [account.id, r.arn, r.name, r.path, kind, kind === 'identity-center' ? r.name.split('_')[1] : null, JSON.stringify(r.trustPolicy),
+         r.boundaryArn, JSON.stringify(detail.tags), r.createDate, detail.lastUsedAt, detail.lastUsedRegion, pol.inline.length, pol.attached.length, r.awsId || null])).rows[0];
+      if (prev) {
+        if (prev.deleted_at) await event(c, row.id, 'restored', 'Role seen again after it was gone');
+        if (prev.trust_policy && docHash(prev.trust_policy) !== docHash(r.trustPolicy)) {
+          await event(c, row.id, 'trust-changed', 'Trust policy changed', { name: 'Trust policy', before: prev.trust_policy, after: r.trustPolicy });
+        }
+        if ((prev.boundary_arn || null) !== (r.boundaryArn || null)) {
+          await event(c, row.id, 'boundary-changed', r.boundaryArn ? (prev.boundary_arn ? 'Permission boundary replaced' : 'Permission boundary set') : 'Permission boundary removed',
+            { from: prev.boundary_arn || null, to: r.boundaryArn || null });
+        }
+      }
+      const docs = [
+        ...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document })),
+        ...managed.map((p) => ({ kind: 'managed', name: p.name, arn: p.arn, aws: p.awsManaged, document: p.document })),
+      ];
+      await savePolicies(c, row.id, docs, { record: !!prev });
+    });
+    seen.push(r.arn);
+    await ctx.progress({ done: ++done });
+  });
+  return seen;
 }
 
 export async function runInventory(ctx) {
@@ -123,40 +218,12 @@ export async function runInventory(ctx) {
     }
     throw e;
   }
-  const roles = await gw.listRoles();
-  await ctx.progress({ phase: 'inventory', total: roles.length, done: 0 });
-  const seen = [];
-  let done = 0;
-  await limited(roles, 4, async (r) => {
-    const detail = await gw.getRoleDetail(r.name);
-    const pol = await gw.getRolePolicies(r.name);
-    const managed = [];
-    for (const a of pol.attached) managed.push(await managedDoc(gw, a));
-    const kind = roleKind(r.name, r.path);
-    await tx(async (c) => {
-      const row = (await c.query(
-        `INSERT INTO roles(account_id, arn, name, path, kind, permission_set, trust_policy, boundary_arn, tags, created_in_aws,
-                           last_used_at, last_used_region, inline_count, attached_count, aws_id, deleted_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NULL)
-         ON CONFLICT (account_id, arn) DO UPDATE SET trust_policy=EXCLUDED.trust_policy, boundary_arn=EXCLUDED.boundary_arn, tags=EXCLUDED.tags,
-           kind=EXCLUDED.kind, permission_set=EXCLUDED.permission_set, last_used_at=EXCLUDED.last_used_at, last_used_region=EXCLUDED.last_used_region,
-           inline_count=EXCLUDED.inline_count, attached_count=EXCLUDED.attached_count, aws_id=COALESCE(EXCLUDED.aws_id, roles.aws_id), deleted_at=NULL
-         RETURNING id`,
-        [account.id, r.arn, r.name, r.path, kind, kind === 'identity-center' ? r.name.split('_')[1] : null, JSON.stringify(r.trustPolicy),
-         r.boundaryArn, JSON.stringify(detail.tags), r.createDate, detail.lastUsedAt, detail.lastUsedRegion, pol.inline.length, pol.attached.length, r.awsId || null])).rows[0];
-      const docs = [
-        ...pol.inline.map((p) => ({ kind: 'inline', name: p.name, arn: null, aws: false, document: p.document })),
-        ...managed.map((p) => ({ kind: 'managed', name: p.name, arn: p.arn, aws: p.awsManaged, document: p.document })),
-      ];
-      await savePolicies(c, row.id, docs);
-    });
-    seen.push(r.arn);
-    await ctx.progress({ done: ++done });
-  });
+  const seen = await inventoryRoles(ctx, account, gw);
   // roles that disappeared keep their history but stop being analysed
-  await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND kind <> 'iam-user' AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, seen]);
+  await markGone(account.id, "kind <> 'iam-user'", seen, 'Role deleted in AWS');
   const userArns = await inventoryUsers(ctx, account, gw);
-  if (userArns) await query(`UPDATE roles SET deleted_at=now() WHERE account_id=$1 AND kind = 'iam-user' AND deleted_at IS NULL AND NOT (arn = ANY($2))`, [account.id, userArns]);
+  if (userArns) await markGone(account.id, "kind = 'iam-user'", userArns, 'IAM user deleted in AWS');
+
 
   // SAML providers and who issues for them: tells IAM Identity Center instances apart. A scanner role created before
   // iam:ListSAMLProviders / iam:GetSAMLProvider were part of its policy cannot read them: keep what is stored and say so.
@@ -189,5 +256,5 @@ export async function runInventory(ctx) {
     }
   });
   await query(`UPDATE cloud_accounts SET status='connected', status_detail=NULL WHERE id=$1`, [account.id]);
-  return { roles: roles.length, users: userArns ? userArns.length : null, dataEventSources: found.length };
+  return { roles: seen.length, users: userArns ? userArns.length : null, dataEventSources: found.length };
 }

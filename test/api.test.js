@@ -782,3 +782,91 @@ test('alert messages for Slack: escaped, one line per match, the rest counted wi
   assert.equal(b.text.split('\n').filter((l) => l.startsWith('•')).length, 3);
   assert.match(b.text, /…and 57 more\. <https:\/\/cm\/#\/findings\|See them all>/);
 });
+
+// ---------- CSV exports and access reviews ----------
+/** A fresh member limited to account B (the one from the RBAC test may be signed out by now). */
+async function memberOfB(email) {
+  const inv = await owner.post('/api/members/invite', { email, role: 'account_owner', scope_accounts: [accB] });
+  const c = new Client(); await c.post('/api/auth/signup', { name: email, email, password: PW, invite: inv.json.link.split('invite=')[1] });
+  return c;
+}
+const parseCsv = (text) => text.trim().split('\n').map((l) => l.match(/("([^"]|"")*"|[^,]*)(,|$)/g).map((c) => c.replace(/,$/, '').replace(/^"|"$/g, '').replace(/""/g, '"')));
+
+test('CSV: the Roles and IAM users lists download with their filters, scoped, formula-safe', async () => {
+  const all = await owner.call('GET', '/api/roles.csv');
+  assert.equal(all.status, 200); assert.match(all.headers.get('content-type'), /text\/csv/); assert.match(all.headers.get('content-disposition'), /roles-\d{4}-\d{2}-\d{2}\.csv/);
+  const rows = parseCsv(all.text);
+  assert.equal(rows[0][0], 'Account'); assert.equal(rows.length - 1, (await owner.get('/api/roles?limit=1')).json.total);
+  const high = parseCsv((await owner.call('GET', '/api/roles.csv?risks=High')).text);
+  assert.ok(high.slice(1).every((r) => r[rows[0].indexOf('Risk')] === 'High')); assert.ok(high.length < rows.length);
+  // a member limited to account B gets only B
+  const scoped = parseCsv((await (await memberOfB('csv-b@kbi.id')).call('GET', '/api/roles.csv')).text);
+  assert.ok(scoped.length > 1 && scoped.slice(1).every((r) => r[1] === '222222222222'));
+  // IAM users: one line per key
+  const u = parseCsv((await owner.call('GET', '/api/iam-users.csv')).text);
+  const keys = (await owner.get('/api/iam-users?limit=200')).json.items.reduce((n, x) => n + Math.max(1, x.keys.length), 0);
+  assert.equal(u.length - 1, keys); assert.ok(u[0].includes('Access key') && u[0].includes('Rotate'));
+  assert.equal((await new Client().call('GET', '/api/roles.csv')).status, 401);
+  const { toCsv } = await import('../src/csv.js');
+  assert.equal(toCsv([['x', (r) => r]], ['=HYPERLINK("evil")', '-1', 'ok']), `x\n"'=HYPERLINK(""evil"")"\n'-1\nok\n`);
+});
+
+test('access reviews: a frozen snapshot, filtered and exported; both teams sign off; a signed review stays', async () => {
+  const from = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10), to = new Date().toISOString().slice(0, 10);
+  // checks on the way in
+  assert.equal((await owner.post('/api/reviews', { name: 'x', accounts: [accA], from: to, to: from })).json.field, 'to');
+  assert.equal((await owner.post('/api/reviews', { name: 'x', accounts: [accA], from, to: '2999-01-01' })).status, 400);
+  assert.equal((await owner.post('/api/reviews', { name: 'x', accounts: [], from, to })).status, 400);
+  assert.equal((await reviewerClient.post('/api/reviews', { name: 'x', accounts: ['00000000-0000-4000-8000-000000000000'], from, to })).status, 400);
+  const onlyB = await memberOfB('review-b@kbi.id');
+  assert.equal((await onlyB.post('/api/reviews', { name: 'x', accounts: [accA], from, to })).status, 403, 'an account owner cannot create reviews');
+  const c = await owner.post('/api/reviews', { name: 'Q4 2026 access review', accounts: [accA, accB], from, to });
+  assert.equal(c.status, 201, c.text);
+  const id = c.json.id;
+  const r = (await owner.get(`/api/reviews/${id}`)).json;
+  const live = (await owner.get('/api/roles?kinds=&limit=1')).json.total + (await owner.get('/api/iam-users?limit=1')).json.total;
+  assert.equal(r.totals.identities, live); assert.equal(r.accounts.length, 2); assert.deepEqual(r.teams, ['infrasec', 'infosec']); assert.equal(r.status, 'open');
+  assert.equal(r.from, from); assert.equal(r.createdBy, (await owner.get('/api/auth/me')).json.user.name);
+  // items: paged and filtered
+  const page = (await owner.get(`/api/reviews/${id}/items?limit=10`)).json;
+  assert.equal(page.items.length, 10); assert.equal(page.total, live);
+  const one = page.items[0];
+  assert.ok(one.name && one.arn && one.permissions && one.period && Array.isArray(one.callers) && Array.isArray(one.findings));
+  assert.ok((await owner.get(`/api/reviews/${id}/items?kind=users&limit=200`)).json.items.every((x) => x.kind === 'iam-user' && x.user && Array.isArray(x.user.keys)));
+  assert.ok((await owner.get(`/api/reviews/${id}/items?risk=High&limit=200`)).json.items.every((x) => x.risk === 'High'));
+  assert.ok((await owner.get(`/api/reviews/${id}/items?account=${accB}&limit=200`)).json.items.every((x) => x.awsAccountId === '222222222222'));
+  const unused = (await owner.get(`/api/reviews/${id}/items?unused=1&limit=200`)).json;
+  assert.equal(unused.total, r.totals.unusedInPeriod); assert.ok(unused.items.every((x) => x.period.calls === 0));
+  // frozen: a later change does not show
+  const victim = page.items[0];
+  await db.query(`UPDATE roles SET risk='Low' WHERE arn=$1`, [victim.arn]);
+  try { assert.equal((await owner.get(`/api/reviews/${id}/items?limit=1`)).json.items[0].risk, victim.risk); }
+  finally { await db.query(`UPDATE roles SET risk=$2 WHERE arn=$1`, [victim.arn, victim.risk]); }
+  // CSVs
+  const ids = parseCsv((await owner.call('GET', `/api/reviews/${id}/identities.csv`)).text);
+  assert.equal(ids.length - 1, live); assert.equal(ids[1][0], 'Q4 2026 access review');
+  const dec = parseCsv((await owner.call('GET', `/api/reviews/${id}/decisions.csv`)).text);
+  assert.equal(dec[0][5], 'Finding'); assert.ok(dec.length > 1);
+  // who sees it: a member limited to B cannot see a review that covers A
+  assert.equal((await onlyB.get(`/api/reviews/${id}`)).status, 404);
+  assert.ok(!(await onlyB.get('/api/reviews')).json.items.some((x) => x.id === id));
+  // sign-off: one per team; a member with no team or no approve permission cannot
+  assert.equal((await onlyB.post(`/api/reviews/${id}/signoff`, {})).status, 403);
+  assert.equal((await reviewerClient.post(`/api/reviews/${id}/signoff`, { note: 'Reviewed with the platform leads' })).status, 200);
+  assert.equal((await reviewerClient.post(`/api/reviews/${id}/signoff`, {})).status, 409);
+  assert.equal((await owner.call('DELETE', `/api/reviews/${id}`)).status, 409, 'a signed-off review is evidence');
+  const me = (await owner.get('/api/auth/me')).json.user;
+  await db.query(`UPDATE users SET team='infosec' WHERE id=$1`, [me.id]);
+  try {
+    const s = await owner.post(`/api/reviews/${id}/signoff`, {});
+    assert.equal(s.status, 200); assert.equal(s.json.signed, true);
+    const done = (await owner.get(`/api/reviews/${id}`)).json;
+    assert.equal(done.status, 'signed'); assert.deepEqual(done.signoffs.map((x) => x.team), ['infrasec', 'infosec']);
+    assert.equal(done.signoffs[0].note, 'Reviewed with the platform leads');
+  } finally { await db.query(`UPDATE users SET team=$2 WHERE id=$1`, [me.id, me.team ?? null]); }
+  assert.ok((await owner.get('/api/audit?action=review.signoff')).json.items.length >= 2);
+  // an unsigned one can be removed
+  const tmp = (await owner.post('/api/reviews', { name: 'tmp', accounts: [accB], from, to, teams: ['infosec'] })).json.id;
+  assert.equal((await owner.call('DELETE', `/api/reviews/${tmp}`)).status, 200);
+  assert.equal((await owner.get(`/api/reviews/${tmp}`)).status, 404);
+});

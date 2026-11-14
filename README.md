@@ -128,6 +128,7 @@ Whatever you open, a role, an IAM user or a Google Cloud identity, lands on one 
 - **Permissions:** the sector scan on top, then services and every action with its status. Clicking a sector filters the list under it.
 - **Credentials** (IAM users, Google service accounts): access keys, console sign-in and MFA; for Google Cloud, keys and everything that can run as it.
 - **Policies and trust:** the documents.
+- **History:** what changed on it, newest first: policies attached, detached or edited (with a diff of the document), trust policy and boundary changes, risk level changes, keys created, deactivated or deleted, MFA and console password changes, new callers, and every decision and approval with who made it. Policy, trust, credential and risk changes are compared at each scan from this version on; key dates, callers and decisions come from their own records, so they go back further.
 - **Findings:** the same cards as the Findings inbox, decided in place.
 
 Tabs that do not apply are left out (Google Cloud has no Activity: its audit logs are not read). Old addresses (`#/roles`, `#/roles/<id>`, `#/roles/<id>/scan`, `#/users`, `#/users/<id>`, `#/gcp/principals/<id>`) open the new ones.
@@ -221,6 +222,19 @@ Connect a Google Cloud organization, folder or project on the Accounts page, *Go
 - **Space:** with Google Cloud connected, the estate shows two fields. AWS is the green plane at the back and Google Cloud the blue plane in front, with the same environment zones. A project is a ring and each service account a dot, higher the more it can do and red when it is high risk. Blue arcs between the planes are paths between the clouds; a red arc means any role in that AWS account can use it. Click a project or an arc for the details.
 - **Environments:** a project lands in the environment set for it on the Accounts page, otherwise its `env`/`environment` label, otherwise the connection's default.
 - Members limited to some AWS accounts do not see Google Cloud.
+
+## Access reviews
+
+**Review → Access reviews** (`#/reviews`) gives you evidence for a periodic user access review (UAR). *New review* (owners, admins, reviewers) takes the accounts and a period you pick and freezes, in one consistent read:
+
+- every role and IAM user, with its risk and why, permissions granted, used and unused;
+- who used it in the period, how many calls and on how many days;
+- IAM users' access keys (age, last use, due for rotation), console password and MFA;
+- every open finding with its decision, who made it and their team.
+
+Later scans do not change a review. Each review team listed on it signs it off once (members with the `approve` permission and a team), with an optional note; the name, email and time are kept. A signed-off review cannot be removed. Download it as **Identities CSV** (one line per identity) and **Decisions CSV** (one line per finding), or **Print or save as PDF** for a report with the sign-offs, totals and every identity.
+
+The **Roles** and **IAM users** lists also download as CSV with their current filters (*Download CSV*; IAM users have one line per access key). Cells that a spreadsheet would run as a formula are escaped.
 
 ## Alerts
 

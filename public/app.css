@@ -731,3 +731,43 @@ td.actions-cell .btn+.btn{margin-left:6px}
 .switch input:focus-visible+span{outline:2px solid var(--banana);outline-offset:2px}
 tr.muted td{color:var(--faint)}
 .check-grid label{display:flex;flex-direction:row;align-items:center;gap:8px;font-weight:400;font-size:13px}
+
+/* ---- identity History tab ---- */
+.timeline{display:flex;flex-direction:column}
+.tl-day{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding:14px 0 6px;border-bottom:1px solid var(--line)}
+.tl-item{display:grid;grid-template-columns:22px 52px minmax(0,1fr) auto;gap:10px;align-items:start;padding:9px 0;border-bottom:1px solid var(--line)}
+.tl-mark{font-family:var(--mono);font-weight:700;text-align:center;color:var(--muted)}
+.tl-time{padding-top:2px}
+.tl-item.g-policy .tl-mark{color:var(--banana)}
+.tl-item.g-access .tl-mark{color:#8ec5ff}
+.tl-item.g-credentials .tl-mark{color:var(--amber)}
+.tl-item.g-review .tl-mark{color:#9fe8c4}
+.tl-item.g-risk .tl-mark,.tl-item.bad .tl-mark{color:var(--red)}
+pre.diff{max-height:60vh;overflow:auto;font-size:12px;line-height:1.5;padding:10px 0}
+pre.diff span{display:block;padding:0 12px;white-space:pre-wrap}
+pre.diff .add{background:rgba(46,160,67,.18);color:#9fe8c4}
+pre.diff .del{background:rgba(248,81,73,.16);color:var(--red-ink)}
+pre.diff .fold{color:var(--faint);font-style:italic}
+[data-theme=light] pre.diff .add{background:#e6f6ea;color:#155c2a}
+[data-theme=light] pre.diff .del{background:#fdecea;color:#8c1d14}
+.modal:has(pre.diff){width:min(960px,100%)}
+
+/* ---- Review · Access reviews ---- */
+.signoff-row{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.review-table tr.detail-row td{background:var(--raise);padding:14px 16px}
+.review-detail{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px 24px}
+.review-detail ul.plain li{padding:2px 0}
+.print-report{display:none}
+@media print{
+  html,body{background:#fff!important}
+  body>*:not(.print-report){display:none!important}
+  .print-report{display:block;color:#000;background:#fff;font:10pt/1.35 system-ui,sans-serif}
+  .print-report h1{font-size:18pt;margin:0 0 4pt}
+  .print-report h2{font-size:12pt;margin:14pt 0 4pt;break-after:avoid}
+  .print-report table{width:100%;border-collapse:collapse;margin:4pt 0}
+  .print-report th,.print-report td{border:0.5pt solid #999;padding:2pt 4pt;text-align:left;vertical-align:top;font-size:8.5pt}
+  .print-report th{background:#eee}
+  .print-report tr{break-inside:avoid}
+  .print-report section{break-before:auto}
+  @page{size:A4 landscape;margin:12mm}
+}

@@ -5,7 +5,7 @@ import { h, get, debounced, envName, KIND } from './lib.js';
 // [label, address, permission(s), extra words to match]
 const PAGES = [
   ['Radar', '#/', 'view', 'home estate'], ['Space', '#/space', 'view', 'map 3d'], ['Trust map', '#/trust', 'view', 'who can get in'],
-  ['Events', '#/events', 'view', 'calls cloudtrail history'], ['Findings', '#/findings', 'view', 'review inbox decisions'],
+  ['Events', '#/events', 'view', 'calls cloudtrail history'], ['Findings', '#/findings', 'view', 'review inbox decisions'], ['Access reviews', '#/reviews', 'view', 'uar evidence audit sign-off snapshot'],
   ['Identities · Roles', '#/identities', 'view', 'iam roles list'], ['Identities · IAM users', '#/identities?type=users', 'view', 'access keys'],
   ['Identities · Google Cloud', '#/identities?type=gcp', 'view', 'gcp service accounts', 'unscoped'],
   ['Unidentified calls', '#/unidentified', 'view', 'unknown event names'], ['Accounts', '#/accounts', 'view', 'aws onboarding connect'],

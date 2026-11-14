@@ -14,9 +14,11 @@ import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
+import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
 import { search } from '../searchApi.js';
+import { identityHistory, historyEvent } from '../identityHistory.js';
 import { listFindings, waitingCount, decideMany, undecideMany, allowedFor, DecisionError } from '../findingsApi.js';
 import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
@@ -376,10 +378,10 @@ data.delete('/accounts/:id', requirePerm('accounts'), wrap(async (req, res) => {
 
 // ---------- roles ----------
 const csv = (v) => (v ? String(v).split(',').filter(Boolean) : []);
-data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
-  const p = []; const where = ['r.deleted_at IS NULL', scopeSql(req.user, 'r.account_id', p)];
+/** The Roles list's filters as SQL, shared by the list and its CSV. Values go into `p` as $n parameters. */
+function rolesWhere(user, q, p) {
+  const where = ['r.deleted_at IS NULL', scopeSql(user, 'r.account_id', p)];
   const add = (sql, v) => { p.push(v); where.push(sql.replaceAll('?', `$${p.length}`)); };
-  const q = req.query;
   if (q.q) add('(r.name ILIKE ? OR r.arn ILIKE ?)', `%${String(q.q).slice(0, 100)}%`);
   if (csv(q.accounts).length) add('r.account_id = ANY(?::uuid[])', csv(q.accounts).filter((x) => uuid.safeParse(x).success));
   if (csv(q.kinds).length) add('r.kind = ANY(?)', csv(q.kinds)); else where.push("r.kind <> 'iam-user'");
@@ -391,8 +393,14 @@ data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
   if (q.unidentified === '1') where.push(`EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open')`);
   if (q.minUnused) add('r.unused_count >= ?', Math.max(0, Number(q.minUnused) | 0));
   if (q.hasPolicyKind === 'inline') where.push('r.inline_count > 0'); if (q.hasPolicyKind === 'managed') where.push('r.attached_count > 0');
-  const sorts = { risk: 'r.risk_score', name: 'r.name', unused: 'r.unused_count', granted: 'r.granted_count', activity: 'r.last_activity_at' };
-  const order = `${sorts[q.sort] || 'r.risk_score'} ${q.dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, r.name`;
+  return where;
+}
+const ROLE_SORTS = { risk: 'r.risk_score', name: 'r.name', unused: 'r.unused_count', granted: 'r.granted_count', activity: 'r.last_activity_at' };
+const rolesOrder = (q) => `${ROLE_SORTS[q.sort] || 'r.risk_score'} ${q.dir === 'asc' ? 'ASC' : 'DESC'} NULLS LAST, r.name`;
+
+data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
+  const p = [], q = req.query, where = rolesWhere(req.user, q, p);
+  const order = rolesOrder(q);
   const limit = Math.min(Number(q.limit) || 50, 100), offset = (Math.max(Number(q.page) || 1, 1) - 1) * limit;
   const rows = await query(`
     SELECT r.id, r.name, r.arn, r.kind, r.permission_set, r.risk, r.risk_score, r.reviewer_team, r.requires_both, r.granted_count, r.used_count, r.unused_count,
@@ -407,6 +415,27 @@ data.get('/roles', requirePerm('view'), wrap(async (req, res) => {
   const accts = [...new Set(rows.rows.map((x) => x.account_id))];
   const hist = await historyFor(accts.length ? (await query('SELECT * FROM cloud_accounts WHERE id = ANY($1)', [accts])).rows : []);
   res.json({ items: rows.rows.map(({ total, ...r }) => ({ ...r, history: { progress: hist.get(r.account_id)?.progress ?? 0, complete: !!hist.get(r.account_id)?.complete } })), total: rows.rows[0]?.total ?? 0, facets: facets.rows });
+}));
+
+/** The Roles list as a spreadsheet: every row the filters match (up to 50,000), in the list's order. */
+data.get('/roles.csv', requirePerm('view'), wrap(async (req, res) => {
+  const p = [], q = req.query, where = rolesWhere(req.user, q, p);
+  const rows = (await query(`
+    SELECT r.name, r.arn, r.kind, r.permission_set, r.risk, r.risk_score, r.risk_reasons, r.reviewer_team, r.requires_both, r.granted_count, r.used_count, r.unused_count,
+           r.unconfirmed_count, r.inline_count, r.attached_count, r.created_in_aws, r.last_used_at, r.last_activity_at, r.analyzed_at,
+           a.name AS account_name, a.account_id AS aws_account_id, a.environment,
+           (SELECT count(*)::int FROM flags f WHERE f.role_id=r.id AND f.status='open') AS open_flags,
+           (SELECT count(*)::int FROM flags f JOIN review_decisions d ON d.flag_id=f.id WHERE f.role_id=r.id AND f.status='open') AS decided_flags,
+           (SELECT count(*)::int FROM principals x WHERE x.role_id=r.id) AS callers
+      FROM roles r JOIN cloud_accounts a ON a.id=r.account_id WHERE ${where.join(' AND ')} ORDER BY ${rolesOrder(q)} LIMIT 50000`, p)).rows;
+  sendCsv(res, 'roles', toCsvRows([
+    ['Account', (r) => r.account_name], ['Account ID', (r) => r.aws_account_id], ['Environment', (r) => r.environment], ['Role', (r) => r.name], ['ARN', (r) => r.arn],
+    ['Kind', (r) => r.kind], ['Permission set', (r) => r.permission_set], ['Risk', (r) => r.risk], ['Risk score', (r) => r.risk_score], ['Why', (r) => r.risk_reasons],
+    ['Reviewer team', (r) => (r.requires_both ? 'both' : r.reviewer_team)], ['Permissions granted', (r) => r.granted_count], ['Used', (r) => r.used_count],
+    ['Unused', (r) => r.unused_count], ['Cannot be verified', (r) => r.unconfirmed_count], ['Inline policies', (r) => r.inline_count], ['Attached policies', (r) => r.attached_count],
+    ['Callers seen', (r) => r.callers], ['Open findings', (r) => r.open_flags], ['Findings decided', (r) => r.decided_flags],
+    ['Created in AWS', (r) => r.created_in_aws], ['Last used (IAM)', (r) => r.last_used_at], ['Last call seen', (r) => r.last_activity_at], ['Analysed', (r) => r.analyzed_at],
+  ], rows));
 }));
 
 data.get('/roles/:id', requirePerm('view'), wrap(async (req, res) => {
@@ -429,6 +458,19 @@ data.get('/roles/:id', requirePerm('view'), wrap(async (req, res) => {
   const rec = await latestRecommendation(role.id);
   const history = (await historyFor((await query('SELECT * FROM cloud_accounts WHERE id=$1', [role.account_id])).rows)).get(role.account_id);
   res.json({ role, history, policies: pol.rows, principals: prin.rows, flags: flags.rows, passRoles: pass.rows, services: svc.rows, window: cp.rows[0], daily: daily.rows, advisor: adv.rows, recommendation: rec });
+}));
+
+/** The History tab: what changed on this role or IAM user, newest first. */
+data.get('/roles/:id/history', requirePerm('view'), wrap(async (req, res) => {
+  const role = await roleFor(req, req.params.id);
+  res.json({ items: await identityHistory(role), since: (await query('SELECT min(at) AS t FROM identity_events')).rows[0].t });
+}));
+/** One recorded change with the documents before and after, for the diff. */
+data.get('/roles/:id/history/:eventId', requirePerm('view'), wrap(async (req, res) => {
+  const role = await roleFor(req, req.params.id);
+  const ev = await historyEvent(role.id, z.coerce.number().int().positive().parse(String(req.params.eventId).replace(/^e/, '')));
+  if (!ev) throw NotFound();
+  res.json(ev);
 }));
 
 data.get('/roles/:id/actions', requirePerm('view'), wrap(async (req, res) => {

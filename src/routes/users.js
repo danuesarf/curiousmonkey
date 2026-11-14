@@ -1,6 +1,7 @@
 // IAM users: their access keys (ID, status, age, last use), console password and MFA, groups, and what they did.
 // A user is stored as a role of kind 'iam-user', so its permission analysis and calls are on the role page too.
 import { keyRules } from '../config.js';
+import { toCsv, sendCsv } from '../csv.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db.js';
@@ -61,11 +62,11 @@ async function loadUsers(user, { id = null } = {}) {
 }
 
 const FLAGS = ['oldKey', 'unusedKey', 'twoKeys', 'console', 'noMfa', 'hasKeys', 'inactive'];
-users.get('/iam-users', requirePerm('view'), wrap(async (req, res) => {
-  const q = z.object({ q: z.string().max(200).optional(), accounts: z.string().max(4000).optional(), risk: z.enum(['High', 'Medium', 'Low']).optional(),
+const ListQuery = z.object({ q: z.string().max(200).optional(), accounts: z.string().max(4000).optional(), risk: z.enum(['High', 'Medium', 'Low']).optional(),
     flag: z.enum(FLAGS).optional(), sort: z.enum(['risk', 'keyAge', 'lastSeen', 'name', 'calls']).default('risk'),
-    limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(req.query);
-  const all = await loadUsers(req.user);
+    limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) });
+/** The users the list's filters match, in its order. Shared by the list and its CSV. */
+function filterUsers(all, q) {
   const accts = (q.accounts || '').split(',').filter(Boolean);
   const needle = (q.q || '').toLowerCase();
   const list = all.filter((u) => (!accts.length || accts.includes(u.account.id)) && (!q.risk || u.risk === q.risk) && (!q.flag || u.flags[q.flag])
@@ -78,7 +79,12 @@ users.get('/iam-users', requirePerm('view'), wrap(async (req, res) => {
     name: (a, b) => a.name.localeCompare(b.name) || a.account.name.localeCompare(b.account.name),
     calls: (a, b) => b.calls7 - a.calls7,
   };
-  list.sort(sorters[q.sort]);
+  return list.sort(sorters[q.sort]);
+}
+
+users.get('/iam-users', requirePerm('view'), wrap(async (req, res) => {
+  const q = ListQuery.parse(req.query);
+  const all = await loadUsers(req.user), accts = (q.accounts || '').split(',').filter(Boolean), list = filterUsers(all, q);
   const scope = accts.length ? all.filter((u) => accts.includes(u.account.id)) : all;
   const keys = scope.flatMap((u) => u.keys.filter((k) => k.status === 'Active'));
   res.json({
@@ -89,6 +95,20 @@ users.get('/iam-users', requirePerm('view'), wrap(async (req, res) => {
     counts: Object.fromEntries(FLAGS.map((f) => [f, scope.filter((u) => u.flags[f]).length])),
     rules: keyRules(),
   });
+}));
+
+/** The IAM users list as a spreadsheet: one line per access key (a user with none gets one line), with console sign-in and MFA. */
+users.get('/iam-users.csv', requirePerm('view'), wrap(async (req, res) => {
+  const list = filterUsers(await loadUsers(req.user), ListQuery.parse({ ...req.query, limit: undefined, offset: undefined }));
+  const lines = list.flatMap((u) => (u.keys.length ? u.keys : [null]).map((k) => ({ u, k })));
+  sendCsv(res, 'iam-users', toCsv([
+    ['Account', ({ u }) => u.account.name], ['Account ID', ({ u }) => u.account.awsAccountId], ['Environment', ({ u }) => u.account.environment], ['User', ({ u }) => u.name],
+    ['ARN', ({ u }) => u.arn], ['Risk', ({ u }) => u.risk], ['Why', ({ u }) => u.reasons], ['Groups', ({ u }) => u.groups], ['Created', ({ u }) => u.created],
+    ['Last seen', ({ u }) => u.lastSeen], ['Console password', ({ u }) => (u.console.password ? 'yes' : 'no')], ['MFA', ({ u }) => (u.console.mfa.length ? u.console.mfa.map((m) => m.type).join('; ') : 'none')],
+    ['Password last used', ({ u }) => u.console.lastUsed], ['Access key', ({ k }) => k?.id], ['Key status', ({ k }) => k?.status], ['Key created', ({ k }) => k?.created],
+    ['Key age (days)', ({ k }) => k?.ageDays], ['Key last used', ({ k }) => k?.lastUsed], ['Key last service', ({ k }) => k?.lastService], ['Key calls seen', ({ k }) => k?.trailCalls],
+    ['Rotate', ({ k }) => (k?.old ? 'yes' : '')], ['Unused', ({ k }) => (k?.unused ? 'yes' : '')],
+  ], lines));
 }));
 
 users.get('/iam-users/:id', requirePerm('view'), wrap(async (req, res) => {

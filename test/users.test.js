@@ -150,3 +150,88 @@ test('the scanner policy can read users, their keys and their groups', async () 
   for (const a of ['iam:ListUsers', 'iam:ListAccessKeys', 'iam:GetAccessKeyLastUsed', 'iam:ListMFADevices', 'iam:GetLoginProfile', 'iam:ListGroupsForUser', 'iam:ListAttachedGroupPolicies']) assert.ok(SCANNER_ALLOW.includes(a), a);
   assert.ok(!SCANNER_ALLOW.some((a) => /CreateAccessKey|UpdateAccessKey|DeleteAccessKey/.test(a)));
 });
+
+// ---------------------------------------------------------------- history
+test('history: a changed trust policy, a changed and a detached policy, a deactivated key and a removed MFA device are recorded; decisions and keys show too', async () => {
+  const { demoGateway } = await import('../src/demo/gateway.js');
+  const { inventoryRoles, inventoryUsers } = await import('../src/scanner/inventory.js');
+  const account = (await db.query('SELECT * FROM cloud_accounts WHERE id=$1', [A])).rows[0];
+  const ctx = { log: () => {}, progress: async () => {} };
+  // a role with an inline policy and an attached one
+  const gw = demoGateway(account);
+  const roles = await gw.listRoles();
+  let target = null;
+  for (const r of roles) { const p = await gw.getRolePolicies(r.name); if (p.inline.length && p.attached.length) { target = r; break; } }
+  assert.ok(target, 'the demo has a role with both kinds of policy');
+  const id = (await db.query('SELECT id FROM roles WHERE account_id=$1 AND arn=$2', [A, target.arn])).rows[0].id;
+  // nothing changed: nothing recorded
+  assert.equal((await db.query('SELECT count(*)::int n FROM identity_events WHERE role_id=$1', [id])).rows[0].n, 0);
+  await inventoryRoles(ctx, account, gw);
+  assert.equal((await db.query('SELECT count(*)::int n FROM identity_events WHERE role_id=$1', [id])).rows[0].n, 0, 'a scan that finds the same thing records nothing');
+
+  const orig = await gw.getRolePolicies(target.name);
+  const extra = { Effect: 'Allow', Action: 's3:DeleteBucket', Resource: '*' };
+  gw.listRoles = async () => roles.map((r) => (r.name === target.name ? { ...r, trustPolicy: { ...r.trustPolicy, Statement: [...r.trustPolicy.Statement, { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::999999999999:root' }, Action: 'sts:AssumeRole' }] } } : r));
+  gw.getRolePolicies = async (name) => (name !== target.name ? orig : {
+    inline: orig.inline.map((p, i) => (i ? p : { ...p, document: { ...p.document, Statement: [...[].concat(p.document.Statement), extra] } })),
+    attached: orig.attached.slice(1),
+  });
+  await inventoryRoles(ctx, account, gw);
+  const ev = (await db.query('SELECT kind, title, detail FROM identity_events WHERE role_id=$1 ORDER BY id', [id])).rows;
+  assert.deepEqual(ev.map((e) => e.kind).sort(), ['policy-changed', 'policy-removed', 'trust-changed']);
+  const changed = ev.find((e) => e.kind === 'policy-changed');
+  assert.ok(JSON.stringify(changed.detail.after).includes('s3:DeleteBucket') && !JSON.stringify(changed.detail.before).includes('s3:DeleteBucket'));
+  assert.match(ev.find((e) => e.kind === 'policy-removed').title, /detached$/);
+
+  // the API: newest first, documents only on request
+  const hist = (await owner.get(`/api/roles/${id}/history`)).json;
+  const trust = hist.items.find((x) => x.kind === 'trust-changed');
+  assert.equal(trust.diff, true); assert.equal(trust.group, 'access'); assert.equal(trust.detail.before, undefined, 'the list carries no documents');
+  assert.ok(hist.items.some((x) => x.kind === 'created'), 'when it was created in AWS');
+  const one = (await owner.get(`/api/roles/${id}/history/${trust.id}`)).json;
+  assert.ok(JSON.stringify(one.detail.after).includes('999999999999'));
+  assert.equal((await owner.get(`/api/roles/${id}/history/e999999`)).status, 404);
+  const other = (await db.query(`SELECT id FROM roles WHERE account_id=$1 AND kind <> 'iam-user' LIMIT 1`, [B])).rows[0].id;
+  assert.equal((await owner.get(`/api/roles/${other}/history/${trust.id}`)).status, 404, 'an event is only read through its own identity');
+
+  // a decision shows, with who made it
+  const flag = (await db.query(`SELECT id, category FROM flags WHERE role_id=$1 AND status='open' AND category IN ('wildcard','role-idle','trust-wildcard','external-principal') LIMIT 1`, [id])).rows[0]
+    || (await db.query(`SELECT id, category FROM flags WHERE role_id=$1 AND status='open' LIMIT 1`, [id])).rows[0];
+  if (flag) {
+    const decision = ['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event'].includes(flag.category) ? 'keep' : 'accept';
+    assert.equal((await owner.post(`/api/flags/${flag.id}/decision`, { decision })).status, 200);
+    const d = (await owner.get(`/api/roles/${id}/history`)).json.items.find((x) => x.kind === 'decision');
+    assert.ok(d && d.by && d.group === 'review', JSON.stringify(d));
+  }
+
+  // an IAM user: a key deactivated, an MFA device removed
+  const ugw = demoGateway(account);
+  const users = await ugw.listUsers();
+  let who = null, detail0 = null;
+  for (const u of users) { const dt = await ugw.getUserDetail(u.name); if (dt.mfa.length && dt.keys.some((k) => k.status === 'Active')) { who = u; detail0 = dt; break; } }
+  if (!who) for (const u of users) { const dt = await ugw.getUserDetail(u.name); if (dt.keys.some((k) => k.status === 'Active')) { who = u; detail0 = dt; break; } }
+  const uid = (await db.query('SELECT id FROM roles WHERE account_id=$1 AND arn=$2', [A, who.arn])).rows[0].id;
+  const key = detail0.keys.find((k) => k.status === 'Active');
+  ugw.getUserDetail = async (name) => { const dt = await demoGateway(account).getUserDetail(name); return name !== who.name ? dt : { ...dt, mfa: [], keys: dt.keys.map((k) => (k.id === key.id ? { ...k, status: 'Inactive' } : k)) }; };
+  await inventoryUsers(ctx, account, ugw);
+  const uev = (await db.query('SELECT kind, title FROM identity_events WHERE role_id=$1 ORDER BY id', [uid])).rows;
+  assert.ok(uev.some((e) => e.kind === 'key-status' && e.title === `Access key ${key.id} deactivated`), JSON.stringify(uev));
+  if (detail0.mfa.length) assert.ok(uev.some((e) => e.kind === 'mfa' && e.title === 'MFA device removed'));
+  const uh = (await owner.get(`/api/roles/${uid}/history`)).json.items;
+  assert.ok(uh.some((x) => x.kind === 'key-created' && x.group === 'credentials'), 'key creation dates come from the keys themselves');
+});
+
+test('history: a change of risk level is recorded once history is complete, not while it is provisional', async () => {
+  // the first scan analysed every role once: nothing to compare with, so nothing recorded
+  assert.equal((await db.query(`SELECT count(*)::int n FROM identity_events WHERE kind='risk'`)).rows[0].n, 0);
+  const { analyzeAccount } = await import('../src/scanner/analyzeJob.js');
+  // a role nothing else touched: its stored level is what analysis gives; store another one and analyse again
+  const r = (await db.query(`SELECT id, risk FROM roles r WHERE account_id=$1 AND deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM identity_events e WHERE e.role_id = r.id) ORDER BY name LIMIT 1`, [A])).rows[0];
+  const other = r.risk === 'Low' ? 'High' : 'Low';
+  await db.query(`UPDATE roles SET risk=$2 WHERE id=$1`, [r.id, other]);
+  await analyzeAccount(A, { alive: () => {}, progress: async () => {} });
+  const ev = (await db.query(`SELECT title, detail FROM identity_events WHERE role_id=$1 AND kind='risk'`, [r.id])).rows;
+  assert.equal(ev.length, 1); assert.equal(ev[0].title, `Risk ${other === 'High' ? 'fell' : 'rose'}: ${other} → ${r.risk}`); assert.deepEqual([ev[0].detail.from, ev[0].detail.to], [other, r.risk]);
+  await analyzeAccount(A, { alive: () => {}, progress: async () => {} });
+  assert.equal((await db.query(`SELECT count(*)::int n FROM identity_events WHERE role_id=$1 AND kind='risk'`, [r.id])).rows[0].n, 1, 'the same level again records nothing');
+});

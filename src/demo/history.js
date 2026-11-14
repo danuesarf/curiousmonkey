@@ -42,5 +42,40 @@ export async function demoHistory() {
       changes += r.rowCount;
     }
   }
-  return `demo history: ${snaps} snapshots, ${changes} changes across ${accounts.length} accounts`;
+  const events = await demoIdentityEvents();
+  return `demo history: ${snaps} snapshots, ${changes} changes, ${events} identity events across ${accounts.length} accounts`;
+}
+
+/**
+ * Demo only: a few past changes on the riskiest roles, so the History tab has something to show. Built from each
+ * role's real current documents: the "before" is the document with its last statement taken out.
+ */
+async function demoIdentityEvents() {
+  const roles = (await query(`SELECT DISTINCT ON (r.account_id) r.id, r.name, r.trust_policy FROM roles r
+                                WHERE r.deleted_at IS NULL AND r.kind <> 'iam-user' ORDER BY r.account_id, r.risk_score DESC, r.name`)).rows;
+  let n = 0;
+  const add = async (roleId, daysAgo, kind, title, detail) => {
+    await query(`INSERT INTO identity_events(role_id, at, kind, title, detail) VALUES ($1, now() - make_interval(days => $2), $3, $4, $5)`, [roleId, daysAgo, kind, title, JSON.stringify(detail)]);
+    n++;
+  };
+  for (const r of roles) {
+    if ((await query('SELECT 1 FROM identity_events WHERE role_id=$1 LIMIT 1', [r.id])).rowCount) continue;
+    const pol = (await query(`SELECT name, kind, arn, aws_managed, document FROM role_policies WHERE role_id=$1 ORDER BY aws_managed, kind, name`, [r.id])).rows;
+    // a policy of their own that grew: "before" has its last statement out, or its first action only
+    const own = pol.find((p) => !p.aws_managed && p.document?.Statement);
+    if (own) {
+      const st = [].concat(own.document.Statement);
+      const narrower = (s) => ({ ...s, Action: [].concat(s.Action || 's3:GetObject').slice(0, 1).map((a) => (a === '*' ? 's3:GetObject' : a)) });
+      const before = { ...own.document, Statement: st.length > 1 ? st.slice(0, -1) : [narrower(st[0])] };
+      await add(r.id, 12, 'policy-changed', `${own.kind === 'inline' ? 'Inline' : 'Managed'} policy ${own.name} changed`, { name: own.name, policyKind: own.kind, arn: own.arn, awsManaged: false, before, after: own.document });
+    }
+    await add(r.id, 11, 'risk', 'Risk rose: Medium → High', { from: 'Medium', to: 'High', reasons: ['Grants more than it uses'] });
+    const managed = pol.find((p) => p.aws_managed);
+    if (managed) await add(r.id, 40, 'policy-added', `Managed policy ${managed.name} attached`, { name: managed.name, policyKind: 'managed', arn: managed.arn, awsManaged: true, after: managed.document });
+    const st = r.trust_policy?.Statement;
+    if (Array.isArray(st) && st.length) {
+      await add(r.id, 26, 'trust-changed', 'Trust policy changed', { name: 'Trust policy', before: { ...r.trust_policy, Statement: st.slice(0, 1).map((x) => ({ ...x, Condition: { StringEquals: { 'sts:ExternalId': 'demo-legacy' } } })) }, after: r.trust_policy });
+    }
+  }
+  return n;
 }
