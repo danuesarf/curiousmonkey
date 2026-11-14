@@ -208,7 +208,9 @@ source:external -cond:ExternalId          outside accounts with no ExternalId co
 role:deploy has:findings used:no          …
 ```
 
-Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `cond` `env` `has` `no` `used`; prefix `-` to exclude; anything else is free text.
+Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `roleid` (one role exactly) `cond` `env` `has` `no` `used`; prefix `-` to exclude; anything else is free text.
+
+The Trust map is the one full list of who can get in. Space's panels and a role's Overview show the top few, worst first, with a link to the Trust map filtered to that account or role.
 
 ## Google Cloud
 

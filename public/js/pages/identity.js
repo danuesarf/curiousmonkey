@@ -197,7 +197,8 @@ function overviewTab(d, u, hist, open) {
         p.caller?.trust && !p.caller.trust.matched && p.kind !== 'service' ? h('span', { class: 'badge b-high', style: 'margin-left:6px' }, 'Not named in trust policy') : null)),
         d.principals.length > 5 ? h('li', { class: 'small muted' }, `+${d.principals.length - 5} more`) : null)
         : h('p', { class: 'small muted' }, u ? 'No call seen in the history read so far.' : 'Nobody assumed this role in the window.'),
-      !u && h('p', { class: 'small muted' }, 'Everyone the trust policy lets in, used or not, is on the ', h('a', { href: `#/trust?q=${encodeURIComponent(r.name)}` }, 'Trust map'), '.'))),
+      !u && h('p', { class: 'small muted' }, 'Who actually came in. Who is allowed to, used or not, is below.'))),
+    !u && waysIn(r.id),
     gcpCard(r.id));
 }
 
@@ -245,6 +246,21 @@ function policiesTab(d, parts) {
 }
 
 /** Where this role reaches into Google Cloud, or which Google service accounts can become it. Filled in when known. */
+// the top few ways in from its trust policy, worst first; the full list is the Trust map, filtered to this role
+function waysIn(roleId) {
+  const box = h('div'), q = `roleid:${roleId}`, href = `#/trust?q=${encodeURIComponent(q)}`;
+  get(`/trust?q=${encodeURIComponent(q)}`).then((m) => {
+    const top = m.rows.slice(0, 5);
+    box.replaceChildren(h('section', { class: 'card' }, h('div', { class: 'card-b stack' },
+      h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Who can get in'), h('a', { class: 'small', href }, m.total > top.length ? `See all ${m.total} in Trust map →` : 'Open in Trust map →')),
+      top.length ? h('ul', { class: 'plain stack', style: 'gap:4px' }, top.map((e) => h('li', { class: 'small' }, h('span', { class: 'name' }, e.source),
+        h('span', { class: 'muted' }, ` · ${e.seen?.length ? 'used' : 'not seen using it'}`),
+        e.worst !== 'none' && e.worst !== 'info' ? h('span', { class: `badge b-${e.worst}`, style: 'margin-left:6px' }, e.findings.find((f) => f.severity === e.worst)?.title || e.worst) : null)))
+        : h('p', { class: 'small muted' }, 'Its trust policy lets nobody in.'))));
+  }).catch(() => {});
+  return box;
+}
+
 function gcpCard(roleId) {
   const box = h('div');
   get(`/gcp/aws-role/${roleId}`).then((x) => {

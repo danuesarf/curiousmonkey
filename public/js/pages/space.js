@@ -725,8 +725,11 @@ export async function spacePage(ctx) {
         stats: [{ k: 'Accounts', v: num(live.length) }, { k: Noun, v: num(roles) }, { k: 'Never called', v: num(cold), tone: roles && cold / roles > 0.5 ? 'warn' : null },
           { k: 'High-risk roles', v: num(high), tone: high ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Loose ways in', v: num(loose), tone: loose ? 'warn' : null }],
         rows: [],
-        lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.' },
+        lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.',
+          full: { label: 'See all in Trust map', href: '#/trust', eyebrow: 'TRUST MAP · EVERY WAY IN' } },
           ...(M.gcp ? [{ title: 'Between AWS and Google Cloud', hint: 'Where an identity in one cloud can act in the other. Red: any role in the AWS account can use it.',
+            full: [{ label: 'Google into AWS: Trust map', href: '#/trust?q=provider:google', count: false, eyebrow: 'TRUST MAP · FROM GOOGLE' },
+              { label: 'AWS into Google Cloud', href: '#/identities?type=gcp&source=aws', count: false, eyebrow: 'GOOGLE CLOUD · REACHABLE FROM AWS' }],
             items: M.gcp.xlinks.map((l) => ({ label: `${nameOf(l.from)} → ${nameOf(l.to)}`, meta: l.pairs.map((x) => (l.dir === 'aws-gcp' ? `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'direct'}` : `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`)).join(' · '),
               tone: l.kind === 'xcloudHigh' ? 'bad' : null, pick: l.id })), empty: 'No path between the clouds.' }] : []),
           { title: `Accounts with high-risk ${noun}`, items: live.filter((g) => g.high).sort((a, b) => b.high - a.high).slice(0, 6).map((g) => ({ label: g.name, icon: 'account', meta: `${ENV[g.env].name} · ${num(g.roles)} ${noun}`, value: `${g.high} high`, tone: 'bad', pick: g.id })), empty: `No account has a high-risk one.` }],
@@ -738,7 +741,8 @@ export async function spacePage(ctx) {
       stats: [{ k: 'Roles', v: num(M.roleCount) }, { k: 'Called · 7 d', v: num(M.roles.length) }, { k: 'Never called', v: num(M.rim.length), tone: M.roleCount && M.rim.length / M.roleCount > 0.5 ? 'warn' : null },
         { k: 'Refused calls', v: num(denied.reduce((n, r) => n + r.denied7, 0)), tone: denied.length ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Other accounts', v: num(M.fars.length) }],
       rows: [],
-      lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.' },
+      lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.',
+        full: { label: 'See all in Trust map', href: `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`, eyebrow: `TRUST MAP · ${M.account.name.toUpperCase()}` } },
         ...(denied.length ? [{ title: 'Roles with refused calls', items: denied.slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.cluster.label, value: num(r.denied7), tone: 'bad', pick: r.id })) }] : []),
         { title: 'Busiest roles', items: [...M.roles].sort((a, b) => b.calls7 - a.calls7).slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.services.map((x) => x.name).slice(0, 3).join(' · '), value: kfmt(r.calls7), pick: r.id })) }],
       actions: [['Its calls', `#/events?account=${M.account.id}`, true], ['Track sessions', () => openTrack({ account: M.account.id }, M.account.name)], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`], ['Back to estate', '#/space']] };
@@ -781,10 +785,12 @@ export async function spacePage(ctx) {
           rows: look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [],
           lists: [
             { title: 'Who can get in · from outside your org', hint: 'Sign-in providers, pipelines, vendors and other AWS accounts that a trust policy here lets in.',
+              full: { label: 'See all in Trust map', href: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId}`)}`, eyebrow: `TRUST MAP · ${g.name.toUpperCase()}` },
               items: fromOut.map(({ x, t }) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null,
                 meta: [x.sub, plural(t.roles.length, 'role'), t.sessions ? `used ${num(t.sessions)}×` : 'never seen coming in'].join(' · '), pick: x.id,
                 window: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} ${trustQ(x)}`)}`, winTitle: `${x.label} → ${g.name}` })), empty: 'No trust policy here lets anyone outside your org in.' },
-            { title: 'Who can get in · your other accounts', hint: 'Seen entering a role here in the last 90 days. Click one to replay those sessions.',
+            { title: 'Who can get in · your other accounts', hint: 'Seen entering a role here in the last 90 days. Click one to replay those sessions. What their trust policies allow, used or not, is on the Trust map.',
+              full: { label: 'Allowed by trust: Trust map', href: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} source:connected`)}`, count: false, eyebrow: `TRUST MAP · YOUR ACCOUNTS → ${g.name.toUpperCase()}` },
               items: [...ins.map((l) => ({ label: M.by.get(l.from).name, icon: 'account', meta: `${plural(l.roles.length, 'role pair')} · last ${ago(l.lastSeen)}${l.kind === 'new' ? ' · new today' : ''}`, value: num(l.sessions), pick: l.id,
                 window: `#/track?account=${g.id}&from=${l.from}`, winTitle: `${M.by.get(l.from).name} → ${g.name}`, winEyebrow: 'TRACK · SESSIONS THAT CAME IN' })),
               ...(scan ? [{ label: 'Curious Monkey', icon: 'cm', meta: `this portal's scanner · ${scan.sessions ? `last ${ago(scan.lastSeen)}` : 'no sign-in seen yet'}`, value: num(scan.sessions), pick: CM_ID }] : [])], empty: 'None of your other accounts entered it in 90 days.' },
@@ -792,6 +798,8 @@ export async function spacePage(ctx) {
               items: outs.map((l) => ({ label: M.by.get(l.to).name, icon: 'account', meta: `${plural(l.roles.length, 'role pair')} · last ${ago(l.lastSeen)}`, value: num(l.sessions), pick: l.id,
                 window: `#/track?account=${l.to}&from=${g.id}`, winTitle: `${g.name} → ${M.by.get(l.to).name}`, winEyebrow: 'TRACK · SESSIONS THAT WENT OUT' })), empty: 'It entered no other account in 90 days.' },
             ...(M.gcp ? [{ title: 'Google Cloud', hint: 'Where roles here can act in Google Cloud, and which Google service accounts can sign in here.',
+              full: [{ label: 'Google into it: Trust map', href: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} provider:google`)}`, count: false, eyebrow: 'TRUST MAP · FROM GOOGLE' },
+                { label: 'It into Google Cloud', href: '#/identities?type=gcp&source=aws', count: false, eyebrow: 'GOOGLE CLOUD · REACHABLE FROM AWS' }],
               items: M.links.filter((l) => /^xcloud/.test(l.kind) && (l.from === g.id || l.to === g.id)).flatMap((l) => l.pairs.map((x) => (l.dir === 'aws-gcp'
                 ? { label: `${x.awsRole || 'any role'} → ${x.gcpEmail ? x.gcpEmail.split('@')[0] : `${x.gcpProject} (direct)`}`, meta: `in ${x.gcpProject}${x.broad ? ' · the pool has no condition' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
                   window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }
@@ -923,18 +931,22 @@ export async function spacePage(ctx) {
         const locate = (open || it.onClick) && it.pick ? h('button', { class: 'sp-locate', title: 'Show it on the map', 'aria-label': `Show ${it.label} on the map`, onClick: () => set({ sel: it.pick }) }, '◎') : null;
         return h('li', { class: it.tone ? `sp-${it.tone}` : null }, main, locate);
       };
+      // a list with `full` is a summary: its top few here, the whole list on the page it links to (Trust map, mostly)
+      const fulls = [].concat(L.full || []);
       const draw = () => {
         const q = (st.filter || '').toLowerCase(), m = L.items.filter((it) => !q || `${it.label} ${it.meta || ''}`.toLowerCase().includes(q));
-        const shown = st.showAll ? m : m.slice(0, 25);
+        const shown = fulls.length ? m.slice(0, L.max || 5) : st.showAll ? m : m.slice(0, 25);
         ul.replaceChildren(...(m.length ? shown.map(item) : [h('li', { class: 'muted small sp-empty' }, q ? 'Nothing matches.' : L.empty || 'None.')]));
-        more.hidden = m.length <= shown.length; more.textContent = `Show all ${m.length}`;
+        more.hidden = !!fulls.length || m.length <= shown.length; more.textContent = `Show all ${m.length}`;
       };
       more.addEventListener('click', () => { st.showAll = true; draw(); });
-      const filter = L.items.length > 8 && h('input', { type: 'search', class: 'sp-filter', placeholder: `Filter ${L.items.length}…`, 'aria-label': `Filter ${L.title}`, value: st.filter || '',
+      const filter = !fulls.length && L.items.length > 8 && h('input', { type: 'search', class: 'sp-filter', placeholder: `Filter ${L.items.length}…`, 'aria-label': `Filter ${L.title}`, value: st.filter || '',
         onInput: (ev) => { st.filter = ev.target.value; st.showAll = false; draw(); } });
       draw();
       return h('section', { class: 'sp-list-block' }, h('div', { class: 'sp-lh' }, h('h3', null, L.title), h('span', { class: `mono sp-count${L.items.length ? '' : ' zero'}` }, String(L.items.length))),
-        L.hint && L.items.length ? h('p', { class: 'sp-hint' }, L.hint) : null, filter || null, ul, more);
+        L.hint && L.items.length ? h('p', { class: 'sp-hint' }, L.hint) : null, filter || null, ul, more,
+        ...fulls.map((f) => h('button', { class: 'btn sm sp-full', title: `${f.label} · opens in a window`, onClick: () => openWin(f.href, f.title || f.label, f.eyebrow) },
+          L.items.length > (L.max || 5) && f.count !== false ? `${f.label} (${L.items.length})` : f.label, windowIcon())));
     };
     const action = ([label, href, primary]) => {
       const cls = primary ? 'btn primary small' : 'btn small';

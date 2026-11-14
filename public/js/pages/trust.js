@@ -69,7 +69,7 @@ export async function trustPage(ctx) {
         [['account:payments-prod', 'roles living in that account (name or 12-digit ID)'], ['from:123456789012', 'trusts that AWS account (also a name of a connected account)'],
           ['source:external | connected | same | aws | oidc | saml | service | public', 'where the trust comes from'], ['type:root | role | user | oidc | saml | service | public', 'what kind of principal'],
           ['provider:github | bitbucket | google | eks | "Bitbucket Pipelines · acme"', 'OIDC / SAML provider or AWS service'], ['finding:account-root', `one of: ${Object.keys(m.findings).join(', ')}`],
-          ['severity:high', 'has a finding of that severity'], ['role:deploy', 'role name contains'], ['cond:ExternalId', 'a condition contains'], ['env:production', 'account environment'],
+          ['severity:high', 'has a finding of that severity'], ['role:deploy', 'role name contains'], ['roleid:42', 'one role, by its id here'], ['cond:ExternalId', 'a condition contains'], ['env:production', 'account environment'],
           ['has:findings · no:conditions · used:no', 'shortcuts'], ['-term', 'excludes, e.g. -source:service'], ['free text', 'matches role, account, principal, source, conditions']]
           .map(([k, v]) => h('div', { class: 'row', style: 'gap:12px;align-items:baseline' }, h('code', null, k), h('span', { class: 'small muted' }, v)))))));
 

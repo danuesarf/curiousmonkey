@@ -223,7 +223,7 @@ function matchesSeen(e, s) {
 }
 
 // ---------------------------------------------------------------- query language
-const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'cond', 'has', 'no', 'used', 'env'];
+const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env'];
 export function parseQuery(q) {
   const terms = [];
   const re = /(-?)(\w+):("([^"]*)"|\S+)|"([^"]*)"|(\S+)/g; let m;
@@ -245,6 +245,7 @@ function termMatches(e, t) {
     case 'finding': return e.findings.some((f) => f.id === v || f.id.startsWith(v));
     case 'severity': return e.findings.some((f) => f.severity === v);
     case 'role': return lc(e.role).includes(v);
+    case 'roleid': return String(e.roleId) === v; // one role exactly, for links from its page
     case 'cond': return e.conditions.some((c) => lc(c).includes(v));
     case 'env': return lc(e.environment).startsWith(v);
     case 'has': return v === 'findings' ? e.findings.some((f) => f.severity !== 'info') : v === 'conditions' ? e.conditions.length > 0 : v === 'seen' ? e.seen.length > 0 : false;

@@ -89,4 +89,7 @@ test('trust map over the database: scope, query, what was seen, CSV', async () =
   assert.equal(named.rows[0].type, 'aws-role');
   assert.equal(named.rows[0].group, 'same-account');
   assert.match(tm.toCsv(all.rows).split('\n')[1], /^"data-stg","222222222222","cross"/);
+  // roleid: is exact, so a role page can link to its own ways in and nothing else
+  const exact = await tm.trustMap(owner, `roleid:${all.rows[0].roleId}`);
+  assert.ok(exact.total >= 1 && exact.rows.every((e) => e.roleId === all.rows[0].roleId));
 });
