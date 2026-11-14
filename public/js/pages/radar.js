@@ -2,7 +2,7 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1, syncUrl } from '../lib.js';
+import { h, svg, get, getCached, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1, syncUrl } from '../lib.js';
 import { go, changeRow, refreshBell } from '../main.js';
 
 const CX = 400, CY = 400;
@@ -89,7 +89,9 @@ function drawSectors(kids, secs, sub, onClick) {
 }
 function contact(kids, c) {
   // c: { d, x, y, fill, stroke, base, act, ang, title, sel, isNew, onClick }
-  const g = svg('g', { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); c.onClick?.(); } }, svg('title', null, c.title));
+  const g = svg('g', { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); c.onClick?.(); } }, svg('title', null, c.title),
+    // what can be clicked is never smaller than about 12 px on screen, however small the contact
+    svg('circle', { cx: c.x, cy: c.y, r: r1(Math.max(c.s + 3, 8 * FZ)), fill: '#000', opacity: 0 }));
   // brighter = busier in the last 24 h
   const body = svg('path', { d: c.d, fill: c.fill, stroke: c.stroke || null, 'stroke-width': c.stroke ? 1.4 : null, opacity: r1(Math.min(1, c.base + (c.act ?? 0) * 0.6)) });
   g.append(body);
@@ -143,11 +145,23 @@ const hudEl = (a, b, c) => h('div', { class: 'hud' }, h('div', { class: 'hot' },
 function legend(items) {
   return h('div', { class: 'legend' }, items.map(([sw, t]) => { const s = h('span', { 'aria-hidden': 'true' }); s.style.cssText = paint(sw); return h('span', null, s, t); }));
 }
-function spark(points, color) {
-  const vals = points.filter((v) => v != null); if (vals.length < 2) return null;
-  const xs = [0, 230, 300]; const pts = points.map((v, i) => (v == null ? null : `${xs[i]},${r1(50 - v * 46)}`)).filter(Boolean).join(' ');
-  return svg('svg', { viewBox: '0 0 300 54', style: 'width:100%;height:54px', role: 'img', 'aria-label': `Never-called share: ${points.filter((v) => v != null).map((v) => `${Math.round(v * 100)}%`).join(' → ')}` },
-    svg('path', { d: 'M0 53 H300', stroke: '#143425' }), svg('polyline', { points: pts, fill: 'none', stroke: color, 'stroke-width': 1.6 }));
+/** The never-called share day by day (an account's median role, or one role), on a scale fitted to the data. */
+function trailEl(qs, color) {
+  const box = h('div', { class: 'stack', style: 'gap:2px;min-height:58px' }, h('p', { class: 'tiny muted' }, 'Loading…'));
+  getCached(`/radar/trail?${qs}`, 300_000).then((t) => {
+    const pts = t.points.filter((x) => x.v != null);
+    if (pts.length < 2) { box.replaceChildren(h('p', { class: 'tiny muted' }, 'A line appears once there are two days of snapshots.')); return; }
+    const vs = pts.map((x) => x.v), lo0 = Math.min(...vs), hi0 = Math.max(...vs), mid = (lo0 + hi0) / 2, span = Math.max(0.04, hi0 - lo0) * 1.15;
+    const lo = mid - span / 2, t0 = new Date(pts[0].day).getTime(), t1 = new Date(pts.at(-1).day).getTime() || t0 + 1;
+    const xy = pts.map((x) => [r1(((new Date(x.day).getTime() - t0) / Math.max(1, t1 - t0)) * 296 + 2), r1(50 - ((x.v - lo) / span) * 46)]);
+    const pc = (v) => `${Math.round(v * 1000) / 10}%`;
+    box.replaceChildren(
+      svg('svg', { viewBox: '0 0 300 54', style: 'width:100%;height:54px', role: 'img', 'aria-label': `Never-called share, ${pts.length} days: from ${pc(vs[0])} to ${pc(vs.at(-1))}` },
+        svg('path', { d: 'M0 53 H300', stroke: '#143425' }), svg('polyline', { points: xy.map((q) => q.join(',')).join(' '), fill: 'none', stroke: color, 'stroke-width': 1.6 }),
+        svg('circle', { cx: xy.at(-1)[0], cy: xy.at(-1)[1], r: 2.4, fill: color })),
+      h('div', { class: 'row tiny muted', style: 'justify-content:space-between' }, h('span', null, `${pc(vs[0])} · ${pts.length} days ago`), h('span', null, `range ${pc(lo0)}–${pc(hi0)}`), h('span', null, `now ${pc(vs.at(-1))}`)));
+  }).catch(() => box.replaceChildren(h('p', { class: 'tiny muted' }, 'Could not load the heading.')));
+  return box;
 }
 /** The feed's range, from the address (?feed=1|7|30|90 days). */
 const feedDays = (ctx) => ([1, 7, 30, 90].includes(Number(ctx.params.get('feed'))) ? Number(ctx.params.get('feed')) : 7);
@@ -178,7 +192,7 @@ async function estateView(ctx, shell) {
   const maxEx = Math.max(1, ...accounts.map((a) => a.excess)), maxAct = Math.max(1, ...accounts.map((a) => a.calls24h));
   const CHIPS = [['worse', 'Getting worse', '#f0b45a', (a) => (a.d30 ?? 0) > 0.04], ['better', 'Improving', '#6fe3b0', (a) => (a.d30 ?? 0) < -0.04],
     ['pinged', 'Has pings', '#ff5a4f', (a) => a.pings > 0], ['loading', 'Loading', '#f6e016', (a) => !a.complete]];
-  const svgEl = stage('Estate radar: each contact is an AWS account. Distance is its share of permissions never called; size is its excess permissions; trails show where it was 7 and 30 days ago.');
+  const svgEl = stage('Estate radar: each contact is an AWS account. Distance is how much of its median role is never called; size is its excess permissions; trails show where it was 7 and 30 days ago.');
   const listEl = h('div', { class: 'rank-list' }), controls = h('div', { class: 'stack', style: 'gap:10px' });
   const hasOu = accounts.some((a) => a.ou);
 
@@ -204,7 +218,7 @@ async function estateView(ctx, shell) {
       const on = !cf || cf(a);
       contact(kids, { d: shape('custom', a.x, a.y, a.s), x: a.x, y: a.y, s: a.s, fill: !a.complete ? '#030d08' : a.high >= 8 ? '#ff8a7a' : '#6fe3b0', stroke: !a.complete ? '#f6e016' : null,
         base: on ? 0.45 : 0.1, act: on ? a.calls24h / maxAct : 0, ang: a.ang, sel: sel === a, isNew: a.isNew,
-        title: `${a.name} · ${a.roles} roles · ${Math.round((a.never ?? 0) * 100)}% never called · ${headText(a.d30)} in 30 days${a.complete ? '' : ` · ${a.progress}% read`}`,
+        title: `${a.name} · ${pl(a.roles, 'role')} · median role ${Math.round((a.never ?? 0) * 100)}% never called · ${headText(a.d30)} in 30 days${a.complete ? '' : ` · ${a.progress}% read`}`,
         onClick: () => { sel = a; draw(); card(); } });
     }
     for (const a of accounts) if (a.pings && (!cf || cf(a))) ping(kids, a.x, a.y, a.s + 4, SEV[a.pingSeverity] || SEV.info, a.ang);
@@ -231,7 +245,7 @@ async function estateView(ctx, shell) {
     listEl.replaceChildren(...listed.map((a) => h('button', { class: 'rank-row', 'aria-pressed': String(sel === a), onClick: () => { sel = sel === a ? null : a; draw(); card(); } },
       h('span', { class: 'rbody' },
         h('span', { class: 'rname' }, h('span', { class: 'n' }, a.name), a.pings > 0 && pill(`${a.pings} PING${a.pings > 1 ? 'S' : ''}`, SEV[a.pingSeverity])),
-        h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${envName(a.environment)} · ${num(a.roles)} roles · ${Math.round((a.never ?? 0) * 100)}% never called${a.complete ? '' : ` · ${a.progress}% read`}`))),
+        h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${envName(a.environment)} · ${pl(a.roles, 'role')} · median ${Math.round((a.never ?? 0) * 100)}% never called${a.complete ? '' : ` · ${a.progress}% read`}`))),
       h('span', { class: 'rval' }, h('span', { class: 'mono tiny' }, kfmt(a.excess)), h('span', { class: 'mono tiny', style: `color:${headColor(a.d30)}` }, headText(a.d30))))));
   }
 
@@ -243,14 +257,14 @@ async function estateView(ctx, shell) {
     shell.right.replaceChildren(
       a ? h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, `ACCOUNT · ${envName(a.environment).toUpperCase()}`),
         h('div', { class: 'row', style: 'align-items:flex-start' }, h('h2', { class: 'grow', style: 'overflow-wrap:anywhere' }, a.name), !a.complete && h('span', { class: 'badge b-neutral' }, `${a.progress}% read`)),
-        h('div', { class: 'tiny muted' }, [a.awsAccountId, a.ou].filter(Boolean).join(' · ')))
+        h('div', { class: 'tiny muted' }, [a.awsAccountId, a.ou, a.pooled != null ? `all its permissions together: ${Math.round(a.pooled * 100)}% never called` : null].filter(Boolean).join(' · ')))
         : h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'ESTATE'), h('h2', null, `${num(T.accounts)} accounts · ${num(T.roles)} roles`),
-          h('div', { class: 'tiny muted' }, 'Distance = share of permissions never called · size = excess permissions · trail = where it was 30 days ago')),
-      statGrid(a ? [['roles', num(a.roles), '#e3efe8'], ['excess permissions', kfmt(a.excess), '#f0b45a'], ['never-called share', `${Math.round((a.never ?? 0) * 100)}%`, '#8fb5a1'], ['high-risk roles', num(a.high), '#ff8a7a']]
+          h('div', { class: 'tiny muted' }, 'Distance = how much of its typical (median) role is never called · size = excess permissions · trail = where it was 30 days ago')),
+      statGrid(a ? [['roles', num(a.roles), '#e3efe8'], ['excess permissions', kfmt(a.excess), '#f0b45a'], ['median role, never called', `${Math.round((a.never ?? 0) * 100)}%`, '#8fb5a1'], ['high-risk roles', num(a.high), '#ff8a7a']]
         : [['excess permissions', kfmt(T.excess), '#f0b45a'], ['change in 30 days', trend == null ? '—' : pct(trend, true), trend == null || Math.abs(trend) < 0.0005 ? '#7e978a' : trend > 0 ? '#f0b45a' : '#6fe3b0'],
           ['accounts getting worse', String(worse), '#f0b45a'], ['accounts improving', String(better), '#6fe3b0']]),
-      a && h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · NEVER-CALLED SHARE, 30 DAYS'),
-        spark([a.never30, a.never7, a.never], headColor(a.d30)) || h('p', { class: 'tiny muted' }, 'A trail appears once daily snapshots go back 7 days.'),
+      a && h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · MEDIAN ROLE, NEVER CALLED · 30 DAYS'),
+        trailEl(`account=${a.id}`, headColor(a.d30)),
         a.d30 != null && h('div', { class: 'small', style: `color:${headColor(a.d30)}` }, Math.abs(a.d30) < 0.01 ? 'Holding steady over 30 days.'
           : a.d30 > 0 ? `Drifting outward: ${headText(a.d30)} in 30 days. Permissions are granted faster than they are used.` : `Moving inward: ${headText(a.d30)} in 30 days. Cleanup is landing.`)),
       a && h('button', { class: 'btn primary', onClick: () => go(`#/?view=account&account=${a.id}`) }, 'Open this account on the radar'),
@@ -268,7 +282,7 @@ async function estateView(ctx, shell) {
   shell.scene.append(svgEl,
     hudEl(`RADAR · ESTATE · ${num(T.accounts)} ACCOUNTS · ${num(T.roles)} ROLES`,
       `${accounts.filter((a) => (a.d30 ?? 0) > 0.04).length} DRIFTING OUT · ${accounts.filter((a) => (a.d30 ?? 0) < -0.04).length} MOVING IN · ${num(F.total ?? F.items.length)} CHANGES · ${RANGE[F.days].toUpperCase()}`,
-      'CONTACT = ACCOUNT · DISTANCE = NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
+      'CONTACT = ACCOUNT · DISTANCE = MEDIAN ROLE, NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Account (size = excess)'], ['width:10px;height:10px;border-radius:50%;background:#ff8a7a', '8+ high-risk roles'],
       ['width:16px;border-top:2px solid #f0b45a', 'Drifting out (30 d)'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
       ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping: change that matters'],
@@ -297,7 +311,9 @@ async function accountView(ctx, shell) {
   const secs = sectors(kinds.map((k) => ({ id: k, name: KIND_LABEL[k].toUpperCase(), list: roles.filter((r) => r.kind === k) })).filter((g) => g.list.length).map((g) => ({ ...g, weight: g.list.length })), roles.length, 5);
   for (const s of secs) {
     const list = s.list.slice().sort((x, y) => x.name.localeCompare(y.name));
-    list.forEach((r, i) => { r.ang = s.a0 + 1.5 + ((i + 0.5) / list.length) * (s.a1 - s.a0 - 3); r.rad = r.dead ? RAD(1) + 4 : RAD(r.never) - 4; [r.x, r.y] = P(r.ang, r.rad); r.s = r1(2 + Math.sqrt(Math.max(0, r.excess) / maxEx) * 9); });
+    list.forEach((r, i) => { r.ang = s.a0 + 1.5 + ((i + 0.5) / list.length) * (s.a1 - s.a0 - 3); r.rad = r.dead ? RAD(1) + 4 : RAD(r.never) - 4; [r.x, r.y] = P(r.ang, r.rad);
+      // log scale: one admin-size role no longer shrinks every other role to a dot
+      r.s = r1(3 + 7 * (Math.log1p(Math.max(0, r.excess)) / Math.log1p(maxEx))); });
   }
   const svgEl = stage(`Account radar for ${acct.name}: each contact is a role. Distance is its share of permissions never called; size is its excess; trails show where it was 30 days ago.`);
   const listEl = h('div', { class: 'rank-list' });
@@ -346,8 +362,7 @@ async function accountView(ctx, shell) {
         h('div', { class: 'row', style: 'align-items:flex-start' }, h('h2', { class: 'grow', style: 'overflow-wrap:anywhere' }, r.name), h('span', { class: `badge ${riskClass(r.risk)}` }, r.risk)),
         h('div', { class: 'tiny muted' }, `${KIND_LABEL[r.kind]}${r.isNew ? ' · new this week' : ''}`)),
       statGrid([['granted', num(r.granted), '#e3efe8'], ['excess', num(r.excess), '#f0b45a'], ['never called', `${Math.round(r.never * 100)}%`, '#8fb5a1'], ['calls, last 24 h', num(r.calls24h), '#6fe3b0']]),
-      h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · 30 DAYS'),
-        spark([r.never30, r.never7, r.never], headColor(r.d30)) || h('p', { class: 'tiny muted' }, 'No trail yet: snapshots start once the account is fully read.')),
+      h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · NEVER CALLED · 30 DAYS'), trailEl(`role=${r.id}`, headColor(r.d30))),
       h('a', { class: 'btn primary', href: `#/identities/${r.id}?tab=permissions` }, 'Sector scan'),
       h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/identities/${r.id}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/track?role=${r.id}` }, 'Track a session')),
       feedSection(items.length ? 'CHANGES TO THIS ROLE' : `CHANGES IN ${acct.name.toUpperCase()}`, { ...F, items: items.length ? items : F.items }, (f) => { const x = roles.find((y) => y.id === f.role_id); if (x) { sel = x; draw(); list(); card(); } }));

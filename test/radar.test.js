@@ -58,7 +58,11 @@ test('the estate shows where each account was 30 days ago, and the trend compare
   const e = await api.estate(owner);
   const a = e.accounts.find((x) => x.id === A), b = e.accounts.find((x) => x.id === B);
   assert.ok(a.never30 != null && a.never != null);
-  assert.ok(Math.abs(a.never30 - (360 + 19990) / 20400) < 1e-9);       // snapshot from 31 days ago
+  // distance is the median role's share, at the latest snapshot 30 or more days old
+  const old = (await db.query(`SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY unused::float8 / granted) AS m FROM role_snapshots
+    WHERE account_id=$1 AND granted > 0 AND day = (SELECT max(day) FROM role_snapshots WHERE account_id=$1 AND day <= current_date - 30)`, [A])).rows[0].m;
+  assert.ok(Math.abs(a.never30 - old) < 1e-9);
+  assert.ok(Math.abs(a.pooled - a.unused / a.granted) < 1e-9, 'the pooled share is kept for the card');
   assert.equal(b.never30, null);                                       // no history yet: no trail
   assert.equal(e.totals.trendAccounts, 1);
   assert.equal(a.pings, 4);

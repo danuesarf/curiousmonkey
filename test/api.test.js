@@ -783,6 +783,20 @@ test('alert messages for Slack: escaped, one line per match, the rest counted wi
   assert.match(b.text, /…and 57 more\. <https:\/\/cm\/#\/findings\|See them all>/);
 });
 
+test('radar: distance is the median role; the heading is a daily line, for an account or one role, in scope only', async () => {
+  const est = (await owner.get('/api/radar/estate')).json;
+  const a = est.accounts.find((x) => x.id === accA);
+  const shares = (await db.query('SELECT unused_count::float8 / granted_count AS v FROM roles WHERE account_id=$1 AND deleted_at IS NULL AND granted_count > 0 ORDER BY 1', [accA])).rows.map((x) => x.v);
+  const n = shares.length, median = n % 2 ? shares[(n - 1) / 2] : (shares[n / 2 - 1] + shares[n / 2]) / 2;
+  assert.ok(Math.abs(a.never - median) < 1e-9, `median role ${median}, got ${a.never}`);
+  assert.ok(a.pooled >= 0 && a.pooled <= 1, 'the pooled share is still there for the card');
+  const t = (await owner.get(`/api/radar/trail?account=${accA}`)).json;
+  assert.ok(Array.isArray(t.points) && t.points.every((x, i) => i === 0 || x.day > t.points[i - 1].day), 'one point a day, in order');
+  const role = (await db.query('SELECT id FROM roles WHERE account_id=$1 LIMIT 1', [accA])).rows[0].id;
+  assert.equal((await owner.get(`/api/radar/trail?role=${role}`)).status, 200);
+  assert.equal((await (await memberOfB('trail-b@example.com')).get(`/api/radar/trail?account=${accA}`)).status, 404, 'another account is out of scope');
+});
+
 test('alert rules by account; old messages are removed without posting their matches again', async () => {
   const rx = await receiver();
   const { alertsTick, pruneDeliveries } = await import('../src/alerts.js');

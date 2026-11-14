@@ -12,9 +12,11 @@ async function pastShares(daysAgo, accountIds) {
   const rows = (await query(
     `WITH d AS (SELECT x.account_id, (SELECT max(day) FROM role_snapshots s WHERE s.account_id = x.account_id AND s.day <= current_date - $1::int) AS day
                  FROM unnest($2::uuid[]) AS x(account_id))
-     SELECT s.account_id, sum(s.granted) AS g, sum(s.used) AS u, sum(s.unused) AS un FROM role_snapshots s JOIN d USING (account_id, day) GROUP BY s.account_id`,
+     SELECT s.account_id, sum(s.granted) AS g, sum(s.used) AS u, sum(s.unused) AS un,
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY s.unused::float8 / s.granted) FILTER (WHERE s.granted > 0) AS med
+       FROM role_snapshots s JOIN d USING (account_id, day) GROUP BY s.account_id`,
     [daysAgo, accountIds])).rows;
-  return new Map(rows.map((r) => [r.account_id, { never: share(r.un, r.g), excess: num(r.g) - num(r.u) }]));
+  return new Map(rows.map((r) => [r.account_id, { never: r.med == null ? null : Number(r.med), pooled: share(r.un, r.g), excess: num(r.g) - num(r.u) }]));
 }
 
 /** Which identities: everything (default), roles only, or IAM users only. */
@@ -25,6 +27,8 @@ export async function estate(user, who = 'all') {
   const accts = (await query(
     `SELECT a.*, count(r.id)::int AS roles, coalesce(sum(r.granted_count),0)::bigint AS granted, coalesce(sum(r.used_count),0)::bigint AS used,
             coalesce(sum(r.unused_count),0)::bigint AS unused, count(r.id) FILTER (WHERE r.risk='High')::int AS high,
+            -- the typical role: one admin-size role decides the pooled share, so distance on the radar is the median role's
+            percentile_cont(0.5) WITHIN GROUP (ORDER BY r.unused_count::float8 / r.granted_count) FILTER (WHERE r.granted_count > 0) AS med,
             count(r.id) FILTER (WHERE EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open'))::int AS unidentified
        FROM cloud_accounts a LEFT JOIN roles r ON r.account_id=a.id AND r.deleted_at IS NULL AND ${whoSql(who)}
       WHERE ${scopeSql(user, 'a.id', p)} AND a.status <> 'planned' GROUP BY a.id ORDER BY a.name`, p)).rows;
@@ -44,7 +48,7 @@ export async function estate(user, who = 'all') {
     return {
       id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, ou: a.ou || null,
       roles: a.roles, granted: num(a.granted), used: num(a.used), unused: num(a.unused), excess: num(a.granted) - num(a.used),
-      never: share(a.unused, a.granted), never7: d7.get(a.id)?.never ?? null, never30: d30.get(a.id)?.never ?? null, excess30: d30.get(a.id)?.excess ?? null,
+      never: a.med == null ? null : Number(a.med), pooled: share(a.unused, a.granted), never7: d7.get(a.id)?.never ?? null, never30: d30.get(a.id)?.never ?? null, excess30: d30.get(a.id)?.excess ?? null,
       high: a.high, unidentified: a.unidentified, calls24h: actBy.get(a.id) || 0,
       pings: pingBy.get(a.id)?.n || 0, pingSeverity: pingBy.has(a.id) ? sev[pingBy.get(a.id).worst] : null,
       isNew: Date.now() - new Date(a.created_at).getTime() < 7 * 864e5,
@@ -96,6 +100,22 @@ export async function accountRadar(user, accountId, who = 'all') {
       unidentified: r.unidentified, ping: pingBy.get(r.id) || null,
     })),
   };
+}
+
+/** Daily never-called share for the card's heading line: an account's median role, or one role. */
+export async function trail(user, { accountId = null, roleId = null, days = 30 }) {
+  const d = Math.max(7, Math.min(180, Number(days) || 30));
+  if (roleId) {
+    const r = (await query('SELECT account_id FROM roles WHERE id=$1', [roleId])).rows[0];
+    if (!r || !inScope(user, r.account_id)) return null;
+    const rows = (await query(`SELECT day, CASE WHEN granted > 0 THEN unused::float8 / granted END AS v FROM role_snapshots
+                                WHERE role_id=$1 AND day > current_date - $2::int ORDER BY day`, [roleId, d])).rows;
+    return { days: d, points: rows.map((x) => ({ day: x.day, v: x.v == null ? null : Number(x.v) })) };
+  }
+  if (!accountId || !inScope(user, accountId)) return null;
+  const rows = (await query(`SELECT day, percentile_cont(0.5) WITHIN GROUP (ORDER BY unused::float8 / granted) FILTER (WHERE granted > 0) AS v
+                               FROM role_snapshots WHERE account_id=$1 AND day > current_date - $2::int GROUP BY day ORDER BY day`, [accountId, d])).rows;
+  return { days: d, points: rows.map((x) => ({ day: x.day, v: x.v == null ? null : Number(x.v) })) };
 }
 
 export const FEED_DAYS = [1, 7, 30, 90];

@@ -12,7 +12,7 @@ import { suggestMappings, decideMapping, markUnresolved } from '../recommender/e
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
-import { estate, accountRadar, changeFeed, markSeen, unreadChanges } from '../radarApi.js';
+import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
@@ -576,6 +576,10 @@ data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
   const r = await cachedWarm(`radar:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => accountRadar(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
+}));
+data.get('/radar/trail', requirePerm('view'), wrap(async (req, res) => {
+  const role = req.query.role ? uuid.parse(req.query.role) : null, account = req.query.account ? uuid.parse(req.query.account) : null;
+  const r = await trail(req.user, { roleId: role, accountId: account, days: req.query.days }); if (!r) throw NotFound(); res.json(r);
 }));
 // ---------- event history: the calls kept per role session ----------
 const EventsQ = z.object({
