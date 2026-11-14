@@ -9,6 +9,7 @@ import { accountsPage, newAccountPage, editAccountPage } from './pages/accounts.
 import { adminPage, adminTabs } from './pages/admin.js';
 import { operationsPage } from './pages/operations.js';
 import { radarPage } from './pages/radar.js';
+import { homePage } from './pages/home.js';
 import { gcpConnectPage, gcpPrincipalPage } from './pages/gcp.js';
 import { spacePage } from './pages/space.js';
 import { eventsPage } from './pages/events.js';
@@ -24,7 +25,8 @@ export const session = state;
 
 // [pattern, page, rail item, full-bleed scene]
 const routes = [
-  [/^#?\/?$/, () => radarPage, 'radar', true],
+  [/^#?\/?$/, () => homePage, 'home'],
+  [/^#\/radar$/, () => radarPage, 'radar', true],
   [/^#\/track$/, () => trackPage, 'radar', true],
   [/^#\/space$/, () => spacePage, 'space', true],
   [/^#\/events$/, () => eventsPage, 'events'],
@@ -60,9 +62,12 @@ const MOVED = [
   [/^#\/users\/([\w-]+)$/, (m) => `#/identities/${m[1]}?tab=credentials`],
   [/^#\/gcp\/principals\/([\w-]+)$/, (m) => `#/identities/gcp/${m[1]}`],
 ];
+// Radar was the home page (#/) until Home took its place. Its old links carry Radar's own keys; they open Radar.
+const RADAR_KEYS = ['view', 'account', 'role', 'sel', 'chip', 'feed', 'asof', 'who', 'group', 'accounts'];
 /** Where an old address lives now, or null. `to` gets the old query to read or change; what is left of it is carried over (the new address's own keys win). */
 const movedTo = (hash) => {
   const [path, qs] = String(hash).split('?');
+  if (/^#?\/?$/.test(path) && qs && RADAR_KEYS.some((k) => new URLSearchParams(qs).has(k))) return `#/radar?${qs}`;
   for (const [re, to] of MOVED) {
     const m = path.match(re); if (!m) continue;
     const q = new URLSearchParams(qs || ''), [dest, own] = to(m, q).split('?');
@@ -78,6 +83,7 @@ export function go(hash) { if (win) return void winGo(hash); location.hash = has
 const can = (p) => state.user?.permissions.includes(p);
 
 const ICON = {
+  home: 'M4 11.5l8-7 8 7M6.5 10v9.5h11V10M10 19.5v-5.5h4v5.5',
   radar: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M12 12L19 6',
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
@@ -169,7 +175,7 @@ export async function refreshBell() {
 const openChange = (c) => {
   bellOpen = false; picker = null; drawBell();
   if (picker?.(c)) return;
-  go(c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/?view=account&account=${c.account_id}`);
+  go(c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/radar?view=account&account=${c.account_id}`);
 };
 const markAllSeen = async () => { try { await post('/changes/seen'); } catch { /* next refresh tells */ } bellOpen = false; await refreshBell(); };
 function drawBell() {
@@ -183,7 +189,7 @@ function drawBell() {
     ...(n.items.length ? n.items.map((c) => changeRow(c, () => openChange(c), { cls: 'bell-item', role: 'menuitem' }))
       : [h('p', { class: 'muted small', style: 'margin:10px 12px' }, 'Nothing new. Everything recorded so far has been seen.')]),
     n.count > n.items.length && h('p', { class: 'tiny muted', style: 'margin:6px 12px' }, `${n.count - n.items.length} more on Radar.`),
-    h('div', { class: 'bell-foot' }, h('a', { class: 'btn sm', href: '#/?feed=30', onClick: () => { bellOpen = false; } }, 'Open the feed on Radar'),
+    h('div', { class: 'bell-foot' }, h('a', { class: 'btn sm', href: '#/radar?feed=30', onClick: () => { bellOpen = false; } }, 'Open the feed on Radar'),
       n.count > 0 && h('button', { class: 'btn sm', onClick: (ev) => { ev.stopPropagation(); markAllSeen(); } }, 'Mark all as seen'))) : null;
   bellEl.replaceChildren(btn, ...(pop ? [pop] : []));
 }
@@ -269,13 +275,14 @@ const group = (label, ...items) => { const shown = items.filter(Boolean); return
 function shell(active, content, full) {
   const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
-  setCrumbs({ radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', reviews: 'Access reviews', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', reviews: 'Access reviews', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
-      h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
-      group('Watch', item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
+      h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey home' }, mark()),
+      item('home', '#/', 'Home', 'view'),
+      group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
       group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),

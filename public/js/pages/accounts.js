@@ -380,7 +380,7 @@ function accountsTable(accounts, ctx, can) {
             : can('accounts') && h('button', { class: 'btn sm primary', onClick: () => verify(a) }, 'Verify connection'),
           can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
           menu('More', [
-            ['Radar', `#/?view=account&account=${a.id}`], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}`],
+            ['Radar', `#/radar?view=account&account=${a.id}`], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}`],
             ['Event history', `#/events?account=${a.id}`], ['Unidentified calls', `#/unidentified?account=${a.id}`], ['Identities', `#/identities?accounts=${a.id}`],
             a.status === 'connected' && can('accounts') && ['Verify connection', () => verify(a)],
             can('accounts') && ['Remove account', () => remove(a), { danger: true }],

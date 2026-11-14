@@ -12,13 +12,16 @@ import { z } from 'zod';
 import { config, keyRules } from './config.js';
 import { pool, query, tx } from './db.js';
 import { encrypt, decrypt } from './auth/crypto.js';
+import { todoItems, TIERS as TODO_TIERS, TEAM_LABEL } from './homeApi.js';
 
 export const TRIGGERS = {
   finding: { label: 'New finding', severity: true, more: '#/findings', hint: 'A finding the analysis raised on a role or IAM user.' },
-  change: { label: 'Radar change', severity: true, more: '#/', hint: 'What Radar pings: a new caller entered a role, a role gained permissions, first denied calls, and so on.' },
+  change: { label: 'Radar change', severity: true, more: '#/radar', hint: 'What Radar pings: a new caller entered a role, a role gained permissions, first denied calls, and so on.' },
   'key-age': { label: 'Access key past its rotation age', more: '#/identities?type=users&flag=oldKey', hint: 'An active access key older than the rotation age set in Configuration.' },
   'console-no-mfa': { label: 'Console password without MFA', more: '#/identities?type=users&flag=noMfa', hint: 'An IAM user who can sign in to the console with no MFA device.' },
   'scan-failed': { label: 'Scan failed', more: '#/operations/scans', hint: 'A scan job that failed for good (no retry left).' },
+  // not built from matches: at its time it posts the team's "Do this first" list from Home (see homeApi.js)
+  todo: { label: 'What to do first (daily digest)', more: '#/', digest: true, hint: 'Once a day, the list Home shows a review team: what is waiting, most urgent first. Off until you add a rule.' },
 };
 export const CHANGE_KINDS = { 'new-caller': 'New caller entered a role', grew: 'Role gained permissions', denied: 'First denied calls', 'new-role': 'Role created', unidentified: 'New event name not identified', dead: 'Role went idle (90 days)', cleaned: 'Role trimmed', 'new-trust': 'New way into a role', 'trust-weakened': 'Guard taken off a trust policy' };
 const SEVERITIES = ['high', 'medium', 'low'];
@@ -65,6 +68,13 @@ export const RuleIn = z.object({
   destinationId: z.string().uuid(),
   mode: z.enum(['instant', 'daily']).default('instant'),
   enabled: z.boolean().default(true),
+  // the "what to do first" digest (trigger todo) only
+  digestAt: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'A time like 08:30.').nullable().optional(),
+  digestDays: z.array(z.number().int().min(1).max(7)).min(1, 'Pick at least one day.').max(7).optional(),
+  todoTiers: z.array(z.enum(TODO_TIERS)).min(1, 'Pick at least one kind of item.').max(4).optional(),
+  todoMax: z.number().int().min(3).max(10).optional(),
+  todoTeam: z.enum(['infrasec', 'infosec']).nullable().optional(),
+  skipEmpty: z.boolean().optional(),
 });
 export const RulePatch = RuleIn.omit({ trigger: true }).partial();
 
@@ -73,6 +83,7 @@ export class AlertError extends Error { constructor(status, message, field) { su
 const destView = (d) => ({ id: d.id, name: d.name, kind: d.kind, urlHint: d.url_hint, createdAt: d.created_at, updatedAt: d.updated_at, rules: d.rules ?? 0 });
 const ruleView = (r) => ({ id: r.id, name: r.name, trigger: r.trigger, minSeverity: r.min_severity, changeKinds: r.change_kinds, environments: r.environments, accounts: r.accounts || [],
   destinationId: r.destination_id, destinationName: r.destination_name, mode: r.mode, enabled: r.enabled, since: r.since, lastDigestDay: r.last_digest_day,
+  digestAt: r.digest_at, digestDays: r.digest_days, todoTiers: r.todo_tiers, todoMax: r.todo_max, todoTeam: r.todo_team, skipEmpty: r.skip_empty,
   createdAt: r.created_at, updatedAt: r.updated_at, waiting: r.waiting ?? 0, lastSentAt: r.last_sent_at ?? null });
 
 /** Everything the Alerts page shows. URLs are never returned. */
@@ -90,7 +101,7 @@ export async function alertsView() {
     destinations: d.rows.map(destView), rules: r.rows.map(ruleView),
     deliveries: del.rows.map((x) => ({ id: x.id, ruleId: x.rule_id, ruleName: x.rule_name, destinationName: x.destination_name, kind: x.kind, status: x.status,
       attempts: x.attempts, items: x.items, httpStatus: x.http_status, error: x.error, createdAt: x.created_at, sentAt: x.sent_at, firstTitle: x.first_title })),
-    triggers: TRIGGERS, changeKinds: CHANGE_KINDS, digestAt: config.alerts.digestAt, tz: config.schedule.tz, keyRules: keyRules(), keepDays: config.alerts.keepDays,
+    triggers: TRIGGERS, changeKinds: CHANGE_KINDS, todoTiers: TODO_TIERS, teams: TEAM_LABEL, digestAt: config.alerts.digestAt, tz: config.schedule.tz, keyRules: keyRules(), keepDays: config.alerts.keepDays,
   };
 }
 
@@ -131,9 +142,12 @@ export async function createRule(body, userId) {
   return tx(async (c) => {
     await checkDestination(c, b.destinationId);
     await checkAccounts(c, b.accounts);
-    const r = (await c.query(`INSERT INTO alert_rules(name, trigger, min_severity, change_kinds, environments, accounts, destination_id, mode, enabled, since_change_id, created_by)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [b.name, b.trigger, b.minSeverity, b.changeKinds, b.environments, b.accounts, b.destinationId, b.mode, b.enabled, await startMark(c), userId])).rows[0];
+    const todo = b.trigger === 'todo';
+    const r = (await c.query(`INSERT INTO alert_rules(name, trigger, min_severity, change_kinds, environments, accounts, destination_id, mode, enabled, since_change_id, created_by,
+                                 digest_at, digest_days, todo_tiers, todo_max, todo_team, skip_empty)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,coalesce($13,'{1,2,3,4,5}'::int[]),coalesce($14,'{blocking,urgent,hygiene}'::text[]),coalesce($15,5),$16,coalesce($17,true)) RETURNING *`,
+      [b.name, b.trigger, b.minSeverity, b.changeKinds, b.environments, b.accounts, b.destinationId, todo ? 'daily' : b.mode, b.enabled, await startMark(c), userId,
+        todo ? b.digestAt ?? null : null, todo ? b.digestDays ?? null : null, todo ? b.todoTiers ?? null : null, todo ? b.todoMax ?? null : null, todo ? b.todoTeam ?? null : null, todo ? b.skipEmpty ?? null : null])).rows[0];
     return ruleView(r);
   });
 }
@@ -148,9 +162,12 @@ export async function updateRule(id, body) {
     const restart = b.enabled === true && !prev.enabled;
     const r = (await c.query(`UPDATE alert_rules SET name=coalesce($2,name), min_severity=coalesce($3,min_severity), change_kinds=coalesce($4,change_kinds),
         environments=coalesce($5,environments), destination_id=coalesce($6,destination_id), mode=coalesce($7,mode), enabled=coalesce($8,enabled),
-        since=CASE WHEN $9 THEN now() ELSE since END, since_change_id=CASE WHEN $9 THEN $10 ELSE since_change_id END, accounts=coalesce($11,accounts), updated_at=now()
+        since=CASE WHEN $9 THEN now() ELSE since END, since_change_id=CASE WHEN $9 THEN $10 ELSE since_change_id END, accounts=coalesce($11,accounts),
+        digest_at=CASE WHEN $12 THEN $13 ELSE digest_at END, digest_days=coalesce($14,digest_days), todo_tiers=coalesce($15,todo_tiers), todo_max=coalesce($16,todo_max),
+        todo_team=CASE WHEN $17 THEN $18 ELSE todo_team END, skip_empty=coalesce($19,skip_empty), updated_at=now()
       WHERE id=$1 RETURNING *`,
-      [id, b.name ?? null, b.minSeverity ?? null, b.changeKinds ?? null, b.environments ?? null, b.destinationId ?? null, b.mode ?? null, b.enabled ?? null, restart, restart ? await startMark(c) : 0, b.accounts ?? null])).rows[0];
+      [id, b.name ?? null, b.minSeverity ?? null, b.changeKinds ?? null, b.environments ?? null, b.destinationId ?? null, prev.trigger === 'todo' ? 'daily' : b.mode ?? null, b.enabled ?? null, restart, restart ? await startMark(c) : 0, b.accounts ?? null,
+        b.digestAt !== undefined, b.digestAt ?? null, b.digestDays ?? null, b.todoTiers ?? null, b.todoMax ?? null, b.todoTeam !== undefined, b.todoTeam ?? null, b.skipEmpty ?? null])).rows[0];
     if (restart) await c.query('DELETE FROM alert_hits WHERE rule_id=$1 AND queued_at IS NULL', [id]);
     return ruleView(r);
   });
@@ -187,7 +204,7 @@ const SOURCES = {
     // move the mark even past changes this rule does not want, so they are not read again
     await query('UPDATE alert_rules SET since_change_id = $2 WHERE id = $1 AND since_change_id < $2', [r.id, top]);
     return rows.map((x) => ({ dedupe: `change:${x.id}`, item: { title: x.title, subject: x.detail || '', account: x.account_name, environment: x.environment,
-      severity: CHANGE_TO[x.severity] || 'low', kind: x.kind, url: link(x.role_id ? `#/identities/${x.role_id}` : `#/?accounts=${x.account_id}`), at: x.at } }));
+      severity: CHANGE_TO[x.severity] || 'low', kind: x.kind, url: link(x.role_id ? `#/identities/${x.role_id}` : `#/radar?view=account&account=${x.account_id}`), at: x.at } }));
   },
   async 'key-age'(r) {
     const rows = (await query(`SELECT k.key_id, k.created_at, r.id AS role_id, r.name AS user_name, a.name AS account_name, a.environment
@@ -217,6 +234,25 @@ const SOURCES = {
   },
 };
 const STATE = new Set(['key-age', 'console-no-mfa']);
+
+/**
+ * The "what to do first" digest for one rule: the team's list from Home, as one message. Not built from matches, so
+ * nothing is recorded in alert_hits. With skip_empty and nothing waiting, no message. Returns the delivery id or null.
+ */
+export async function todoDigest(rule) {
+  const { total, items } = await todoItems({ team: rule.todo_team, accounts: await ruleAccounts(rule), tiers: rule.todo_tiers, max: rule.todo_max, link });
+  if (!total && rule.skip_empty) return null;
+  const dest = (await query('SELECT name FROM alert_destinations WHERE id = $1', [rule.destination_id])).rows[0];
+  const payload = { rule: { id: rule.id, name: rule.name, trigger: 'todo', label: TRIGGERS.todo.label }, kind: 'daily', todo: true,
+    team: rule.todo_team ? TEAM_LABEL[rule.todo_team] : 'Everyone', count: total, items, more: link('#/') };
+  return (await query(`INSERT INTO alert_deliveries(rule_id, destination_id, rule_name, destination_name, kind, items, payload) VALUES ($1,$2,$3,$4,'daily',$5,$6) RETURNING id`,
+    [rule.id, rule.destination_id, rule.name, dest?.name, total, JSON.stringify(payload)])).rows[0].id;
+}
+// the accounts a rule covers, as ids (environments and named accounts both apply); null = every account
+async function ruleAccounts(rule) {
+  if (!rule.environments?.length && !rule.accounts?.length) return null;
+  return (await query(`SELECT a.id FROM cloud_accounts a WHERE ${envSql(1, 2)}`, [rule.environments || [], rule.accounts || []])).rows.map((r) => r.id);
+}
 
 /** Records new matches for one rule. A condition that no longer holds is forgotten, so it can fire again later. Returns how many are new. */
 export async function collect(rule) {
@@ -250,10 +286,16 @@ export async function flush(rule, kind = rule.mode) {
 const slackEsc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const slackLink = (url, text) => `<${url}|${slackEsc(text).replace(/\|/g, '/')}>`;
 const head = (p) => (p.kind === 'test' ? 'Test message from Curious Monkey'
-  : `${p.kind === 'daily' ? 'Daily digest · ' : ''}${p.rule.name} · ${p.count} new`);
+  : p.todo ? `What to do first · ${p.team} · ${p.count ? `${p.count} waiting` : 'nothing waiting'}`
+    : `${p.kind === 'daily' ? 'Daily digest · ' : ''}${p.rule.name} · ${p.count} new`);
 
 /** The body for Slack: one line per match, the most important first, and a link to the rest. */
 export function slackBody(p) {
+  if (p.todo) {
+    const rows = p.items.map((i, k) => `${k + 1}. *${slackEsc(String(i.severity || '').toUpperCase())}* ${slackLink(i.url, i.title)}${i.subject ? ` · ${slackEsc(i.subject)}` : ''}`);
+    const rest = p.count > p.items.length ? `\n…and ${p.count - p.items.length} more. ` : '\n';
+    return { text: `*${slackEsc(head(p))}*\n${rows.length ? rows.join('\n') : 'Nothing is waiting.'}${rest}${slackLink(p.more, 'Open Home')}`, unfurl_links: false, unfurl_media: false };
+  }
   const lines = p.items.map((i) => `• *${slackEsc(String(i.severity || '').toUpperCase())}* ${slackLink(i.url, i.title)} · ${slackEsc(i.subject)}${i.detail ? ` (${slackEsc(i.detail)})` : ''} · _${slackEsc(i.account)}${i.environment ? `, ${slackEsc(i.environment)}` : ''}_`);
   const more = p.count > p.items.length ? `\n…and ${p.count - p.items.length} more. ${slackLink(p.more, 'See them all')}` : p.more ? `\n${slackLink(p.more, 'Open Curious Monkey')}` : '';
   const text = p.kind === 'test' ? `*${head(p)}*\nThis destination works. Alerts will arrive here.` : `*${slackEsc(head(p))}*\n${lines.join('\n')}${more}`;
@@ -306,10 +348,11 @@ export async function testDestination(id) {
 }
 
 // ---------- the evaluator ----------
+const WEEKDAY = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 };
 function localParts(tz, d) {
-  const f = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const f = new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', weekday: 'short' });
   const p = Object.fromEntries(f.formatToParts(d).map((x) => [x.type, x.value]));
-  return { day: `${p.year}-${p.month}-${p.day}`, hm: `${p.hour}:${p.minute}` };
+  return { day: `${p.year}-${p.month}-${p.day}`, hm: `${p.hour === '24' ? '00' : p.hour}:${p.minute}`, weekday: WEEKDAY[p.weekday] };
 }
 
 /**
@@ -326,9 +369,17 @@ export async function alertsTick(now = new Date(), { log = () => {} } = {}) {
       const count = (r) => { if (!r) return; if (r.ok) out.sent++; else if (r.final) out.failed++; };
       // first, messages already due: a retry, or one a crash left unsent
       for (const { id } of (await query(`SELECT id FROM alert_deliveries WHERE status = 'pending' AND next_attempt_at <= now() ORDER BY created_at LIMIT 50`)).rows) count(await deliver(id));
-      const { day, hm } = localParts(config.schedule.tz, now);
+      const { day, hm, weekday } = localParts(config.schedule.tz, now);
       for (const rule of (await query('SELECT * FROM alert_rules WHERE enabled ORDER BY created_at')).rows) {
         try {
+          if (rule.trigger === 'todo') {
+            const due = hm >= (rule.digest_at || config.alerts.digestAt) && (!rule.last_digest_day || localDay(rule.last_digest_day) < day);
+            if (!due) continue;
+            // the day is taken first: a failure while building the list does not post twice, and an off day is simply skipped
+            await query('UPDATE alert_rules SET last_digest_day = $2 WHERE id = $1', [rule.id, day]);
+            if ((rule.digest_days || []).includes(weekday)) count(await deliverIfAny(await todoDigest(rule)));
+            continue;
+          }
           out.matched += await collect(rule);
           if (rule.mode === 'instant') count(await deliverIfAny(await flush(rule)));
           else if (hm >= config.alerts.digestAt && (!rule.last_digest_day || localDay(rule.last_digest_day) < day)) {

@@ -61,6 +61,7 @@ const STATES = [['open', 'Needs a decision'], ['decided', 'Decided'], ['all', 'A
 const SORTS = [['severity', 'Most severe first'], ['role', 'By role'], ['newest', 'Newest first']];
 
 export async function findingsPage(ctx) {
+  if (ctx.params.get('state') === 'drafts') return draftsPage(ctx);
   ctx.setCrumbs('Review', 'Findings');
   const P = ctx.params;
   const f = { ...DEFAULT, q: P.get('q') || '', severity: urlSet(P, 'severity'), category: P.get('category') || '', accounts: urlSet(P, 'accounts'),
@@ -257,7 +258,8 @@ export async function findingsPage(ctx) {
   await load({ keep: true });
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'REVIEW · FINDINGS'), h('h1', null, 'Findings'),
-      h('p', { class: 'small muted' }, 'Every open finding on the roles and IAM users you can see. Decide here without opening each role.')), waiting),
+      h('p', { class: 'small muted' }, 'Every open finding on the roles and IAM users you can see. Decide here without opening each role.')),
+      h('div', { class: 'stack', style: 'align-items:flex-end;gap:8px' }, waiting, viewSwitch('findings'))),
     tiles,
     h('section', { class: 'card' },
       h('div', { class: 'filters' }, search, catSel, picker.el, mineBox, select('Identities', [['all', 'Roles and IAM users'], ['roles', 'Roles'], ['users', 'IAM users']], 'who'),
@@ -266,4 +268,43 @@ export async function findingsPage(ctx) {
       h('div', { class: 'inbox' }, listEl, detail)),
     h('p', { class: 'tiny muted' }, h('kbd', null, 'j'), ' ', h('kbd', null, 'k'), ' move · ', h('kbd', null, 'x'), ' select · ', h('kbd', null, '1'), '–', h('kbd', null, '3'), ' decide the selected (or the open) finding · ',
       h('kbd', null, 'Esc'), ' unselect · ', h('kbd', null, '/'), ' search'));
+}
+
+// ---------- drafts waiting for approval ----------
+// A least-privilege draft is approved by the review team(s) of its role. This lists every current draft that passes its
+// safety checks and is still waiting, so approving is review work like deciding findings. The draft itself opens on
+// its role's recommendation page.
+const viewSwitch = (on) => h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' },
+  h('a', { class: 'btn sm', href: '#/findings', 'aria-current': on === 'findings' ? 'page' : null }, 'Findings'),
+  h('a', { class: 'btn sm', href: `#/findings?state=drafts${session.user.team ? '&mine=1' : ''}`, 'aria-current': on === 'drafts' ? 'page' : null }, 'Drafts waiting'));
+
+async function draftsPage(ctx) {
+  ctx.setCrumbs('Review', 'Drafts waiting');
+  const mine = ctx.params.get('mine') === '1' && !!session.user.team;
+  const r = await get(`/recommendations?status=draft${mine ? '&mine=1' : ''}`);
+  const teamName = (t) => TEAM[t] || t;
+  const mineBox = session.user.team && (() => {
+    const cb = h('input', { type: 'checkbox', checked: mine });
+    cb.addEventListener('change', () => { location.hash = `#/findings?state=drafts${cb.checked ? '&mine=1' : ''}`; });
+    return h('label', { class: 'row small', style: 'gap:6px' }, cb, `Waiting for ${teamName(session.user.team)}`);
+  })();
+  const rows = r.items.map((d) => h('tr', null,
+    h('td', null, h('a', { href: `#/identities/${d.role.id}/recommendation` }, d.role.name), h('div', { class: 'tiny muted' }, KIND[d.role.kind] || d.role.kind)),
+    h('td', null, d.account.name, h('div', { class: 'tiny muted' }, d.account.environment || '')),
+    h('td', null, h('span', { class: `badge b-${(d.role.risk || 'low').toLowerCase()}` }, d.role.risk || '—')),
+    h('td', { class: 'mono small' }, d.removed != null ? `−${num(d.removed)} of ${num(d.granted)}` : '—'),
+    h('td', { class: 'small' }, d.approvedBy.length ? d.approvedBy.map(teamName).join(', ') : h('span', { class: 'muted' }, 'nobody yet')),
+    h('td', { class: 'small' }, d.waitingFor.map(teamName).join(', ')),
+    h('td', { class: 'small nowrap' }, ago(d.createdAt)),
+    h('td', null, h('a', { class: 'btn sm', href: `#/identities/${d.role.id}/recommendation` }, 'Review'))));
+  return h('div', { class: 'stack-lg' },
+    h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'REVIEW · DRAFTS'), h('h1', null, 'Drafts waiting for approval'),
+      h('p', { class: 'small muted' }, 'Least-privilege drafts that pass their safety checks, on accounts whose history is read, still waiting for a review team.')),
+      h('div', { class: 'stack', style: 'align-items:flex-end;gap:8px' }, h('span', { class: 'mono small muted' }, `${num(r.total)} waiting`), viewSwitch('drafts'))),
+    r.reading ? h('div', { class: 'provisional' }, h('b', null, 'PROVISIONAL'), `${r.reading} ${r.reading === 1 ? 'account is' : 'accounts are'} still being read; drafts there are previews and are not listed.`) : null,
+    h('section', { class: 'card' },
+      mineBox ? h('div', { class: 'filters' }, mineBox) : null,
+      r.items.length ? h('div', { class: 'scroll' }, h('table', null,
+        h('thead', null, h('tr', null, ['Role', 'Account', 'Risk', 'Removes', 'Approved by', 'Waiting for', 'Drafted', ''].map((x) => h('th', null, x)))), h('tbody', null, rows)))
+        : h('div', { class: 'empty' }, mine ? 'Nothing waiting for your team.' : 'No drafts waiting. Ask for one from a role’s page (Recommend policy).')));
 }

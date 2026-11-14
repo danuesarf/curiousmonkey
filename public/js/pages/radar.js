@@ -35,10 +35,10 @@ export async function radarPage(ctx) {
   const view = ctx.params.get('view') || 'estate';
   const tabs = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Radar view' },
     [['estate', 'Estate'], ['account', 'Account']].map(([k, label]) => h('button', { role: 'tab', 'aria-selected': String(view === k),
-      onClick: () => go(k === 'estate' ? `#/${whoQs(whoOf(ctx.params))}` : `#/?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}${whoQs(whoOf(ctx.params), '&')}`) }, label)));
+      onClick: () => go(k === 'estate' ? `#/radar${whoQs(whoOf(ctx.params))}` : `#/radar?view=account${ctx.params.get('account') ? `&account=${ctx.params.get('account')}` : ''}${whoQs(whoOf(ctx.params), '&')}`) }, label)));
   const shell = { left: h('aside', { class: 'left' }), scene: h('div', { class: 'scene' }), right: h('aside', { class: 'right' }) };
   const who = whoOf(ctx.params);
-  const withWho = (k) => { const p = new URLSearchParams(ctx.params); if (k === 'all') p.delete('who'); else p.set('who', k); go(`#/?${p}`); };
+  const withWho = (k) => { const p = new URLSearchParams(ctx.params); if (k === 'all') p.delete('who'); else p.set('who', k); go(`#/radar?${p}`); };
   shell.left.append(tabs, whoControl(who, withWho));
   ctx.who = who;
   const page = h('div', { class: 'stack radar-page radar3', style: 'gap:0' }, h('div', { class: 'scene-layout radar-layout' }, shell.left, shell.scene, shell.right));
@@ -169,7 +169,7 @@ const RANGE = { 1: 'last 24 hours', 7: 'last 7 days', 30: 'last 30 days', 90: 'l
 /** The change feed: the same rows as the bell, for a range. Changing the range keeps the rest of the address. */
 function feedSection(title, F, onPick) {
   const sel = h('select', { class: 'feed-range', 'aria-label': 'How far back' }, Object.entries(RANGE).map(([d, l]) => h('option', { value: d, selected: Number(d) === F.days }, l)));
-  sel.addEventListener('change', () => { const [path, qs] = location.hash.split('?'); const p = new URLSearchParams(qs || ''); p.set('feed', sel.value); go(`${path || '#/'}?${p}`); });
+  sel.addEventListener('change', () => { const [path, qs] = location.hash.split('?'); const p = new URLSearchParams(qs || ''); p.set('feed', sel.value); go(`${path || '#/radar'}?${p}`); });
   const n = F.items.filter((f) => f.unread).length;
   return h('section', { class: 'stack', style: 'gap:6px' },
     h('div', { class: 'row', style: 'justify-content:space-between;gap:8px' }, h('span', { class: 'eyebrow' }, `${title}${n ? ` · ${n} NEW` : ''}`), sel),
@@ -273,7 +273,7 @@ async function estateView(ctx, shell) {
         trailEl(`account=${a.id}`, headColor(a.d30)),
         a.d30 != null && h('div', { class: 'small', style: `color:${headColor(a.d30)}` }, Math.abs(a.d30) < 0.01 ? 'Holding steady over 30 days.'
           : a.d30 > 0 ? `Drifting outward: ${headText(a.d30)} in 30 days. Permissions are granted faster than they are used.` : `Moving inward: ${headText(a.d30)} in 30 days. Cleanup is landing.`)),
-      a && h('button', { class: 'btn primary', onClick: () => go(`#/?view=account&account=${a.id}`) }, 'Open this account on the radar'),
+      a && h('button', { class: 'btn primary', onClick: () => go(`#/radar?view=account&account=${a.id}`) }, 'Open this account on the radar'),
       !a && T.excess30 == null && h('p', { class: 'tiny muted' }, 'Trails and the 30-day trend fill in as daily snapshots accumulate. A snapshot is taken after each final analysis of a fully read account.'),
       feedSection(a ? `CHANGES IN ${a.name.toUpperCase()}` : 'CHANGES', { ...F, items }, (f) => { sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); }));
   }
@@ -344,7 +344,7 @@ async function accountView(ctx, shell) {
   }
   const [D, F] = await Promise.all([get(`/radar/account/${id}${whoQs(ctx.who)}`), get(`/changes?account=${id}&days=${feedDays(ctx)}`)]);
   const acct = D.account, roles = D.roles;
-  ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), acct.name);
+  ctx.setCrumbs(h('a', { href: '#/radar' }, 'Radar'), acct.name);
   for (const r of roles) r.d30 = drift(r.never, r.never30 ?? r.never7);
   const ranked = roles.slice().sort((x, y) => (!!y.ping - !!x.ping) || (y.risk === 'High') - (x.risk === 'High') || (y.d30 ?? 0) - (x.d30 ?? 0) || y.excess - x.excess);
   let sel = ranked.find((r) => r.id === ctx.params.get('role')) || ranked[0];
@@ -411,7 +411,7 @@ async function accountView(ctx, shell) {
   }
 
   shell.left.append(h('div', { class: 'stack', style: 'gap:6px' },
-    h('a', { href: '#/', class: 'small' }, `← All ${''}accounts`),
+    h('a', { href: '#/radar', class: 'small' }, `← All ${''}accounts`),
     h('h2', { style: 'overflow-wrap:anywhere' }, acct.name),
     h('div', { class: 'tiny muted' }, [acct.awsAccountId, envName(acct.environment), acct.ou].filter(Boolean).join(' · ')),
     !acct.complete && h('div', { class: 'tiny', style: 'color:#f6e016' }, `History ${acct.progress}% read · provisional`)),
