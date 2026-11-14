@@ -1,4 +1,4 @@
-import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint, menu, tzName, tzChoice, setTzChoice, workspaceTimeZone, setWorkspaceTimeZone, BROWSER_TZ } from './lib.js';
+import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint, menu, tzName, tzChoice, setTzChoice, workspaceTimeZone, setWorkspaceTimeZone, BROWSER_TZ, fmtDate, ago } from './lib.js';
 import { theme, setTheme, initTheme } from './theme.js';
 import { openPalette, closePalette, paletteOpen } from './palette.js';
 import * as authPages from './pages/auth.js';
@@ -113,7 +113,7 @@ async function winGo(hash, push = true) {
   mine.body.replaceChildren(h('div', { class: 'muted', style: 'padding:24px' }, h('span', { class: 'spin' }), ' Loading'));
   if (!r) { mine.body.replaceChildren(h('div', { class: 'empty' }, 'Nothing here.')); return; }
   try {
-    const out = await r.page({ params: r.params, inWindow: true, onLeave: (f) => mine.leave.push(f), reload: () => winGo(hash, false), refreshStatus, openWindow, setNotices: () => {},
+    const out = await r.page({ params: r.params, inWindow: true, onLeave: (f) => mine.leave.push(f), reload: () => winGo(hash, false), refreshStatus, openWindow, setChangePicker: () => {},
       setCrumbs: (...parts) => { const last = parts[parts.length - 1]; if (last && !(mine.named && !mine.back.length)) mine.title.textContent = typeof last === 'string' ? last : last.textContent; } });
     if (win !== mine || mine.at !== hash) return;       // closed, or moved on, while it loaded
     mine.body.replaceChildren(out); mine.body.scrollTop = 0;
@@ -152,37 +152,51 @@ export function closeWindow() {
   w.opener?.focus?.();
 }
 
-// ---------- the bell: what needs a look in the last 24 hours ----------
-// Everywhere it lists the estate's flagged events and takes you to Space. A page can put its own list there while
-// it is open (Space does, so picking one selects it in place).
-const NOTICE_TONE = { high: COLOR.high, warn: COLOR.warn, medium: COLOR.warn, info: '#ffffff', good: COLOR.good, low: '#d5dceb' };
-let notices = null, bellOpen = false;      // a page's own list, or null for the estate's
+// ---------- the bell: the change feed's part you have not seen ----------
+// The same changes Radar lists (GET /changes), as rows that look the same. Picking one opens its role, or its account
+// on the radar; a page can pick it in place instead (Space selects it in the scene). Radar marks everything seen.
+const NOTICE_TONE = { high: COLOR.high, warn: COLOR.warn, info: COLOR.info, good: COLOR.good };
+let picker = null, bellOpen = false, bellLoaded = false, unread = { count: 0, worst: 'none', items: [] };
 const bellEl = h('div', { class: 'bell' });
-export function setNotices(n) { notices = n; drawBell(); }
-const hourText = (start, b) => fmtClock(start + b * 36e5);
-async function drawBell() {
-  let n = notices;
-  if (!n && state.user) {
-    try {
-      const f = await getCached('/space/flags', 60_000), start = new Date(f.hourStart).getTime();
-      n = { title: 'Needs a look · last 24 h', items: f.items.map((e) => ({ kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, text: e.title, where: `${e.accountName || 'an account'}${e.roleName ? ` · ${e.roleName}` : ''}`,
-        time: hourText(start, e.hour), onPick: () => go(`#/space?sel=${e.accountId}&hour=${e.hour}`) })) };
-    } catch { n = { title: 'Needs a look · last 24 h', items: [] }; }
-    if (notices) n = notices;
-  }
-  if (!n) { bellEl.replaceChildren(); return; }
-  const worst = n.items.some((e) => e.tone === 'high') ? 'high' : n.items.some((e) => e.tone === 'warn' || e.tone === 'medium') ? 'warn' : n.items.length ? 'info' : 'none';
-  const btn = h('button', { class: `bell-btn bell-${worst}`, 'aria-expanded': String(bellOpen), 'aria-haspopup': 'true', title: n.title,
+/** A page that can show a change in place registers this; it returns true when it did. */
+export function setChangePicker(fn) { picker = fn || null; }
+/** Fetches what is unseen again and redraws (after a page marked things seen). */
+export async function refreshBell() {
+  if (!state.user || !can('view')) return;
+  try { unread = await get('/changes/unread'); } catch { /* keep the last */ }
+  drawBell();
+}
+const openChange = (c) => {
+  bellOpen = false; picker = null; drawBell();
+  if (picker?.(c)) return;
+  go(c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/?view=account&account=${c.account_id}`);
+};
+const markAllSeen = async () => { try { await post('/changes/seen'); } catch { /* next refresh tells */ } bellOpen = false; await refreshBell(); };
+function drawBell() {
+  const n = unread;
+  const btn = h('button', { class: `bell-btn bell-${n.worst}`, 'aria-expanded': String(bellOpen), 'aria-haspopup': 'true', title: n.count ? `${n.count} change${n.count === 1 ? '' : 's'} you have not seen` : 'No new changes',
     onClick: (ev) => { ev.stopPropagation(); bellOpen = !bellOpen; drawBell(); } },
     svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('path', { d: 'M8 1.5a4 4 0 0 0-4 4v3L2.5 11h11L12 8.5v-3a4 4 0 0 0-4-4zM6.5 13a1.5 1.5 0 0 0 3 0', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4 })),
-    n.items.length ? `${n.items.length} TO LOOK AT` : 'NOTHING FLAGGED');
-  const pop = bellOpen ? h('div', { class: 'bell-pop', role: 'menu', 'aria-label': n.title },
-    h('div', { class: 'bell-head' }, h('span', { class: 'eyebrow' }, n.title), h('span', { class: 'mono faint' }, String(n.items.length))),
-    ...(n.items.length ? n.items.slice(0, 40).map((e) => h('button', { class: 'bell-item', role: 'menuitem', style: `border-left-color:${NOTICE_TONE[e.tone] || '#fff'}`, onClick: () => { bellOpen = false; drawBell(); e.onPick(); } },
-      h('span', { class: 'bell-top' }, h('span', { style: `color:${NOTICE_TONE[e.tone] || '#fff'}` }, e.kind), h('span', { class: 'faint' }, e.time)),
-      h('span', { class: 'bell-text' }, e.text), h('span', { class: 'faint tiny' }, e.where)))
-      : [h('p', { class: 'muted small', style: 'margin:10px 12px' }, 'Nothing flagged in the last 24 hours.')])) : null;
+    n.count ? `${n.count > 99 ? '99+' : n.count} NEW` : 'NOTHING NEW');
+  const pop = bellOpen ? h('div', { class: 'bell-pop', role: 'menu', 'aria-label': 'Changes you have not seen' },
+    h('div', { class: 'bell-head' }, h('span', { class: 'eyebrow' }, 'NEW SINCE YOU LAST LOOKED'), h('span', { class: 'mono faint' }, String(n.count))),
+    ...(n.items.length ? n.items.map((c) => changeRow(c, () => openChange(c), { cls: 'bell-item', role: 'menuitem' }))
+      : [h('p', { class: 'muted small', style: 'margin:10px 12px' }, 'Nothing new. Everything recorded so far has been seen.')]),
+    n.count > n.items.length && h('p', { class: 'tiny muted', style: 'margin:6px 12px' }, `${n.count - n.items.length} more on Radar.`),
+    h('div', { class: 'bell-foot' }, h('a', { class: 'btn sm', href: '#/?feed=30', onClick: () => { bellOpen = false; } }, 'Open the feed on Radar'),
+      n.count > 0 && h('button', { class: 'btn sm', onClick: (ev) => { ev.stopPropagation(); markAllSeen(); } }, 'Mark all as seen'))) : null;
   bellEl.replaceChildren(btn, ...(pop ? [pop] : []));
+}
+/** One change, drawn the same in the bell and on Radar: kind and time on top, what happened, where. */
+export function changeRow(c, onPick, { cls = 'feed-item', role } = {}) {
+  const tone = NOTICE_TONE[c.severity] || COLOR.info;
+  const b = h('button', { class: cls, role, onClick: (ev) => { ev.stopPropagation(); onPick?.(c); } },
+    h('span', { class: 'row mono tiny', style: 'justify-content:space-between;gap:8px' },
+      h('span', { style: `color:${tone};letter-spacing:.06em` }, CHANGE_KIND[c.kind] || c.kind.toUpperCase(), c.unread ? h('span', { class: 'fresh' }, ' NEW') : null), h('span', { class: 'faint', title: fmtDate(c.at) }, ago(c.at))),
+    h('span', { class: 'small', style: 'line-height:1.4' }, c.title),
+    h('span', { class: 'tiny faint', style: 'overflow-wrap:anywhere' }, [c.account_name, c.role_name && !c.title.includes(c.role_name) ? c.role_name : null, c.detail].filter(Boolean).join(' · ')));
+  b.style.borderLeftColor = tone;
+  return b;
 }
 document.addEventListener('click', (ev) => { if (bellOpen && !bellEl.contains(ev.target)) { bellOpen = false; drawBell(); } });
 document.addEventListener('keydown', (ev) => { if (bellOpen && ev.key === 'Escape') { bellOpen = false; drawBell(); } });
@@ -214,7 +228,7 @@ export async function refreshStatus() {
       h('span', { class: fr ? `fresh-${fr.tone}` : null }, s.accounts === 0 ? 'Connect one to start' : fr ? fr.text : [upTo && `up to ${upTo}`, eta, 'results are provisional'].filter(Boolean).join(' · '))));
   meter.querySelector('b').style.color = paint(s.complete ? '#6fe3b0' : '#f6e016');
   if (fr && fr.tone !== 'good') meter.lastChild.lastChild.style.color = paint(TONE_COLOR[fr.tone]);
-  if (!bellEl.firstChild) drawBell();
+  if (!bellLoaded) { bellLoaded = true; refreshBell(); }      // first time the bar is drawn for this person
   statusBar.replaceChildren(crumbsEl, h('span', { class: 'spacer' }), searchBtn, can('view') ? bellEl : null,
     s.unidentified > 0 && h('a', { class: 'unk-badge', href: '#/unidentified', title: 'Calls under event names not yet identified' },
       svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: '#f0b45a', 'stroke-width': 1.5, 'stroke-dasharray': '3 2' }), svg('circle', { cx: 8, cy: 8, r: 1.8, fill: '#f0b45a' })),
@@ -222,6 +236,7 @@ export async function refreshStatus() {
     meter, themeBtn());
 }
 poll(refreshStatus, 20000);     // not while the tab is in the background
+poll(refreshBell, 60000);
 
 // ---------- search everything: Ctrl/⌘ K, or the button in the top bar ----------
 const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -272,15 +287,14 @@ function shell(active, content, full) {
           [`Workspace time: ${tzName(workspaceTimeZone())} (${workspaceTimeZone()})`, () => { setTzChoice('workspace'); render(); }, { checked: tzChoice() === 'workspace' }],
           [`My browser's time: ${tzName(BROWSER_TZ)} (${BROWSER_TZ})`, () => { setTzChoice('browser'); render(); }, { checked: tzChoice() === 'browser' }],
         ], { title: `${state.user.name}: your menu`, align: 'start', btnClass: 'avatar-btn' }),
-        h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
+        h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; bellLoaded = false; unread = { count: 0, worst: 'none', items: [] }; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
     h('div', { class: 'frame' }, statusBar, h('main', { class: full ? 'main full' : 'main', id: 'content' }, content)));
 }
 
 async function render() {
   closePalette(); closeWindow();
   state.leave.forEach((f) => f()); state.leave = [];
-  if (notices) { notices = null; }
-  bellOpen = false; drawBell();
+  picker = null; bellOpen = false; drawBell();
   document.querySelectorAll('.modal-bg').forEach((m) => m.remove());   // a dialog belongs to the page it was opened on
   const moved = movedTo(location.hash);
   if (moved) history.replaceState(null, '', moved);        // an old address: show the new one, without a second history entry
@@ -305,7 +319,7 @@ async function render() {
       const page = pick(m);
       const content = h('div', { class: 'stack-lg' }, h('div', { class: 'muted', style: null }, h('span', { class: 'spin' }), ' Loading'));
       mount(shell(key, content, full));
-      const out = await page({ params, onLeave: (f) => state.leave.push(f), reload: render, setCrumbs, refreshStatus, openWindow, setNotices });
+      const out = await page({ params, onLeave: (f) => state.leave.push(f), reload: render, setCrumbs, refreshStatus, openWindow, setChangePicker });
       clear(content); content.append(out);
       return;
     }

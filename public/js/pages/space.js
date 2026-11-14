@@ -1079,8 +1079,8 @@ export async function spacePage(ctx) {
         h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
   }
 
-  ctx.setNotices({ title: M.view === 'estate' ? 'Needs a look · last 24 h' : `In ${M.account.name} · last 24 h`,
-    items: M.events.map((e) => ({ kind: e.kind, tone: e.tone, text: e.text, where: e.where, time: hourLabel(e.hour), onPick: () => set({ sel: e.target || st.sel, hour: e.hour }) })) });
+  // a change picked in the bell that this scene shows (the last 24 hours) is selected here, at its hour
+  ctx.setChangePicker((c) => { const e = M.events.find((x) => x.id === `c${c.id}`); if (!e) return false; set({ sel: e.target || st.sel, hour: e.hour }); return true; });
   render();
   return page;
 }

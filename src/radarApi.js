@@ -95,17 +95,43 @@ export async function accountRadar(user, accountId, who = 'all') {
   };
 }
 
+export const FEED_DAYS = [1, 7, 30, 90];
+// what counts as new when someone has never looked: the last week, so a new member is not met by months of pings
+const UNSEEN_WINDOW = "c.at > now() - interval '30 days'";
+const unseenSql = (user, p) => { p.push(user.changes_seen_id ?? null); return `(c.id > coalesce($${p.length}::bigint, 0) AND ${UNSEEN_WINDOW}${user.changes_seen_id == null ? " AND c.at > now() - interval '7 days'" : ''})`; };
+
+/**
+ * The change feed: what changed that matters, newest first, in the member's accounts. Radar shows it for a time range
+ * (and an account); the bell shows the part this person has not seen. Each item says whether it is new to them.
+ */
 export async function changeFeed(user, { accountId = null, days = 7, limit = 60 } = {}) {
-  const p = []; const where = [scopeSql(user, 'c.account_id', p), `c.at > now() - make_interval(days => ${Math.max(1, Math.min(90, Number(days) || 7))})`];
+  const d = FEED_DAYS.includes(Number(days)) ? Number(days) : 7;
+  const p = []; const where = [scopeSql(user, 'c.account_id', p), `c.at > now() - make_interval(days => ${d})`];
   if (accountId) { p.push(accountId); where.push(`c.account_id = $${p.length}`); }
+  const unread = unseenSql(user, p);
   p.push(Math.min(200, limit));
   const rows = (await query(
-    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name
+    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, ${unread} AS unread
        FROM changes c JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
-      WHERE ${where.join(' AND ')} ORDER BY c.at DESC LIMIT $${p.length}`, p)).rows;
-  return { items: rows, seenAt: user.radar_seen_at || null };
+      WHERE ${where.join(' AND ')} ORDER BY c.at DESC, c.id DESC LIMIT $${p.length}`, p)).rows;
+  return { items: rows, days: d, seenAt: user.radar_seen_at || null };
 }
 
+/** What this person has not seen yet, for the bell: how many, the worst severity, and the newest few. */
+export async function unreadChanges(user, { limit = 40 } = {}) {
+  const p = []; const where = [scopeSql(user, 'c.account_id', p)];
+  where.push(unseenSql(user, p));
+  const [rows, n] = await Promise.all([
+    query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, true AS unread
+             FROM changes c JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
+            WHERE ${where.join(' AND ')} ORDER BY c.at DESC, c.id DESC LIMIT ${Math.min(100, limit)}`, p),
+    query(`SELECT count(*)::int n, count(*) FILTER (WHERE c.severity='high')::int high, count(*) FILTER (WHERE c.severity='warn')::int warn FROM changes c WHERE ${where.join(' AND ')}`, p),
+  ]);
+  const t = n.rows[0];
+  return { count: t.n, worst: t.high ? 'high' : t.warn ? 'warn' : t.n ? 'info' : 'none', items: rows.rows };
+}
+
+/** Everything recorded so far counts as seen by this person. */
 export async function markSeen(user) {
-  await query('UPDATE users SET radar_seen_at=now() WHERE id=$1', [user.id]);
+  await query('UPDATE users SET radar_seen_at=now(), changes_seen_id=(SELECT max(id) FROM changes) WHERE id=$1', [user.id]);
 }

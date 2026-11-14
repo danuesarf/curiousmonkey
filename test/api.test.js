@@ -882,3 +882,32 @@ test('display time zone: a workspace setting, validated, sent with the session',
   } finally { await owner.call('PUT', '/api/settings', { 'display.timeZone': null }); }
   assert.equal((await owner.get('/api/auth/me')).json.display.timeZone, 'Asia/Jakarta');
 });
+
+test('change feed: the bell counts what is new by when it was recorded, Radar shows a range; seen is per person; scoped', async () => {
+  const role = (await db.query(`SELECT id FROM roles WHERE account_id=$1 AND deleted_at IS NULL LIMIT 1`, [accA])).rows[0].id;
+  const add = (key, daysAgo, sev = 'high') => db.query(`INSERT INTO changes(account_id, role_id, kind, severity, title, detail, dedupe, at) VALUES ($1,$2,'new-caller',$3,$4,'x',$5, now() - make_interval(days => $6)) RETURNING id`,
+    [accA, role, sev, `feed test ${key}`, `feedtest:${key}`, daysAgo]);
+  try {
+    await add('recent', 0);
+    await owner.post('/api/changes/seen');
+    assert.equal((await owner.get('/api/changes/unread')).json.count, 0, 'everything seen');
+    // recorded now, but it happened five days ago (a new caller found in older history): still new
+    await add('late', 5, 'warn');
+    const u = (await owner.get('/api/changes/unread')).json;
+    assert.equal(u.count, 1); assert.equal(u.worst, 'warn'); assert.equal(u.items[0].title, 'feed test late');
+    const week = (await owner.get('/api/changes?days=7')).json;
+    assert.equal(week.days, 7); assert.ok(week.items.find((x) => x.title === 'feed test late').unread);
+    assert.equal(week.items.find((x) => x.title === 'feed test recent').unread, false);
+    assert.ok(!(await owner.get('/api/changes?days=1')).json.items.some((x) => x.title === 'feed test late'), 'outside the range');
+    assert.equal((await owner.get('/api/changes?days=13')).json.days, 7, 'an odd range falls back to 7 days');
+    // seen is per person: the reviewer has not looked yet
+    assert.ok((await reviewerClient.get('/api/changes/unread')).json.count >= 2);
+    await owner.post('/api/changes/seen');
+    assert.equal((await owner.get('/api/changes/unread')).json.count, 0);
+    assert.ok((await reviewerClient.get('/api/changes/unread')).json.count >= 2);
+    // a member limited to account B does not see A's changes
+    const onlyB = await memberOfB('feed-b@kbi.id');
+    assert.ok(!(await onlyB.get('/api/changes/unread')).json.items.some((x) => x.title.startsWith('feed test')));
+    assert.equal((await owner.get('/api/space/flags')).status, 404, 'the old bell endpoint is gone');
+  } finally { await db.query(`DELETE FROM changes WHERE dedupe LIKE 'feedtest:%'`); }
+});

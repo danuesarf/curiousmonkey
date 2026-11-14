@@ -3,7 +3,7 @@
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
 import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1 } from '../lib.js';
-import { go } from '../main.js';
+import { go, changeRow, refreshBell } from '../main.js';
 
 const CX = 400, CY = 400;
 const SEV = COLOR;
@@ -136,23 +136,26 @@ function spark(points, color) {
   return svg('svg', { viewBox: '0 0 300 54', style: 'width:100%;height:54px', role: 'img', 'aria-label': `Never-called share: ${points.filter((v) => v != null).map((v) => `${Math.round(v * 100)}%`).join(' → ')}` },
     svg('path', { d: 'M0 53 H300', stroke: '#143425' }), svg('polyline', { points: pts, fill: 'none', stroke: color, 'stroke-width': 1.6 }));
 }
-function feedList(items, seenAt, onPick) {
-  if (!items.length) return h('p', { class: 'tiny muted' }, 'No changes in the last 7 days. Changes are recorded once an account’s history is fully read, from one daily analysis to the next.');
-  return h('div', { class: 'stack', style: 'gap:6px' }, items.map((f) => {
-    const fresh = seenAt && new Date(f.at) > new Date(seenAt);
-    const b = h('button', { class: 'feed-item', onClick: () => onPick?.(f) },
-      h('span', { class: 'row mono tiny', style: 'justify-content:space-between' }, h('span', { style: `color:${SEV[f.severity]};letter-spacing:.06em` }, CHANGE_KIND[f.kind] || f.kind, fresh ? h('span', { class: 'fresh' }, ' NEW') : null), h('span', { class: 'faint' }, ago(f.at))),
-      h('span', { class: 'small', style: 'line-height:1.4' }, f.title),
-      h('span', { class: 'tiny faint', style: 'overflow-wrap:anywhere' }, [f.account_name, f.detail].filter(Boolean).join(' · ')));
-    b.style.borderLeftColor = paint(SEV[f.severity]); return b;
-  }));
+/** The feed's range, from the address (?feed=1|7|30|90 days). */
+const feedDays = (ctx) => ([1, 7, 30, 90].includes(Number(ctx.params.get('feed'))) ? Number(ctx.params.get('feed')) : 7);
+const RANGE = { 1: 'last 24 hours', 7: 'last 7 days', 30: 'last 30 days', 90: 'last 90 days' };
+/** The change feed: the same rows as the bell, for a range. Changing the range keeps the rest of the address. */
+function feedSection(title, F, onPick) {
+  const sel = h('select', { class: 'feed-range', 'aria-label': 'How far back' }, Object.entries(RANGE).map(([d, l]) => h('option', { value: d, selected: Number(d) === F.days }, l)));
+  sel.addEventListener('change', () => { const [path, qs] = location.hash.split('?'); const p = new URLSearchParams(qs || ''); p.set('feed', sel.value); go(`${path || '#/'}?${p}`); });
+  const n = F.items.filter((f) => f.unread).length;
+  return h('section', { class: 'stack', style: 'gap:6px' },
+    h('div', { class: 'row', style: 'justify-content:space-between;gap:8px' }, h('span', { class: 'eyebrow' }, `${title}${n ? ` · ${n} NEW` : ''}`), sel),
+    F.items.length ? h('div', { class: 'stack', style: 'gap:6px' }, F.items.map((f) => changeRow(f, onPick)))
+      : h('p', { class: 'tiny muted' }, `No changes in the ${RANGE[F.days]}. Changes are recorded once an account’s history is fully read, from one daily analysis to the next.`));
 }
 
 // ---------------------------------------------------------------- estate
 async function estateView(ctx, shell) {
   ctx.setCrumbs('Radar', 'Estate');
-  const [E, F] = await Promise.all([get(`/radar/estate${whoQs(ctx.who)}`), get('/changes')]);
-  post('/changes/seen').catch(() => {});
+  const [E, F] = await Promise.all([get(`/radar/estate${whoQs(ctx.who)}`), get(`/changes?days=${feedDays(ctx)}`)]);
+  // looking at the estate's feed counts as seeing it: the bell empties (this page still marks what was new)
+  post('/changes/seen').then(refreshBell).catch(() => {});
   const accounts = E.accounts;
   if (!accounts.length) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet. ', h('a', { href: '#/accounts/new' }, 'Connect an AWS account'))); return; }
   for (const a of accounts) { a.d30 = drift(a.never, a.never30); a.d7 = drift(a.never, a.never7); }
@@ -233,8 +236,7 @@ async function estateView(ctx, shell) {
           : a.d30 > 0 ? `Drifting outward: ${headText(a.d30)} in 30 days. Permissions are granted faster than they are used.` : `Moving inward: ${headText(a.d30)} in 30 days. Cleanup is landing.`)),
       a && h('button', { class: 'btn primary', onClick: () => go(`#/?view=account&account=${a.id}`) }, 'Open this account on the radar'),
       !a && T.excess30 == null && h('p', { class: 'tiny muted' }, 'Trails and the 30-day trend fill in as daily snapshots accumulate. A snapshot is taken after each final analysis of a fully read account.'),
-      h('section', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, a ? `CHANGES IN ${a.name.toUpperCase()}` : `SINCE YOU LAST LOOKED · ${F.items.filter((f) => !F.seenAt || new Date(f.at) > new Date(F.seenAt)).length} NEW`),
-        feedList(items, F.seenAt, (f) => { sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); })));
+      feedSection(a ? `CHANGES IN ${a.name.toUpperCase()}` : 'CHANGES', { ...F, items }, (f) => { sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); }));
   }
 
   const T = E.totals;
@@ -260,7 +262,7 @@ async function accountView(ctx, shell) {
     if (!pick) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet.')); return; }
     id = pick.id;
   }
-  const [D, F] = await Promise.all([get(`/radar/account/${id}${whoQs(ctx.who)}`), get(`/changes?account=${id}`)]);
+  const [D, F] = await Promise.all([get(`/radar/account/${id}${whoQs(ctx.who)}`), get(`/changes?account=${id}&days=${feedDays(ctx)}`)]);
   const acct = D.account, roles = D.roles;
   ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), acct.name);
   for (const r of roles) r.d30 = drift(r.never, r.never30 ?? r.never7);
@@ -320,8 +322,7 @@ async function accountView(ctx, shell) {
         spark([r.never30, r.never7, r.never], headColor(r.d30)) || h('p', { class: 'tiny muted' }, 'No trail yet: snapshots start once the account is fully read.')),
       h('a', { class: 'btn primary', href: `#/identities/${r.id}?tab=permissions` }, 'Sector scan'),
       h('div', { class: 'row' }, h('a', { class: 'btn sm grow', href: `#/identities/${r.id}` }, 'Role details'), h('a', { class: 'btn sm grow', href: `#/track?role=${r.id}` }, 'Track a session')),
-      h('section', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, items.length ? 'CHANGES TO THIS ROLE' : `CHANGES IN ${acct.name.toUpperCase()}`),
-        feedList(items.length ? items : F.items, F.seenAt, (f) => { const x = roles.find((y) => y.id === f.role_id); if (x) { sel = x; draw(); list(); card(); } })));
+      feedSection(items.length ? 'CHANGES TO THIS ROLE' : `CHANGES IN ${acct.name.toUpperCase()}`, { ...F, items: items.length ? items : F.items }, (f) => { const x = roles.find((y) => y.id === f.role_id); if (x) { sel = x; draw(); list(); card(); } }));
   }
 
   shell.left.append(h('div', { class: 'stack', style: 'gap:6px' },

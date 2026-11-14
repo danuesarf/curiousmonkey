@@ -12,7 +12,7 @@ import { suggestMappings, decideMapping, markUnresolved } from '../recommender/e
 import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
-import { estate, accountRadar, changeFeed, markSeen } from '../radarApi.js';
+import { estate, accountRadar, changeFeed, markSeen, unreadChanges } from '../radarApi.js';
 import { trustMap, toCsv } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
@@ -599,13 +599,6 @@ data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
 }));
 // Space is worked out at most every few seconds per viewer scope and kept warm while someone is looking (src/cache.js)
 data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}${whoOf(req) === 'all' ? '' : `:${whoOf(req)}`}`, () => spaceEstate(req.user, whoOf(req))))));
-// what needs a look in the last 24 hours, for the bell in the top bar: the estate's flagged events, from the same
-// remembered answer as Space (worked out at most once a minute when only the bell asks)
-data.get('/space/flags', requirePerm('view'), wrap(async (req, res) => {
-  const e = await cached(`space:${scopeKey(req.user)}`, () => spaceEstate(req.user), { freshMs: Number(process.env.CACHE_FRESH_MS ?? 20_000) > 0 ? 60_000 : 0 });
-  const name = new Map(e.accounts.map((a) => [a.id, a.name]));
-  res.json({ hourStart: e.hourStart, items: e.events.map((x) => ({ ...x, accountName: name.get(x.accountId) || null })) });
-}));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
   const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => spaceAccount(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
@@ -616,6 +609,8 @@ data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   res.json(await changeFeed(req.user, { accountId, days: req.query.days }));
 }));
 data.post('/changes/seen', requirePerm('view'), wrap(async (req, res) => { await markSeen(req.user); res.json({ ok: true }); }));
+/** The bell: changes this person has not seen. */
+data.get('/changes/unread', requirePerm('view'), wrap(async (req, res) => { res.json(await unreadChanges(req.user)); }));
 /** One role cut by access level (rings) and service (sectors). */
 data.get('/roles/:id/sector', requirePerm('view'), wrap(async (req, res) => {
   const role = await roleFor(req, req.params.id);

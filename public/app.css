@@ -797,3 +797,4 @@ pre.diff .fold{color:var(--faint);font-style:italic}
 .avatar-btn{background:none;border:0;padding:0;cursor:pointer;border-radius:50%}
 .avatar-btn:focus-visible{outline:2px solid var(--banana);outline-offset:2px}
 .me .menu-list>button,.me .menu-list>a{font-size:13px;padding:8px 14px;width:auto;color:var(--ink);text-transform:none;letter-spacing:0}
+.bell-foot{display:flex;gap:8px;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--line)}
