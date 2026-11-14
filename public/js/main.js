@@ -262,7 +262,7 @@ function shell(active, content, full) {
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey radar' }, mark()),
       group('Watch', item('radar', '#/', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
-      group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Access reviews', 'view')),
+      group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },
         h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),

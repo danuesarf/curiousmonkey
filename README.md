@@ -225,7 +225,7 @@ Connect a Google Cloud organization, folder or project on the Accounts page, *Go
 
 ## Access reviews
 
-**Review → Access reviews** (`#/reviews`) gives you evidence for a periodic user access review (UAR). *New review* (owners, admins, reviewers) takes the accounts and a period you pick and freezes, in one consistent read:
+**Reviews** in the rail (`#/reviews`, Access reviews) gives you evidence for a periodic user access review (UAR). *New review* (owners, admins, reviewers) takes the accounts and a period you pick and freezes, in one consistent read:
 
 - every role and IAM user, with its risk and why, permissions granted, used and unused;
 - who used it in the period, how many calls and on how many days;
