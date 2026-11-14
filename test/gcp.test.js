@@ -201,7 +201,7 @@ test('an AWS role page learns where the role reaches in Google Cloud, and who co
 });
 
 test('the trust map names the Google service account an AWS role trusts', async () => {
-  const t = (await owner.get('/api/trust?q=provider:google')).json;
+  const t = (await owner.get('/api/trust/ways?q=provider:google&size=500')).json;
   const e = t.rows.find((x) => x.role === 'lake-reader' && /Google/.test(x.source));
   assert.ok(e, JSON.stringify(Object.keys(t)));
   assert.equal(e.source, 'Google Cloud · bq-exporter@acme-payments-prod.iam.gserviceaccount.com');

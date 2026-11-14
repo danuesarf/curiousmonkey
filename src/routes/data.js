@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
-import { trustMap, toCsv } from '../trustmap.js';
+import { trustMap, trustWays, toCsv, sourcesCsv } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -559,14 +559,24 @@ data.get('/recommendations/:id/export', requirePerm('export'), wrap(async (req, 
 
 // ---------- overview ----------
 // ---- trust map: who can reach each role, and what is wrong with it ----
+const trustQ = (req) => String(req.query.q || '').slice(0, 500);
+const trustSel = (req) => (req.query.sel ? String(req.query.sel).slice(0, 300) : null);
+// the counts, the sources and the map; the ways in themselves are paged by /trust/ways
 data.get('/trust', requirePerm('view'), wrap(async (req, res) => {
-  res.json(await trustMap(req.user, String(req.query.q || '').slice(0, 500)));
+  res.json(await trustMap(req.user, trustQ(req), { limit: 0, sel: trustSel(req) }));
+}));
+data.get('/trust/ways', requirePerm('view'), wrap(async (req, res) => {
+  const int = (v, d) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d);
+  res.json(await trustWays(req.user, trustQ(req), { sel: trustSel(req), sort: String(req.query.sort || 'worst'), dir: req.query.dir === 'desc' ? 'desc' : 'asc',
+    page: int(req.query.page, 0), size: int(req.query.size, 50) }));
 }));
 data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
-  const m = await trustMap(req.user, String(req.query.q || '').slice(0, 500), { limit: 100000 });
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="trust-map.csv"');
-  res.send(toCsv(m.rows));
+  const m = await trustMap(req.user, trustQ(req), { limit: 1e6, sel: trustSel(req) });
+  sendCsv(res, 'trust-map-ways-in', toCsv(m.rows));
+}));
+data.get('/trust/sources.csv', requirePerm('view'), wrap(async (req, res) => {
+  const m = await trustMap(req.user, trustQ(req), { limit: 0 });
+  sendCsv(res, 'trust-map-sources', sourcesCsv(m.summary));
 }));
 
 // ---- radar v3 ----

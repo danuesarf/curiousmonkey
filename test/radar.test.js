@@ -92,7 +92,15 @@ test('trust map over the database: scope, query, what was seen, CSV', async () =
   const named = await tm.trustMap(owner, 'role:ops-admin');
   assert.equal(named.rows[0].type, 'aws-role');
   assert.equal(named.rows[0].group, 'same-account');
-  assert.match(tm.toCsv(all.rows).split('\n')[1], /^"data-stg","222222222222","cross"/);
+  assert.match(tm.toCsv(all.rows).split('\n')[1], /^data-stg,222222222222,[^,]*,cross,/);
+  // the ways in are kept between requests and worked out again when the data changes
+  const before = await tm.trustIndex();
+  assert.equal(await tm.trustIndex(), before, 'unchanged data: the same index');
+  await db.query(`UPDATE roles SET trust_policy=$2 WHERE id=$1`, [all.rows[0].roleId, JSON.stringify({ Statement: [{ Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::333333333333:root' }, Action: 'sts:AssumeRole' }] })]);
+  const after = await tm.trustMap(owner, `roleid:${all.rows[0].roleId}`);
+  assert.equal(after.rows[0].principal, 'arn:aws:iam::333333333333:root');
+  const page = await tm.trustWays(owner, '', { sort: 'role', size: 2 });
+  assert.equal(page.rows.length, 2); assert.ok(page.total >= 2);
   // roleid: is exact, so a role page can link to its own ways in and nothing else
   const exact = await tm.trustMap(owner, `roleid:${all.rows[0].roleId}`);
   assert.ok(exact.total >= 1 && exact.rows.every((e) => e.roleId === all.rows[0].roleId));

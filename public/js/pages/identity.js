@@ -249,12 +249,12 @@ function policiesTab(d, parts) {
 // the top few ways in from its trust policy, worst first; the full list is the Trust map, filtered to this role
 function waysIn(roleId) {
   const box = h('div'), q = `roleid:${roleId}`, href = `#/trust?q=${encodeURIComponent(q)}`;
-  get(`/trust?q=${encodeURIComponent(q)}`).then((m) => {
-    const top = m.rows.slice(0, 5);
+  get(`/trust/ways?q=${encodeURIComponent(q)}&size=5`).then((m) => {
+    const top = m.rows;
     box.replaceChildren(h('section', { class: 'card' }, h('div', { class: 'card-b stack' },
       h('div', { class: 'row' }, h('h3', { class: 'grow' }, 'Who can get in'), h('a', { class: 'small', href }, m.total > top.length ? `See all ${m.total} in Trust map →` : 'Open in Trust map →')),
       top.length ? h('ul', { class: 'plain stack', style: 'gap:4px' }, top.map((e) => h('li', { class: 'small' }, h('span', { class: 'name' }, e.source),
-        h('span', { class: 'muted' }, ` · ${e.seen?.length ? 'used' : 'not seen using it'}`),
+        h('span', { class: 'muted' }, ` · ${e.sessions ? 'used' : e.lastUsed ? 'IAM says the role is used' : 'not seen using it'}`),
         e.worst !== 'none' && e.worst !== 'info' ? h('span', { class: `badge b-${e.worst}`, style: 'margin-left:6px' }, e.findings.find((f) => f.severity === e.worst)?.title || e.worst) : null)))
         : h('p', { class: 'small muted' }, 'Its trust policy lets nobody in.'))));
   }).catch(() => {});
