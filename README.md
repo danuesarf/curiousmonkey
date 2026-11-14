@@ -227,6 +227,7 @@ A web identity sign-in counts for a statement only when the provider is the stat
 **The same trust, grouped.** *Group the same trust* in *Ways in* lists one row per role name, source and findings, with the accounts it is in (a vendor role in 100 accounts is one row). A decision (*Accept in all N accounts*, *Investigate*) or *Mark as expected…* applies to the whole group.
 
 **Third-party access.** *Export → Third-party access (CSV)*: one row per source outside your estate (outside accounts, anyone, CI and identity providers, deleted identities) with its name, known vendor, owner, purpose, review date, accounts, roles, high-risk roles, accounts it administers, ExternalId coverage, worst finding, what needs attention, what is expected, sessions, first and last seen.
+ An access review takes the same list for its accounts when it is created: shown on the review as *Third-party access*, in its printout and as *Third parties CSV*, and signed off with the rest.
 
 **Views and sharing.** *Views* saves the filter, pick and tab under a name, for you or shared with the workspace; saved views and sources are offered in the search box (Ctrl K). *Export → The map as a picture* saves the map as drawn as a PNG. A trust finding in the Findings inbox has *Show on the Trust map*.
 

@@ -123,6 +123,7 @@ export async function reviewPage(ctx, id) {
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'REVIEW · ACCESS REVIEW'), h('h1', null, r.name), h('div', { class: 'row', style: 'gap:8px;flex-wrap:wrap' }, statusBadge(r),
       h('span', { class: 'small muted' }, `Period ${period(r)} · ${r.accounts.length} account${r.accounts.length === 1 ? '' : 's'} · taken ${fmtDate(r.takenAt)} by ${r.createdBy || 'someone'}`))),
     h('div', { class: 'actions' }, h('a', { class: 'btn', href: `/api/reviews/${id}/identities.csv`, download: '' }, 'Identities CSV'), h('a', { class: 'btn', href: `/api/reviews/${id}/decisions.csv`, download: '' }, 'Decisions CSV'),
+      r.thirdParties && h('a', { class: 'btn', href: `/api/reviews/${id}/third-parties.csv`, download: '' }, 'Third parties CSV'),
       h('button', { class: 'btn', onClick: (e) => printReview(r, e.currentTarget) }, 'Print or save as PDF'), removeBtn)),
     incomplete.length > 0 && h('div', { class: 'alert warn' }, `When this was taken, CloudTrail history was not fully read for ${incomplete.map((a) => a.name).join(', ')}. Their call counts are “at least”, and “not used” may not be final.`),
     t.undecided > 0 && h('div', { class: 'alert warn' }, `${num(t.undecided)} finding${t.undecided === 1 ? ' had' : 's had'} no decision when this was taken. `, h('a', { href: '#/findings' }, 'Decide them'), ', then take a new review if the evidence must show them decided.'),
@@ -130,12 +131,34 @@ export async function reviewPage(ctx, id) {
     h('section', { class: 'tiles' }, tile('Identities', num(t.identities), `${num(t.roles)} roles, ${num(t.users)} IAM users`), tile('High risk', num(t.high), `${num(t.medium)} medium`, { bad: t.high > 0 }),
       tile('Not used in the period', num(t.unusedInPeriod), 'candidates for removal'), tile('Findings undecided', num(t.undecided), `of ${num(t.findings)} open`, { bad: t.undecided > 0 }),
       tile('Keys to rotate', num(t.keysToRotate), `of ${num(t.activeKeys)} active, older than ${r.keyRules?.rotateDays ?? 90} days`), tile('Console without MFA', num(t.consoleWithoutMfa), 'IAM users')),
+    thirdPartyCard(r),
     h('section', { class: 'card' },
       h('div', { class: 'filters' }, search, sel('Account', 'account', [['', 'Every account'], ...r.accounts.map((a) => [a.id, a.name])]),
         sel('Kind', 'kind', [['', 'Roles and IAM users'], ['roles', 'Roles'], ['users', 'IAM users']]), sel('Risk', 'risk', [['', 'Any risk'], ['High', 'High'], ['Medium', 'Medium'], ['Low', 'Low']]),
         chip('unused', 'Not used in the period'), chip('undecided', 'Findings undecided'), count),
       list),
     h('p', { class: 'tiny muted' }, 'Accounts in this review: ', r.accounts.map((a) => `${a.name} (${a.awsAccountId}, ${envName(a.environment)})`).join(' · ')));
+}
+
+// who outside the estate could get into these accounts when the review was taken (from the Trust map)
+const TP_KIND = { 'external-account': 'Outside account', public: 'Anyone', oidc: 'CI / web identity', saml: 'SAML / Identity Center', unknown: 'Deleted identity' };
+function thirdPartyCard(r) {
+  if (!r.thirdParties) return null;
+  const xs = r.thirdParties;
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, `Third-party access · ${num(xs.length)}`),
+      h('p', { class: 'muted small' }, 'Who outside your estate could get into these accounts when this was taken, from the Trust map. Signing off covers them too.'))),
+    xs.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+      h('thead', null, h('tr', null, ...['Name', 'Kind', 'Owner', 'Reaches', 'Administers', 'ExternalId', 'Needs attention', 'Last seen'].map((t) => h('th', null, t)))),
+      h('tbody', null, xs.map((x) => h('tr', null,
+        h('td', null, h('b', null, x.name), x.awsAccountId && x.awsAccountId !== x.name ? h('div', { class: 'tiny muted mono' }, x.awsAccountId) : null, x.knownVendor && h('div', { class: 'tiny muted' }, 'known vendor')),
+        h('td', { class: 'small' }, TP_KIND[x.kind] || x.kind), h('td', { class: 'small' }, x.owner || h('span', { class: 'muted' }, '—'), x.reviewBy && h('div', { class: 'tiny muted' }, `review by ${x.reviewBy}`)),
+        h('td', { class: 'small' }, `${num(x.roles)} role${x.roles === 1 ? '' : 's'} in ${num(x.accounts)} account${x.accounts === 1 ? '' : 's'}`),
+        h('td', { class: 'small' }, x.adminAccounts ? h('b', { class: 'key-bad' }, `${num(x.adminAccounts)} account${x.adminAccounts === 1 ? '' : 's'}`) : '—'),
+        h('td', { class: 'small' }, x.externalId ? `${num(x.externalId.on)} of ${num(x.externalId.of)}` : '—'),
+        h('td', { class: 'small' }, x.needsAttention ? h('span', { class: `badge b-${x.worst}` }, `${num(x.needsAttention)} · ${x.worst}`) : x.expected ? h('span', { class: 'badge b-green' }, 'expected') : '—'),
+        h('td', { class: 'small' }, x.lastSeen || h('span', { class: 'muted' }, 'never')))))))
+      : h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, 'Nobody from outside could get in.')));
 }
 
 const credentials = (u) => {
@@ -186,6 +209,11 @@ async function printReview(r, btn) {
       h('table', null, h('thead', null, h('tr', null, h('th', null, 'Account'), h('th', null, 'Account ID'), h('th', null, 'Environment'), h('th', null, 'Identities'), h('th', null, 'High'), h('th', null, 'Undecided'), h('th', null, 'History read'))),
         h('tbody', null, r.accounts.map((a) => h('tr', null, h('td', null, a.name), h('td', null, a.awsAccountId), h('td', null, envName(a.environment)), h('td', null, num(a.identities)), h('td', null, num(a.high)), h('td', null, num(a.undecided)),
           h('td', null, a.historyComplete ? 'complete' : 'partial'))))),
+      r.thirdParties && h('section', null, h('h2', null, `Third-party access (${num(r.thirdParties.length)})`), r.thirdParties.length ? h('table', null,
+        h('thead', null, h('tr', null, ...['Name', 'Kind', 'Owner', 'Roles', 'Accounts', 'Administers', 'ExternalId', 'Needs attention', 'Last seen'].map((x) => h('th', null, x)))),
+        h('tbody', null, r.thirdParties.map((x) => h('tr', null, h('td', null, `${x.name}${x.awsAccountId && x.awsAccountId !== x.name ? ` (${x.awsAccountId})` : ''}`), h('td', null, TP_KIND[x.kind] || x.kind),
+          h('td', null, x.owner || ''), h('td', null, num(x.roles)), h('td', null, num(x.accounts)), h('td', null, num(x.adminAccounts)), h('td', null, x.externalId ? `${x.externalId.on} of ${x.externalId.of}` : ''),
+          h('td', null, x.needsAttention ? `${x.needsAttention} (${x.worst})` : x.expected ? 'expected' : ''), h('td', null, x.lastSeen || 'never'))))) : h('p', null, 'Nobody from outside could get in.')),
       ...r.accounts.map((a) => { const mine = items.filter((x) => x.awsAccountId === a.awsAccountId);
         return h('section', null, h('h2', null, `${a.name} (${a.awsAccountId})`), h('table', null,
           h('thead', null, h('tr', null, h('th', null, 'Identity'), h('th', null, 'Kind'), h('th', null, 'Risk'), h('th', null, 'Calls'), h('th', null, 'Who used it'), h('th', null, 'Credentials'), h('th', null, 'Findings and decisions'))),

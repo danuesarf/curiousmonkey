@@ -8,6 +8,7 @@ import { TEAMS, inScope } from './auth/rbac.js';
 import { historyFor } from './history.js';
 import { keyRules } from './config.js';
 import { toCsv } from './csv.js';
+import { thirdParties } from './trustmap.js';
 
 const DAY = 864e5;
 const day = (d) => new Date(d).toISOString().slice(0, 10);
@@ -40,6 +41,13 @@ export async function createReview(user, body) {
   const accounts = (await query(`SELECT * FROM cloud_accounts WHERE id = ANY($1::uuid[]) AND status <> 'planned' ORDER BY name`, [ids])).rows;
   if (accounts.length !== ids.length) throw new ReviewError(400, 'Pick connected accounts: a planned one has nothing to review yet.', 'accounts');
   const hist = await historyFor(accounts);
+  // third-party access into these accounts, from the Trust map: who outside the estate can get in, as it stands now
+  const day10 = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : null);
+  const outside = (await thirdParties({ ...user, scope_accounts: ids }, '').catch(() => [])).map((s) => ({
+    name: s.named?.name || s.label, awsAccountId: s.aws || null, kind: s.group, knownVendor: s.named?.vendor || null, owner: s.named?.owner || null, purpose: s.named?.purpose || null,
+    reviewBy: day10(s.named?.reviewBy), accounts: s.accounts, roles: s.roles, highRiskRoles: s.highRiskRoles, adminAccounts: s.adminAccounts,
+    externalId: s.group === 'external-account' ? { on: s.guarded, of: s.edges } : null, worst: s.worst, needsAttention: s.attention, expected: s.expected, ways: s.edges,
+    sessions: s.sessions, firstSeen: day10(s.firstSeen), lastSeen: day10(s.lastSeen) }));
   const now = Date.now(), rules = keyRules();
   const end = new Date(+to + DAY);                                   // the period includes its last day
 
@@ -101,6 +109,7 @@ export async function createReview(user, body) {
       unusedInPeriod: items.filter((i) => !i.calls).length, findings: items.reduce((s, i) => s + i.open, 0), undecided: items.reduce((s, i) => s + i.undecided, 0),
       activeKeys: activeKeys.length, keysToRotate: activeKeys.filter((k) => k.rotate).length,
       consoleWithoutMfa: users.filter((i) => i.data.user.consolePassword && !i.data.user.mfa.length).length,
+      thirdParties: outside.length, thirdPartiesNeedingAttention: outside.filter((x) => x.needsAttention > 0).length,
     };
     const snapshot = {
       takenAt: new Date(now).toISOString(), keyRules: rules,
@@ -110,7 +119,7 @@ export async function createReview(user, body) {
         return { id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, historyComplete: !!h.complete, historyFrom: h.backTo || null, historyTo: h.readUpTo || null,
           identities: mine.length, high: mine.filter((i) => i.risk === 'High').length, undecided: mine.reduce((s, i) => s + i.undecided, 0) };
       }),
-      totals,
+      totals, thirdParties: outside,
     };
     const review = (await c.query(`INSERT INTO access_reviews(name, period_from, period_to, account_ids, teams, snapshot, created_by, created_by_name)
                                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
@@ -129,7 +138,7 @@ export async function createReview(user, body) {
 
 const head = (r, signoffs) => ({
   id: r.id, name: r.name, from: day(r.period_from), to: day(r.period_to), teams: r.teams, status: r.status, createdAt: r.created_at, createdBy: r.created_by_name,
-  accounts: r.snapshot.accounts, totals: r.snapshot.totals, takenAt: r.snapshot.takenAt, keyRules: r.snapshot.keyRules,
+  accounts: r.snapshot.accounts, totals: r.snapshot.totals, takenAt: r.snapshot.takenAt, keyRules: r.snapshot.keyRules, thirdParties: r.snapshot.thirdParties || null,
   signoffs: (signoffs || []).map((s) => ({ team: s.team, by: s.user_name, email: s.user_email, note: s.note, at: s.signed_at })),
 });
 async function load(user, id) {
@@ -198,6 +207,16 @@ const DECIDED = { keep_scoped: 'keep, scoped', keep: 'keep', remove: 'remove', a
 /** The review as spreadsheets: `identities` (one line per role or IAM user) or `decisions` (one line per finding). */
 export async function reviewCsv(user, id, which) {
   const r = await getReview(user, id);
+  if (which === 'third-parties') {
+    const KIND = { 'external-account': 'Outside AWS account', public: 'Anyone', oidc: 'CI or web identity', saml: 'SAML / Identity Center', unknown: 'Deleted identity' };
+    return toCsv([
+      ['Review', () => r.name], ['Name', (x) => x.name], ['AWS account', (x) => x.awsAccountId], ['Kind', (x) => KIND[x.kind] || x.kind], ['Known vendor', (x) => x.knownVendor],
+      ['Owner', (x) => x.owner], ['Purpose', (x) => x.purpose], ['Review by', (x) => x.reviewBy], ['Accounts', (x) => x.accounts], ['Roles', (x) => x.roles],
+      ['High-risk roles', (x) => x.highRiskRoles], ['Administers accounts', (x) => x.adminAccounts], ['ExternalId on', (x) => (x.externalId ? `${x.externalId.on} of ${x.externalId.of}` : '')],
+      ['Worst finding', (x) => x.worst], ['Ways in needing attention', (x) => x.needsAttention], ['Ways in expected', (x) => x.expected], ['Sessions', (x) => x.sessions],
+      ['First seen', (x) => x.firstSeen], ['Last seen', (x) => x.lastSeen],
+    ], r.thirdParties || []);
+  }
   const { items } = await reviewItems(user, id, { all: '1' });
   if (which === 'decisions') {
     const lines = items.flatMap((i) => i.findings.map((f) => ({ i, f })));

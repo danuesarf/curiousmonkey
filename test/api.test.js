@@ -913,6 +913,13 @@ test('access reviews: a frozen snapshot, filtered and exported; both teams sign 
   const live = (await owner.get('/api/roles?kinds=&limit=1')).json.total + (await owner.get('/api/iam-users?limit=1')).json.total;
   assert.equal(r.totals.identities, live); assert.equal(r.accounts.length, 2); assert.deepEqual(r.teams, ['infrasec', 'infosec']); assert.equal(r.status, 'open');
   assert.equal(r.from, from); assert.equal(r.createdBy, (await owner.get('/api/auth/me')).json.user.name);
+  // third-party access into these accounts, from the Trust map, frozen with the review and exported
+  assert.ok(Array.isArray(r.thirdParties)); assert.equal(r.totals.thirdParties, r.thirdParties.length);
+  const tpLive = (await owner.get('/api/trust/third-parties')).json.items;
+  assert.equal(r.thirdParties.length, tpLive.length);
+  const tpCsv = await owner.get(`/api/reviews/${id}/third-parties.csv`);
+  assert.equal(tpCsv.status, 200); assert.match(tpCsv.text.split('\n')[0], /^Review,Name,AWS account,Kind/);
+  assert.equal(tpCsv.text.trim().split('\n').length, r.thirdParties.length + 1);
   // items: paged and filtered
   const page = (await owner.get(`/api/reviews/${id}/items?limit=10`)).json;
   assert.equal(page.items.length, 10); assert.equal(page.total, live);

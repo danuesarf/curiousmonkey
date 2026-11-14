@@ -24,7 +24,7 @@ reviews.post('/reviews', requirePerm('decide'), wrap(async (req, res) => {
 }));
 reviews.get('/reviews/:id', requirePerm('view'), wrap(async (req, res) => res.json(await getReview(req.user, id(req)))));
 reviews.get('/reviews/:id/items', requirePerm('view'), wrap(async (req, res) => res.json(await reviewItems(req.user, id(req), req.query))));
-for (const which of ['identities', 'decisions']) {
+for (const which of ['identities', 'decisions', 'third-parties']) {
   reviews.get(`/reviews/:id/${which}.csv`, requirePerm('view'), wrap(async (req, res) => {
     const r = await getReview(req.user, id(req));
     sendCsv(res, `${r.name.replace(/[^\w.-]+/g, '-').slice(0, 60)}-${which}`, await reviewCsv(req.user, r.id, which));
