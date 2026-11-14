@@ -54,7 +54,7 @@ export async function trustPage(ctx) {
   const S = {
     terms: parse(params.get('q') || ''),
     sel: params.get('sel') || null,
-    tab: ['map', 'sources', 'ways'].includes(params.get('tab')) ? params.get('tab') : 'map',
+    tab: ['map', 'grid', 'sources', 'ways'].includes(params.get('tab')) ? params.get('tab') : 'map',
     show: params.get('show') || null,                     // attention | all; null: decided by the size of the map
     open: new Set((params.get('open') || '').split(',').filter(Boolean)),
     opened: params.has('open'),
@@ -288,7 +288,7 @@ export async function trustPage(ctx) {
     const srcCount = m.summary.reduce((n, g) => n + g.sources.length, 0);
     const tab = (k, text) => h('button', { role: 'tab', 'aria-selected': String(S.tab === k), onClick: () => { S.tab = k; address(); drawTabs(); drawView(); } }, text);
     tabBar.replaceChildren(h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'View' },
-      tab('map', 'Map'), tab('sources', `Sources ${num(srcCount)}`), tab('ways', `Ways in ${num(m.total)}`)),
+      tab('map', 'Map'), tab('grid', 'Grid'), tab('sources', `Sources ${num(srcCount)}`), tab('ways', `Ways in ${num(m.total)}`)),
     S.tab === 'map' && h('div', { class: 'row tm2-mapopts' },
       h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Lines shown' },
         ...[['attention', 'Needs attention'], ['all', 'Everything']].map(([k, l]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(showMode() === k), onClick: () => { S.show = k; address(); drawView(); } }, l))),
@@ -631,10 +631,10 @@ export async function trustPage(ctx) {
   }
   // names for where trust comes from: shown to everyone, so set by reviewers who see every account
   const canName = () => canDecide() && !session.user.scope_accounts;
-  const nameBtn = (s) => canName() && s.id.startsWith('src:') && h('button', { type: 'button', class: 'btn sm', onClick: () => nameDialog(s) }, s.named && s.named.name !== s.named.vendor ? 'Edit the name…' : 'Name it…');
+  const nameBtn = (s) => canName() && s.id.startsWith('src:') && h('button', { type: 'button', class: 'btn sm', onClick: () => nameDialog(s) }, s.named?.custom ? 'Edit the name…' : 'Name it…');
   function nameDialog(s) {
-    const own = s.named && s.named.name !== s.named.vendor ? s.named : null;
-    const nameIn = h('input', { class: 'input', value: own?.name || s.named?.vendor || '', placeholder: 'Vendor or team name', maxlength: 120, 'aria-label': 'Name' });
+    const own = s.named?.custom ? s.named : null;
+    const nameIn = h('input', { class: 'input', value: own?.name || s.named?.name || '', placeholder: 'Vendor or team name', maxlength: 120, 'aria-label': 'Name' });
     const ownerIn = h('input', { class: 'input', value: own?.owner || s.named?.owner || '', placeholder: 'Who looks after it here', maxlength: 120, 'aria-label': 'Owner' });
     const purposeIn = h('textarea', { class: 'input', rows: 2, placeholder: 'What it is for: monitoring, backups, the deploy pipeline…', 'aria-label': 'What it is for' }, own?.purpose || s.named?.purpose || '');
     const dateIn = h('input', { class: 'input', type: 'date', value: s.named?.reviewBy ? String(s.named.reviewBy).slice(0, 10) : '', 'aria-label': 'Review by' });
@@ -653,6 +653,22 @@ export async function trustPage(ctx) {
       try { await api('DELETE', `/trust/names?source=${encodeURIComponent(s.id)}`); bg.remove(); afterReview('Name removed'); } catch (x) { toast(x.message, true); } } }, 'Remove the name'),
     h('span', { class: 'grow' }), h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel'), save));
     nameIn.focus();
+  }
+  // a tighter trust policy for the role, from what was seen coming in: to review and apply in AWS
+  async function suggestDialog(e) {
+    let r;
+    try { r = await get(`/trust/suggest/${e.roleId}`); } catch (x) { toast(x.message, true); return; }
+    const json = (d) => JSON.stringify(d, null, 2);
+    const copyBtn = h('button', { class: 'btn primary', onClick: async () => { try { await navigator.clipboard.writeText(json(r.after)); toast('Copied'); } catch { toast('Copy failed. Select the text and copy it yourself.', true); } } }, 'Copy the new policy');
+    const bg = modal(`Tighter trust for ${r.role}`, h('div', { class: 'stack' },
+      r.changes.length ? h('ul', { class: 'plain stack', style: 'gap:4px' }, r.changes.map((c) => h('li', { class: 'small' }, h('span', { class: `tm2-chip ${c.kind === 'remove' ? 'bad' : 'warn'}` }, c.kind.toUpperCase()), ' ', c.statement && h('span', { class: 'muted' }, `${c.statement}: `), c.text)))
+        : h('p', { class: 'small' }, 'Nothing to tighten from what was seen: every principal was used and has the guards it needs.'),
+      r.empty && h('p', { class: 'small tm-bad' }, 'Nobody came in at all: the role may not be needed. Removing its trust leaves it unusable.'),
+      r.changes.some((c) => c.placeholder) && h('p', { class: 'small muted' }, 'Replace the placeholder ExternalId with the value the third party sends before applying it.'),
+      h('div', { class: 'tm2-diff' }, h('div', null, h('div', { class: 'tm2-cap' }, 'NOW'), h('pre', { class: 'code' }, json(r.before))), h('div', null, h('div', { class: 'tm2-cap' }, 'SUGGESTED'), h('pre', { class: 'code' }, json(r.after)))),
+      h('p', { class: 'tiny muted', style: 'margin:0' }, 'Worked out from the callers seen in the history read. Nothing is changed in AWS: apply it with your usual change process.')),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Close'), r.changes.length ? copyBtn : null));
+    bg.querySelector('.modal')?.classList.add('wide');
   }
   async function unexpect(id) {
     try { await api('DELETE', `/trust/expected/${id}`); afterReview('No longer expected'); } catch (err) { toast(err.message, true); }
@@ -739,13 +755,17 @@ export async function trustPage(ctx) {
             : h('p', { class: 'small muted' }, e.lastUsed ? `No sign-in tied to this statement; IAM last used ${ago(e.lastUsed.at)}.` : 'Nothing in the history read.'),
           h('div', { class: 'tm2-cap', style: 'margin-top:8px' }, 'ACTIONS'), h('code', { class: 'cond-line' }, e.actions.join(', ')),
           e.change && h('p', { class: 'small', style: 'margin:8px 0 0' }, e.change.kind === 'weakened' ? h('b', { class: 'tm-bad' }, `${e.change.guards.join(', ')} taken off ${ago(e.change.at)}.`) : `${e.change.roleCreated ? 'The role was created' : 'This trust was added'} ${ago(e.change.at)}.`)),
+          e.idc && h('div', null, h('div', { class: 'tm2-cap' }, `WHO GETS IT · ${e.idc.permissionSet}`),
+            ...e.idc.who.map((w) => h('div', { class: 'small' }, h('span', { class: 'tm2-guard' }, w.type), ' ', w.name)),
+            e.idc.count > e.idc.who.length && h('p', { class: 'tiny muted' }, `and ${num(e.idc.count - e.idc.who.length)} more`)),
           decisionsBox(e),
           (e.expected || e.expectedDue) && h('div', null, h('div', { class: 'tm2-cap' }, e.expected ? 'EXPECTED' : 'EXPECTED · REVIEW DUE'),
             h('p', { class: 'small', style: 'margin:0' }, (e.expected || e.expectedDue).note),
             h('p', { class: 'tiny muted', style: 'margin:2px 0 0' }, [e.expected?.by, e.expected?.at && ago(e.expected.at), (e.expected || e.expectedDue).reviewBy && `look again by ${String((e.expected || e.expectedDue).reviewBy).slice(0, 10)}`].filter(Boolean).join(' · ')),
             canDecide() && h('button', { type: 'button', class: 'btn xs ghost', style: 'margin-top:4px', onClick: () => unexpect((e.expected || e.expectedDue).id) }, 'No longer expected')),
           h('div', { class: 'row tm2-way-acts', style: 'gap:8px;margin-top:8px' }, h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=policies` }, 'Open the role'), h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=history` }, 'Its history'),
-            !e.expected && e.group !== 'service' && expectBtn({ source: e.sourceKey, sourceLabel: e.source, roles: e.role, accounts: [e.awsAccountId], ways: [e] }))));
+            !e.expected && e.group !== 'service' && expectBtn({ source: e.sourceKey, sourceLabel: e.source, roles: e.role, accounts: [e.awsAccountId], ways: [e] }),
+            e.group !== 'service' && h('button', { type: 'button', class: 'btn sm', onClick: () => suggestDialog(e) }, 'Tighter trust policy…'))));
     };
     const total = ways.total;
     const pg = total > PAGE ? pager({ page: S.page + 1, total, size: PAGE, label: `${num(S.page * PAGE + 1)}–${num(Math.min(total, S.page * PAGE + PAGE))} of ${num(total)}`, onPage: (p) => { S.page = p - 1; address(); loadWays(); } }) : null;
@@ -760,6 +780,38 @@ export async function trustPage(ctx) {
       pg && h('div', { class: 'card-b row', style: 'justify-content:flex-end' }, pg)));
   }
 
+  // ---------------------------------------------------------------- the grid: sources down, accounts across
+  // One cell per pair in the colour of what still needs a look. A source that is everywhere is a full row; an odd cell
+  // stands out; nothing crosses.
+  function drawGrid() {
+    const M = m.map;
+    const cols = M.accounts.filter((a) => !a.planned && M.links.some((l) => l.to === a.id))
+      .sort((a, b) => (ENV_ORDER.indexOf(a.env) - ENV_ORDER.indexOf(b.env)) || a.name.localeCompare(b.name));
+    const byPair = new Map(M.links.map((l) => [`${l.from}|${l.to}`, l]));
+    const rowIds = [...new Set(M.links.map((l) => l.from))];
+    const rows = rowIds.map((id) => ({ id, label: nameOf(id), cells: M.links.filter((l) => l.from === id), src: M.sources.find((x) => x.id === id) }))
+      .sort((a, b) => (SEV_ORDER[worstOf(a.cells)] - SEV_ORDER[worstOf(b.cells)]) || b.cells.length - a.cells.length || a.label.localeCompare(b.label));
+    const sevClass = (w) => (w === 'high' ? 'high' : w === 'medium' ? 'medium' : 'ok');
+    const head = h('tr', null, h('th', { class: 'tm2-g-corner' }, h('span', { class: 'tiny muted' }, `${plural(rows.length, 'source')} × ${plural(cols.length, 'account')}`)),
+      ...cols.map((a) => h('th', { class: 'tm2-g-col', title: `${a.name} · ${envName(a.env)}` }, h('span', { class: 'tm2-g-env', style: null, 'data-env': a.env }), h('span', { class: 'tm2-g-colname' }, a.name))));
+    const body = rows.map((r) => h('tr', { class: S.sel === r.id ? 'tm2-row-sel' : null },
+      h('th', { class: 'tm2-g-row' }, h('button', { type: 'button', class: 'link-btn', onClick: () => pick(r.id) }, cut(r.label, 34)),
+        h('span', { class: 'tiny muted' }, ` ${r.src ? SHORT[r.src.group] || '' : 'your account'} · ${num(r.cells.length)}`)),
+      ...cols.map((a) => {
+        const l = byPair.get(`${r.id}|${a.id}`);
+        return h('td', { class: 'tm2-g-cell' }, l ? h('button', { type: 'button', class: `tm2-g-dot g-${sevClass(l.worst)}${l.sessions || l.iamUsed ? '' : ' unused'}${S.sel === l.id ? ' sel' : ''}`,
+          'aria-label': `${r.label} → ${a.name}: ${plural(l.roles, 'role')}, worst ${l.worst}`, title: `${r.label} → ${a.name} · ${plural(l.roles, 'role')} · ${l.worst}${l.expected ? ` · ${num(l.expected)} expected` : ''} · ${usedText(l)}`,
+          onClick: () => pick(l.id) }) : null);
+      })));
+    view.replaceChildren(h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Grid'), h('p', { class: 'small muted', style: 'margin:2px 0 0' },
+        'Where it comes from, down; your accounts, across, by environment. A cell is red or amber when something there still needs a look; hollow when never used. Pick one for its details.'))),
+      cols.length && rows.length ? h('div', { class: 'tm2-grid-wrap' }, h('table', { class: 'tm2-grid' }, h('thead', null, head), h('tbody', null, body)))
+        : h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, 'Nothing matches this filter.'))));
+    for (const el of view.querySelectorAll('.tm2-g-env')) { const c = ENV_COLOR[el.dataset.env]; if (c) el.style.background = c; }
+  }
+  const worstOf = (ls) => ls.reduce((w, l) => (SEV_ORDER[l.worst] < SEV_ORDER[w] ? l.worst : w), 'none');
+
   // ---------------------------------------------------------------- the panel: whatever is picked
   let lineRoles = null, lineKey = '';
   const facts = (rows) => h('dl', { class: 'tm-facts' }, rows.filter(Boolean).flatMap(([k, v, tone]) => [h('dt', null, k), h('dd', { class: tone ? `tm-${tone}` : null }, v)]));
@@ -771,6 +823,7 @@ export async function trustPage(ctx) {
   };
   const filterTo = (terms) => h('button', { type: 'button', class: 'btn sm primary', title: 'Add it to the filter: the counts, the map, both tables and the export narrow to it', onClick: () => changeTerms([...S.terms, ...parse(terms)]) }, 'Filter to this');
   const waysBtn = () => h('button', { type: 'button', class: 'btn sm', onClick: () => { S.tab = 'ways'; S.page = 0; address(); drawTabs(); drawView(); } }, 'Its ways in');
+  let acctChain = null;
   function drawPanel() {
     const M = m.map;
     const close = h('button', { class: 'sp-x', 'aria-label': 'Close', onClick: () => pick(null) }, '×');
@@ -799,7 +852,8 @@ export async function trustPage(ctx) {
       else { lineKey = key; get(`/trust/ways?q=${encodeURIComponent(q())}&sel=${encodeURIComponent(l.id)}&size=200`).then((r) => { if (lineKey !== key) return; lineRoles = r; fill(r); }).catch(() => rolesBox.replaceChildren(h('p', { class: 'tiny muted' }, 'Could not load the roles.'))); }
     } else if (s) {
       const out = M.links.filter((x) => x.from === s.id);
-      panel.replaceChildren(headOf((KIND_NAME[s.group] || s.group).toUpperCase(), s.label,
+      const chainBox = h('div', { class: 'tm-sect' });
+      panel.replaceChildren(headOf(s.named?.inOrg ? 'YOUR ORGANISATION · NOT ONBOARDED' : (KIND_NAME[s.group] || s.group).toUpperCase(), s.label,
         s.group === 'external-account' ? `${s.named ? `${s.aws} · ` : ''}AWS account not connected here · ${s.vendor ? 'every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : null, s.worst),
       s.named && h('div', { class: 'tm-named' }, s.named.purpose && h('p', { class: 'small', style: 'margin:0' }, s.named.purpose),
         h('p', { class: 'tiny muted', style: 'margin:2px 0 0' }, [s.named.owner && `owner: ${s.named.owner}`, s.named.reviewBy && `review by ${String(s.named.reviewBy).slice(0, 10)}`,
@@ -809,8 +863,12 @@ export async function trustPage(ctx) {
         ['Findings', s.findings ? plural(s.findings, 'finding') : 'nothing to flag', s.findings ? 'bad' : 'ok'], ['Used', usedText(s), s.sessions ? null : 'warn'],
         s.firstSeen ? ['First seen', ago(s.firstSeen)] : null]),
       listOf('Accounts it can get into', out.sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst]).map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) }))),
-      h('div', { class: 'tm-actions' }, filterTo(s.query), waysBtn(), expectBtn({ source: s.id, sourceLabel: s.label, sel: s.id }), nameBtn(s)));
+      chainBox,
+      h('div', { class: 'tm-actions' }, filterTo(s.query), waysBtn(), expectBtn({ source: s.id, sourceLabel: s.label, sel: s.id }), nameBtn(s),
+        s.named?.inOrg && session.user.permissions.includes('accounts') && h('button', { type: 'button', class: 'btn sm', onClick: () => addPlanned(s) }, 'Add as planned')));
+      loadChain(s.id, chainBox);
     } else if (a) {
+      acctChain = h('div', { class: 'tm-sect' });
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
       panel.replaceChildren(headOf(a.planned ? 'PLANNED · NOT ONBOARDED' : `${(envName(a.env) || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
         a.planned ? facts([['Who can get in', 'Not known until it is onboarded.', 'warn'], ['It can get into', out.length ? plural(out.length, 'account') : 'nothing seen']])
@@ -819,6 +877,7 @@ export async function trustPage(ctx) {
         !a.planned && listOf('Who can get in', inn.sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst]).map((x) => item({ label: nameOf(x.from), worst: x.worst,
           meta: `${x.kind === 'account' ? 'your account' : SHORT[M.sources.find((y) => y.id === x.from)?.group] || ''} · ${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) })), 'nothing from outside this account'),
         out.length > 0 && listOf('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) }))),
+        out.length > 0 && acctChain,
         h('div', { class: 'tm-actions' }, a.planned ? (session.user.permissions.includes('accounts') ? h('a', { class: 'btn sm primary', href: `#/accounts/new?from=${a.id}` }, 'Onboard it') : null)
           : [filterTo(`account:${a.aws}`), waysBtn(), h('a', { class: 'btn sm', href: `#/space?view=account&account=${a.id}` }, 'Open in Space')]));
     } else {
@@ -832,6 +891,7 @@ export async function trustPage(ctx) {
       expectedBox);
       loadExpected();
     }
+    if (a && M.links.some((x) => x.from === a.id)) loadChain(a.id, acctChain);
     live.textContent = l || s || a ? `${nameOf(S.sel)} picked` : '';
   }
   // expected trust: every rule, what it covers now, and a way to drop it
@@ -851,6 +911,27 @@ export async function trustPage(ctx) {
           canDecide() && h('button', { type: 'button', class: 'btn xs ghost', 'aria-label': `No longer expect ${r.sourceLabel}`, onClick: () => unexpect(r.id) }, '×'))))
           : h('p', { class: 'tiny muted', style: 'margin:4px 0' }, 'None yet. Pick a source or a line, or open a way in, and mark what you have reviewed as expected.'));
     } catch { expectedBox.replaceChildren(); }
+  }
+  // where a pick leads next: the roles it gets into, then the roles those get into
+  async function loadChain(id, box) {
+    box.replaceChildren(h('p', { class: 'tiny muted' }, 'Following where it leads…'));
+    try {
+      const c = await get(`/trust/chain?sel=${encodeURIComponent(id)}`);
+      if (S.sel !== id) return;
+      const later = c.levels.slice(1);
+      if (!later.length) { box.replaceChildren(h('div', { class: 'tm-sect-h' }, h('span', null, 'Where it leads next')), h('p', { class: 'tiny muted', style: 'margin:4px 0' }, 'Nowhere further: no role it gets into is trusted by another role.')); return; }
+      const sure = later.flatMap((l) => l.roles).filter((r) => r.sure), maybe = later.flatMap((l) => l.roles).filter((r) => !r.sure);
+      box.replaceChildren(h('div', { class: 'tm-sect-h' }, h('span', null, 'Where it leads next'), h('span', { class: 'mono' }, num(c.roles))),
+        h('p', { class: 'tiny', style: 'margin:4px 0' }, `Through the ${plural(c.levels[0].total, 'role')} it gets into: ${plural(sure.length, 'more role')} named in their trust${maybe.length ? `, ${num(maybe.length)} more possible (a whole account trusted)` : ''}`,
+          c.moreAccounts ? `, in ${plural(c.moreAccounts, 'more account')}` : '', c.admin ? h('b', { class: 'tm-bad' }, ` · ${plural(c.admin, 'administrator role')} on the way`) : '', '.'),
+        h('div', { class: 'tm-list' }, [...sure, ...maybe].slice(0, 8).map((r) => item({ label: r.role, worst: r.admin ? 'high' : 'none', href: `#/identities/${r.roleId}?tab=policies`,
+          meta: `${r.account} · from ${r.from}${r.sure ? '' : ' · possible'}${r.admin ? ' · admin' : ''}` }))),
+        sure.length + maybe.length > 8 && h('p', { class: 'tiny muted' }, `and ${num(sure.length + maybe.length - 8)} more`));
+    } catch { box.replaceChildren(); }
+  }
+  async function addPlanned(s) {
+    try { await post('/accounts/planned', { name: s.named.name, accountId: s.aws, note: 'Seen on the Trust map: an account of the organisation, not onboarded yet' }); afterReview(`${s.named.name} added as planned`); }
+    catch (x) { toast(x.message, true); }
   }
   // ways in of one line, by role
   function groupRoles(rows) {
@@ -882,6 +963,7 @@ export async function trustPage(ctx) {
   // ---------------------------------------------------------------- drawing
   function drawView() {
     if (S.tab === 'map') { view.replaceChildren(mapBox); drawMap(); }
+    else if (S.tab === 'grid') drawGrid();
     else if (S.tab === 'sources') drawSources();
     else { if (!ways) view.replaceChildren(h('div', { class: 'muted small', style: 'padding:16px' }, h('span', { class: 'spin' }), ' Loading')); loadWays(); }
   }

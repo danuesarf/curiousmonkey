@@ -177,7 +177,7 @@ function drawBell() {
   const btn = h('button', { class: `bell-btn bell-${n.worst}`, 'aria-expanded': String(bellOpen), 'aria-haspopup': 'true', title: n.count ? `${n.count} change${n.count === 1 ? '' : 's'} you have not seen` : 'No new changes',
     onClick: (ev) => { ev.stopPropagation(); bellOpen = !bellOpen; drawBell(); } },
     svg('svg', { width: 16, height: 16, viewBox: '0 0 16 16', 'aria-hidden': 'true' }, svg('path', { d: 'M8 1.5a4 4 0 0 0-4 4v3L2.5 11h11L12 8.5v-3a4 4 0 0 0-4-4zM6.5 13a1.5 1.5 0 0 0 3 0', fill: 'none', stroke: 'currentColor', 'stroke-width': 1.4 })),
-    n.count ? `${n.count > 99 ? '99+' : n.count} NEW` : 'NOTHING NEW');
+    n.count ? h('span', null, `${n.count > 99 ? '99+' : n.count}`, h('span', { class: 'bell-label' }, ' NEW')) : h('span', { class: 'bell-label' }, 'NOTHING NEW'));
   const pop = bellOpen ? h('div', { class: 'bell-pop', role: 'menu', 'aria-label': 'Changes you have not seen' },
     h('div', { class: 'bell-head' }, h('span', { class: 'eyebrow' }, 'NEW SINCE YOU LAST LOOKED'), h('span', { class: 'mono faint' }, String(n.count))),
     ...(n.items.length ? n.items.map((c) => changeRow(c, () => openChange(c), { cls: 'bell-item', role: 'menuitem' }))

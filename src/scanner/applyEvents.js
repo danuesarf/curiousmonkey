@@ -17,6 +17,11 @@ const J = (v) => JSON.stringify(v);
 const knownKinds = new Set();          // call_kinds rows known to be stored (see migration 023)
 const chunks = (a, n = CHUNK) => { const out = []; for (let i = 0; i < a.length; i += n) out.push(a.slice(i, i + n)); return out; };
 
+// Bitbucket Pipelines puts the step in the subject ({repository}[:{environment}]:{step}), so every pipeline step
+// would be a caller of its own. The step is dropped: one caller per repository (and deployment environment).
+const BITBUCKET_STEP = /(:\{[0-9a-f-]{36}\}(?::[^:]+)?):\{[0-9a-f-]{36}\}$/i;
+export const stableFederatedKey = (id) => (/bitbucket\.org/i.test(id || '') ? String(id).replace(BITBUCKET_STEP, '$1:*') : id);
+
 export function principalFrom(e) {
   const c = e.caller;
   // a service acting for another account (SSM Automation, StackSets...) is that account coming in: keep the account
@@ -30,8 +35,9 @@ export function principalFrom(e) {
   if (c.type === 'IAMUser') return { key: `user:${c.arn}`, kind: 'user', display: `${c.arn?.split(':').pop()} (${c.accountId})` };
   if (c.type === 'AssumedRole') { const m = c.arn?.match(/assumed-role\/([^/]+)\//); return { key: `role:${c.accountId}:${m?.[1]}`, kind: 'role', display: `role/${m?.[1]} (${c.accountId})` }; }
   if (c.type === 'SAMLUser' || c.type === 'WebIdentityUser') {
-    const who = c.principalId?.split(':').slice(1).join(':') || e.sessionName;
-    return { key: `fed:${c.principalId || e.sessionName}`, kind: 'federated', display: who };
+    const id = stableFederatedKey(c.principalId || e.sessionName);
+    const who = id?.split(':').slice(1).join(':') || e.sessionName;
+    return { key: `fed:${id}`, kind: 'federated', display: who };
   }
   return { key: `other:${c.arn || c.type}`, kind: 'other', display: c.arn || String(c.type) };
 }

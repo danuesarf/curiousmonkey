@@ -99,3 +99,17 @@ async function feedChanges(ix) {
     [cols('account'), cols('role'), cols('kind'), cols('severity'), cols('title'), cols('detail'), cols('dedupe'), cols('at')]);
   return { changes: r.rowCount };
 }
+
+/** Removes callers not seen for CALLER_KEEP_DAYS (default 400, longer than any history read), with their daily counts. */
+export async function pruneCallers(days, { log = () => {} } = {}) {
+  if (!days) return 0;
+  const client = await pool.connect();
+  try {
+    if (!(await client.query('SELECT pg_try_advisory_lock(727012) AS ok')).rows[0].ok) return 0;
+    try {
+      const r = await client.query(`DELETE FROM principals WHERE last_seen < now() - make_interval(days => $1)`, [days]);
+      if (r.rowCount) log('info', 'old callers removed', { n: r.rowCount, days });
+      return r.rowCount;
+    } finally { await client.query('SELECT pg_advisory_unlock(727012)'); }
+  } finally { client.release(); }
+}

@@ -8,6 +8,11 @@ import { IAMClient, ListUsersCommand, GetUserCommand, ListAccessKeysCommand, Get
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand, ListSAMLProvidersCommand, GetSAMLProviderCommand } from '@aws-sdk/client-iam';
 import { samlIssuer } from '../identityCenter.js';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import { EKSClient, ListClustersCommand, DescribeClusterCommand } from '@aws-sdk/client-eks';
+import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
+import { SSOAdminClient, ListInstancesCommand, ListPermissionSetsCommand, DescribePermissionSetCommand, ListAccountsForProvisionedPermissionSetCommand,
+  ListAccountAssignmentsCommand } from '@aws-sdk/client-sso-admin';
+import { IdentitystoreClient, DescribeUserCommand, DescribeGroupCommand } from '@aws-sdk/client-identitystore';
 import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, trailRegionsPrefix, fileTimeFromKey } from './trailKeys.js';
@@ -54,6 +59,64 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       } while (Marker);
       return roles.map((x) => ({ arn: x.Arn, awsId: x.RoleId || null, name: x.RoleName, path: x.Path, createDate: x.CreateDate,
         trustPolicy: decode(x.AssumeRolePolicyDocument), boundaryArn: x.PermissionsBoundary?.PermissionsBoundaryArn || null }));
+    },
+    // EKS clusters in the account's regions, with the OIDC issuer roles trust (a region without EKS answers empty)
+    async listEksClusters() {
+      const out = [];
+      for (const region of account.regions) {
+        const eks = new EKSClient({ region, credentials });
+        let nextToken;
+        do {
+          const r = await eks.send(new ListClustersCommand({ nextToken, maxResults: 100 }));
+          for (const name of r.clusters || []) {
+            const c = (await eks.send(new DescribeClusterCommand({ name }))).cluster || {};
+            out.push({ region, name, arn: c.arn || `arn:aws:eks:${region}::cluster/${name}`, oidcIssuer: c.identity?.oidc?.issuer || null });
+          }
+          nextToken = r.nextToken;
+        } while (nextToken);
+      }
+      return out;
+    },
+    // the organisation's accounts: answered from the management account or a delegated administrator, denied elsewhere
+    async listOrgAccounts() {
+      const org = new OrganizationsClient({ region: 'us-east-1', credentials });
+      const out = []; let NextToken;
+      do {
+        const r = await org.send(new ListAccountsCommand({ NextToken }));
+        for (const a of r.Accounts || []) out.push({ accountId: a.Id, name: a.Name, email: a.Email || null, status: a.Status || null });
+        NextToken = r.NextToken;
+      } while (NextToken);
+      return out;
+    },
+    // IAM Identity Center: who is assigned each permission set in each account (from where the instance is managed)
+    async listIdcAssignments() {
+      const region = account.regions[0] || 'us-east-1';
+      const sso = new SSOAdminClient({ region, credentials });
+      const out = [];
+      const all = async (cmd, input, key) => { const items = []; let NextToken; do { const r = await sso.send(new cmd({ ...input, NextToken })); items.push(...(r[key] || [])); NextToken = r.NextToken; } while (NextToken); return items; };
+      for (const inst of await all(ListInstancesCommand, {}, 'Instances')) {
+        const store = new IdentitystoreClient({ region, credentials });
+        const names = new Map();
+        const nameOf = async (type, id) => {
+          const k = `${type}:${id}`;
+          if (!names.has(k)) {
+            try {
+              names.set(k, type === 'USER' ? (await store.send(new DescribeUserCommand({ IdentityStoreId: inst.IdentityStoreId, UserId: id }))).UserName
+                : (await store.send(new DescribeGroupCommand({ IdentityStoreId: inst.IdentityStoreId, GroupId: id }))).DisplayName);
+            } catch { names.set(k, null); }
+          }
+          return names.get(k);
+        };
+        for (const ps of await all(ListPermissionSetsCommand, { InstanceArn: inst.InstanceArn }, 'PermissionSets')) {
+          const name = (await sso.send(new DescribePermissionSetCommand({ InstanceArn: inst.InstanceArn, PermissionSetArn: ps }))).PermissionSet?.Name;
+          for (const acct of await all(ListAccountsForProvisionedPermissionSetCommand, { InstanceArn: inst.InstanceArn, PermissionSetArn: ps }, 'AccountIds')) {
+            for (const a of await all(ListAccountAssignmentsCommand, { InstanceArn: inst.InstanceArn, AccountId: acct, PermissionSetArn: ps }, 'AccountAssignments')) {
+              out.push({ instanceArn: inst.InstanceArn, accountId: acct, permissionSet: name, principalType: a.PrincipalType, principalId: a.PrincipalId, principalName: await nameOf(a.PrincipalType, a.PrincipalId) });
+            }
+          }
+        }
+      }
+      return out;
     },
     async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
       const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];

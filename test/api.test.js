@@ -1056,3 +1056,12 @@ test('trust map: names for sources (known vendors too), groups, third-party repo
     await db.query('DELETE FROM roles WHERE id = ANY($1)', [ids]);
   }
 });
+
+test('a scan reads what is around trust where it can: the organisation and Identity Center from the management account only', async () => {
+  const org = (await db.query(`SELECT account_id, seen_from FROM org_accounts ORDER BY account_id`)).rows;
+  assert.deepEqual(org.map((x) => x.account_id), ['111111111111', '222222222222', '333333333333', '444444444444']);
+  assert.ok(org.every((x) => x.seen_from === accA), 'read from 111111111111 only; elsewhere it is denied and skipped');
+  assert.ok((await db.query(`SELECT count(*)::int n FROM idc_assignments WHERE permission_set = 'PlatformEngineer'`)).rows[0].n >= 2);
+  const { SCANNER_ALLOW } = await import('../src/onboarding.js');
+  for (const a of ['eks:ListClusters', 'organizations:ListAccounts', 'sso:ListAccountAssignments', 'identitystore:DescribeGroup']) assert.ok(SCANNER_ALLOW.includes(a), a);
+});

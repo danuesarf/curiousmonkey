@@ -243,6 +243,42 @@ export async function runInventory(ctx) {
     }
   }
 
+  // around the trust policies: EKS cluster names, the organisation's accounts, Identity Center assignments. Each is
+  // optional: a scanner role without the permission, or an account that is not the organisation's management account,
+  // is denied, and what is stored stays.
+  const denied = (e) => /AccessDenied|not authorized|UnrecognizedClient|AWSOrganizationsNotInUse|don't have permissions/i.test(`${e.name} ${e.message}`);
+  if (gw.listEksClusters) {
+    try {
+      const cl = await gw.listEksClusters();
+      await tx(async (c) => {
+        await c.query('DELETE FROM eks_clusters WHERE account_id=$1 AND NOT (arn = ANY($2))', [account.id, cl.map((x) => x.arn)]);
+        for (const x of cl) await c.query(`INSERT INTO eks_clusters(account_id, region, name, arn, oidc_issuer, seen_at) VALUES ($1,$2,$3,$4,$5,now())
+          ON CONFLICT (account_id, arn) DO UPDATE SET name=EXCLUDED.name, region=EXCLUDED.region, oidc_issuer=EXCLUDED.oidc_issuer, seen_at=now()`, [account.id, x.region, x.name, x.arn, x.oidcIssuer]);
+      });
+    } catch (e) { if (!denied(e)) ctx.log(`EKS clusters not read: ${e.message}`, null, 'warn'); else ctx.log('cannot read EKS clusters: add eks:ListClusters and eks:DescribeCluster to the scanner role to name them on the Trust map', null, 'info'); }
+  }
+  if (gw.listOrgAccounts) {
+    try {
+      const list = await gw.listOrgAccounts();
+      await tx(async (c) => {
+        await c.query('DELETE FROM org_accounts WHERE seen_from=$1 AND NOT (account_id = ANY($2))', [account.id, list.map((x) => x.accountId)]);
+        for (const x of list) await c.query(`INSERT INTO org_accounts(account_id, name, email, status, seen_from, seen_at) VALUES ($1,$2,$3,$4,$5,now())
+          ON CONFLICT (account_id) DO UPDATE SET name=EXCLUDED.name, email=EXCLUDED.email, status=EXCLUDED.status, seen_from=EXCLUDED.seen_from, seen_at=now()`, [x.accountId, x.name, x.email, x.status, account.id]);
+      });
+    } catch (e) { if (!denied(e)) ctx.log(`organisation accounts not read: ${e.message}`, null, 'warn'); }
+  }
+  if (gw.listIdcAssignments) {
+    try {
+      const list = await gw.listIdcAssignments();
+      await tx(async (c) => {
+        await c.query('DELETE FROM idc_assignments WHERE seen_from=$1', [account.id]);
+        for (const x of list) await c.query(`INSERT INTO idc_assignments(instance_arn, account_id, permission_set, principal_type, principal_id, principal_name, seen_from, seen_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT (instance_arn, account_id, permission_set, principal_type, principal_id) DO UPDATE SET principal_name=EXCLUDED.principal_name, seen_from=EXCLUDED.seen_from, seen_at=now()`,
+        [x.instanceArn, x.accountId, x.permissionSet, x.principalType, x.principalId, x.principalName, account.id]);
+      });
+    } catch (e) { if (!denied(e)) ctx.log(`Identity Center assignments not read: ${e.message}`, null, 'warn'); }
+  }
+
   // buckets and other resources that have data events turned on
   const found =await gw.discoverDataEvents().catch((e) => { ctx.log(`data event discovery failed: ${e.message}`, null, 'warn'); return []; });
   await tx(async (c) => {

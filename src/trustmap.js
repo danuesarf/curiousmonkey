@@ -311,7 +311,7 @@ function valueMatches(e, key, v) {
     case 'roleid': return String(e.roleId) === v; // one role exactly, for links from its page
     case 'cond': return e.conditions.some((c) => lc(c).includes(v));
     case 'env': return lc(e.environment).startsWith(v);
-    case 'has': if (v === 'admin') return !!e.admin; if (v === 'name') return !!e.named;
+    case 'has': if (v === 'admin') return !!e.admin; if (v === 'name') return !!e.named; if (v === 'org') return !!e.inOrg;
       return v === 'findings' ? e.findings.some((f) => f.severity !== 'info') : v === 'conditions' ? e.conditions.length > 0 : v === 'seen' ? e.seen.length > 0 : false;
     case 'no': if (v === 'admin') return !e.admin; if (v === 'name') return !e.named;
       return v === 'conditions' ? e.conditions.length === 0 : v === 'findings' ? !e.findings.some((f) => f.severity !== 'info') : v === 'seen' ? e.seen.length === 0 : false;
@@ -419,6 +419,16 @@ export const ADMIN_AT = 15000;
 async function annotate(edges, roles, byAws) {
   // names the workspace gave to where trust comes from, and known vendors
   const names = new Map((await query(`SELECT s.*, u.name AS updated_by_name FROM trust_sources s LEFT JOIN users u ON u.id = s.updated_by`).catch(() => ({ rows: [] }))).rows.map((x) => [x.source, x]));
+  // what the scanner read around the trust policies: EKS cluster names, the organisation's accounts, Identity Center
+  const clusters = new Map((await query(`SELECT name, region, oidc_issuer FROM eks_clusters WHERE oidc_issuer IS NOT NULL`).catch(() => ({ rows: [] }))).rows
+    .map((x) => [x.oidc_issuer.replace(/^https:\/\//, ''), x]));
+  const org = new Map((await query(`SELECT account_id, name, status FROM org_accounts`).catch(() => ({ rows: [] }))).rows.map((x) => [x.account_id, x]));
+  const idc = new Map();
+  for (const x of (await query(`SELECT account_id, permission_set, principal_type, principal_name, principal_id FROM idc_assignments ORDER BY principal_type, principal_name`).catch(() => ({ rows: [] }))).rows) {
+    const k = `${x.account_id}|${x.permission_set}`;
+    if (!idc.has(k)) idc.set(k, []);
+    idc.get(k).push({ type: x.principal_type === 'GROUP' ? 'group' : 'user', name: x.principal_name || x.principal_id });
+  }
   const DAY = 864e5, now = Date.now();
   // what changed in the last 30 days: from the trust policy before and after each change, and roles created since
   const changes = new Map();                              // roleId -> principal -> { kind, at, guards }
@@ -444,7 +454,18 @@ async function annotate(edges, roles, byAws) {
     const key = sourceKeyOf(e, byAws);
     e.sourceKey = key;
     const n = names.get(key), vendor = e.group === 'external-account' ? knownVendor(e.principalAccount) : null;
-    if (n || vendor) e.named = { name: n?.name || vendor, owner: n?.owner || null, purpose: n?.purpose || null, reviewBy: n?.review_by || null, vendor, by: n?.updated_by_name || null };
+    const mine = e.group === 'external-account' ? org.get(e.principalAccount) : null;
+    if (mine) e.inOrg = { name: mine.name, status: mine.status };
+    if (n || vendor || mine) e.named = { name: n?.name || mine?.name || vendor, owner: n?.owner || null, purpose: n?.purpose || null, reviewBy: n?.review_by || null, vendor, inOrg: !!mine, custom: !!n, by: n?.updated_by_name || null };
+    if (e.pkind === 'eks') {
+      const cl = clusters.get(e.provider);
+      if (cl) { e.cluster = cl.name; e.source = `EKS · ${cl.name}`; }
+    }
+    if (e.pkind === 'identity-center') {
+      const ps = /^AWSReservedSSO_(.+)_[0-9a-f]+$/.exec(e.role)?.[1];
+      const who = ps ? idc.get(`${e.awsAccountId}|${ps}`) : null;
+      if (who) e.idc = { permissionSet: ps, count: who.length, who: who.slice(0, 12) };
+    }
     e.admin = Number(e.granted || 0) >= ADMIN_AT;
     for (const r of rules) {
       const hit = coveredBy(r, e, key);
@@ -482,6 +503,9 @@ const SIGNATURE = `SELECT concat_ws('|',
     (SELECT count(*) || ':' || coalesce(sum(hashtext(id::text || roles || array_to_string(accounts, ',') || array_to_string(findings, ',') || note || coalesce(review_by::text, '')))::bigint, 0) FROM trust_expected),
     (SELECT coalesce(max(id), 0) FROM identity_events),
     (SELECT count(*) || ':' || coalesce(max(updated_at)::text, '') FROM trust_sources),
+    (SELECT count(*) || ':' || coalesce(max(seen_at)::text, '') FROM eks_clusters),
+    (SELECT count(*) || ':' || coalesce(max(seen_at)::text, '') FROM org_accounts),
+    (SELECT count(*) || ':' || coalesce(max(seen_at)::text, '') FROM idc_assignments),
     to_char(now(), 'YYYY-MM-DD HH24')) AS sig`;
 let index = null, pending = null;
 
@@ -656,11 +680,137 @@ export async function trustGroups(user, q = '', { sel = null, page = 0, size = 5
   return { total: groups.length, ways: rows.length, page: p, size: n, groups: groups.slice(p * n, p * n + n), builtAt: ix.at };
 }
 
+/**
+ * Where a source leads next: the roles it can get into, then the roles those can get into (a role named in another
+ * role's trust policy), up to four steps. A role whose whole account is trusted could go on to any role its
+ * permissions allow: such steps are counted as possible, not certain.
+ */
+export async function trustChain(user, sel, { depth = 4 } = {}) {
+  const ix = await trustIndex();
+  const scope = user?.scope_accounts ? new Set(user.scope_accounts) : null;
+  const byAws = new Map(ix.accounts.map((a) => [a.account_id, a]));
+  const edges = scope ? ix.edges.filter((e) => scope.has(e.accountId)) : ix.edges;
+  const byRoleArn = new Map(), byRootAcct = new Map();
+  for (const e of edges) {
+    if (e.type === 'aws-role') { if (!byRoleArn.has(e.principal)) byRoleArn.set(e.principal, []); byRoleArn.get(e.principal).push(e); }
+    if (e.type === 'aws-root' && e.principalAccount && e.principalAccount !== e.awsAccountId) { if (!byRootAcct.has(e.principalAccount)) byRootAcct.set(e.principalAccount, []); byRootAcct.get(e.principalAccount).push(e); }
+  }
+  const start = edges.filter((e) => fromOf(e, byAws) === sel || e.sourceKey === sel);
+  const seen = new Set(), levels = [];
+  let frontier = [...new Map(start.map((e) => [e.roleId, { e, via: 'trust', sure: true }])).values()];
+  for (const x of frontier) seen.add(x.e.roleId);
+  for (let d = 0; d < depth && frontier.length; d++) {
+    levels.push({ depth: d + 1, roles: frontier.map(({ e, via, sure, from }) => ({ roleId: e.roleId, role: e.role, account: e.account, awsAccountId: e.awsAccountId, accountId: e.accountId,
+      risk: e.risk, admin: !!e.admin, via, sure, from: from || null })).sort((a, b) => (b.admin - a.admin) || a.account.localeCompare(b.account) || a.role.localeCompare(b.role)) });
+    const next = new Map();
+    for (const { e, sure } of frontier) {
+      for (const n of byRoleArn.get(e.roleArn) || []) if (!seen.has(n.roleId) && !next.has(n.roleId)) next.set(n.roleId, { e: n, via: 'role', sure, from: e.role });
+      for (const n of byRootAcct.get(e.awsAccountId) || []) if (!seen.has(n.roleId) && !next.has(n.roleId)) next.set(n.roleId, { e: n, via: 'account', sure: false, from: e.role });
+    }
+    for (const id of next.keys()) seen.add(id);
+    frontier = [...next.values()];
+  }
+  const accounts = new Set(levels.flatMap((l) => l.roles.map((r) => r.accountId)));
+  const first = new Set((levels[0]?.roles || []).map((r) => r.accountId));
+  return { sel, levels: levels.map((l) => ({ ...l, roles: l.roles.slice(0, 200), total: l.roles.length })), roles: seen.size, accounts: accounts.size, moreAccounts: [...accounts].filter((a) => !first.has(a)).length,
+    admin: levels.reduce((n, l) => n + l.roles.filter((r) => r.admin).length, 0), truncated: !!frontier.length };
+}
+
+/**
+ * A tighter trust policy for a role, from what was seen coming in: principals nobody used are removed, a whole
+ * account becomes the roles that came in from it, a web identity gets the subjects and audience it was used with,
+ * an outside account gets an ExternalId to fill in. Nothing is changed in AWS: the policy is to review and apply.
+ */
+export async function suggestTrust(user, roleId) {
+  const role = (await query(`SELECT r.id, r.name, r.account_id, r.trust_policy FROM roles r WHERE r.id = $1 AND r.deleted_at IS NULL`, [roleId])).rows[0];
+  if (!role || (user?.scope_accounts && !user.scope_accounts.includes(role.account_id))) return null;
+  const ix = await trustIndex();
+  const edges = ix.edges.filter((e) => e.roleId === roleId);
+  const before = role.trust_policy || {};
+  const after = JSON.parse(JSON.stringify(before));
+  const list = Array.isArray(after.Statement) ? after.Statement : after.Statement ? [after.Statement] : [];
+  const changes = [];
+  const sts = normalizeStatements(before);
+  for (const st of sts) {
+    const doc = list[st.index];
+    if (!doc || st.effect !== 'Allow') continue;
+    const mine = edges.filter((e) => e.statement === st.index);
+    const used = (e) => e.callers.length > 0 || !!e.lastUsed;
+    const never = (e) => e.findings.some((f) => f.id === 'never-used');
+    const label = st.sid ? `statement ${st.sid}` : `statement ${st.index + 1}`;
+    // principals nobody came in through, where the whole history was read
+    const drop = mine.filter((e) => never(e) && e.type !== 'service');
+    for (const e of drop) {
+      removePrincipal(doc, e.principal);
+      changes.push({ statement: label, kind: 'remove', text: `Remove ${e.principal}: nothing came in through it in the history read.` });
+    }
+    for (const e of mine.filter((x) => !drop.includes(x) && used(x))) {
+      const keys = e.callers.map(([k]) => String(k));
+      if ((e.type === 'aws-root' || e.type === 'public') && keys.length && keys.every((k) => /^role:\d{12}:/.test(k))) {
+        const arns = [...new Set(keys.map((k) => { const [, acct, name] = k.split(':'); return `arn:aws:iam::${acct}:role/${name}`; }))].sort();
+        if (arns.length <= 20) {
+          removePrincipal(doc, e.principal); addPrincipal(doc, 'AWS', arns);
+          changes.push({ statement: label, kind: 'narrow', text: `Replace ${e.principal === '*' ? 'anyone' : 'the whole account'} with the ${arns.length === 1 ? 'role' : `${arns.length} roles`} that came in: ${arns.map((a) => a.split('/').pop()).join(', ')}.` });
+        }
+      }
+      if (e.type === 'oidc') {
+        const host = e.provider;
+        const subs = new Set(), auds = new Set();
+        for (const k of keys) {
+          const at = k.indexOf(host); if (at < 0) continue;
+          const rest = k.slice(at + host.length + 1);
+          const aud = /^ari:cloud:[^{]*\{[^}]+\}/.exec(rest)?.[0] || rest.split(':')[0];
+          auds.add(aud); const sub = rest.slice(aud.length + 1); if (sub) subs.add(sub);
+        }
+        const need = (id) => e.findings.some((f) => f.id === id);
+        if ((need('oidc-no-sub') || need('oidc-broad-sub')) && subs.size && subs.size <= 30 && e.pkind !== 'cognito') {
+          setCondition(doc, 'StringLike', `${host}:sub`, [...subs].sort());
+          changes.push({ statement: label, kind: 'condition', text: `Pin ${host}:sub to the ${subs.size === 1 ? 'subject' : `${subs.size} subjects`} seen: ${[...subs].slice(0, 3).join(', ')}${subs.size > 3 ? '…' : ''}.` });
+        }
+        if (need('oidc-no-aud') && auds.size === 1) {
+          setCondition(doc, 'StringEquals', `${host}:aud`, [...auds][0]);
+          changes.push({ statement: label, kind: 'condition', text: `Require ${host}:aud = ${[...auds][0]}, the audience seen.` });
+        }
+      }
+    }
+    for (const e of mine) {
+      if (e.findings.some((f) => f.id === 'external-no-externalid') && !drop.includes(e)) {
+        setCondition(doc, 'StringEquals', 'sts:ExternalId', 'ASK-THE-VENDOR-FOR-ITS-EXTERNAL-ID');
+        changes.push({ statement: label, kind: 'condition', text: `Require sts:ExternalId for ${e.principalAccount}: ask the third party for the value they send.`, placeholder: true });
+      }
+    }
+  }
+  // statements left with no principal go
+  const kept = list.filter((d) => !d.Principal || Object.values(d.Principal === '*' ? { x: '*' } : d.Principal).some((v) => (Array.isArray(v) ? v.length : v)));
+  if (kept.length !== list.length) changes.push({ statement: '', kind: 'remove', text: `Remove ${list.length - kept.length === 1 ? 'a statement' : `${list.length - kept.length} statements`} left with nobody in it.` });
+  after.Statement = kept;
+  return { roleId, role: role.name, before, after, changes, empty: !kept.length };
+}
+function removePrincipal(doc, principal) {
+  if (doc.Principal === '*' && principal === '*') { doc.Principal = {}; return; }
+  for (const k of Object.keys(doc.Principal || {})) {
+    const v = doc.Principal[k];
+    const left = (Array.isArray(v) ? v : [v]).filter((x) => x !== principal && `canonical:${x}` !== principal);
+    if (!left.length) delete doc.Principal[k]; else doc.Principal[k] = left.length === 1 ? left[0] : left;
+  }
+}
+function addPrincipal(doc, kind, values) {
+  if (!doc.Principal || doc.Principal === '*') doc.Principal = {};
+  const cur = doc.Principal[kind] ? (Array.isArray(doc.Principal[kind]) ? doc.Principal[kind] : [doc.Principal[kind]]) : [];
+  const all = [...new Set([...cur, ...values])];
+  doc.Principal[kind] = all.length === 1 ? all[0] : all;
+}
+function setCondition(doc, op, key, value) {
+  doc.Condition = doc.Condition || {};
+  for (const o of Object.keys(doc.Condition)) if (doc.Condition[o][key] !== undefined && o !== op) { delete doc.Condition[o][key]; if (!Object.keys(doc.Condition[o]).length) delete doc.Condition[o]; }
+  doc.Condition[op] = { ...(doc.Condition[op] || {}), [key]: value };
+}
+
 /** Third-party access: one row per source outside your estate (outside accounts, anyone, CI and identity providers). */
 const OUTSIDE = new Set(['external-account', 'public', 'oidc', 'saml', 'unknown']);
 export async function thirdParties(user, q = '') {
   const m = await trustMap(user, q, { limit: 0 });
-  return m.summary.filter((g) => OUTSIDE.has(g.group)).flatMap((g) => g.sources.map((s) => ({ ...s, group: g.group })));
+  return m.summary.filter((g) => OUTSIDE.has(g.group)).flatMap((g) => g.sources.filter((s) => !s.named?.inOrg).map((s) => ({ ...s, group: g.group })));
 }
 export function thirdPartyCsv(rows) {
   const KIND = { 'external-account': 'Outside AWS account', public: 'Anyone', oidc: 'CI or web identity', saml: 'SAML / Identity Center', unknown: 'Deleted identity' };

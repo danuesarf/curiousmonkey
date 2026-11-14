@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
-import { trustMap, trustWays, trustGroups, thirdParties, thirdPartyCsv, toCsv, sourcesCsv, expectedRules, trustIndex } from '../trustmap.js';
+import { trustMap, trustWays, trustGroups, thirdParties, thirdPartyCsv, toCsv, sourcesCsv, expectedRules, trustIndex, trustChain, suggestTrust } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -583,6 +583,16 @@ data.get('/trust/sources.csv', requirePerm('view'), wrap(async (req, res) => {
 data.get('/trust/groups', requirePerm('view'), wrap(async (req, res) => {
   const int = (v, d) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d);
   res.json(await trustGroups(req.user, trustQ(req), { sel: trustSel(req), page: int(req.query.page, 0), size: int(req.query.size, 50) }));
+}));
+// where a source leads next (role chaining), and a tighter trust policy for one role from what was seen
+data.get('/trust/chain', requirePerm('view'), wrap(async (req, res) => {
+  const sel = z.string().min(3).max(300).parse(req.query.sel);
+  res.json(await trustChain(req.user, sel));
+}));
+data.get('/trust/suggest/:roleId', requirePerm('view'), wrap(async (req, res) => {
+  const r = await suggestTrust(req.user, uuid.parse(req.params.roleId));
+  if (!r) throw NotFound();
+  res.json(r);
 }));
 // third-party access: one row per source from outside your estate, with its name, owner, reach, guards and use
 data.get('/trust/third-parties', requirePerm('view'), wrap(async (req, res) => { res.json({ items: await thirdParties(req.user, trustQ(req)) }); }));
