@@ -22,7 +22,13 @@ async function pastShares(daysAgo, accountIds) {
 /** Which identities: everything (default), roles only, or IAM users only. */
 export const whoSql = (who, col = 'r.kind') => (who === 'roles' ? `${col} <> 'iam-user'` : who === 'users' ? `${col} = 'iam-user'` : 'TRUE');
 
-export async function estate(user, who = 'all') {
+/**
+ * The estate on the radar. `asOf` (days ago, 0-90) replays it from the daily snapshots: where each account was then,
+ * its trail from 7 and 30 days before that, its calls that day and its pings in the week before. Role counts, risk and
+ * unidentified calls are always today's.
+ */
+export async function estate(user, who = 'all', asOf = 0) {
+  const back = Math.max(0, Math.min(90, Math.floor(Number(asOf) || 0)));
   const p = [];
   const accts = (await query(
     `SELECT a.*, count(r.id)::int AS roles, coalesce(sum(r.granted_count),0)::bigint AS granted, coalesce(sum(r.used_count),0)::bigint AS used,
@@ -34,12 +40,13 @@ export async function estate(user, who = 'all') {
       WHERE ${scopeSql(user, 'a.id', p)} AND a.status <> 'planned' GROUP BY a.id ORDER BY a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
   const [act, d7, d30, pings, hist] = await Promise.all([
-    ids.length ? query(`SELECT r.account_id, sum(d.count)::bigint AS n FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE d.day >= current_date - 1 AND r.account_id = ANY($1) AND ${whoSql(who)} GROUP BY 1`, [ids]) : { rows: [] },
-    pastShares(7, ids), pastShares(30, ids),
+    ids.length ? query(`SELECT r.account_id, sum(d.count)::bigint AS n FROM activity_daily d JOIN roles r ON r.id=d.role_id WHERE d.day BETWEEN current_date - 1 - $2::int AND current_date - $2::int AND r.account_id = ANY($1) AND ${whoSql(who)} GROUP BY 1`, [ids, back]) : { rows: [] },
+    pastShares(back + 7, ids), pastShares(back + 30, ids),
     ids.length ? query(`SELECT account_id, count(*)::int AS n, min(CASE severity WHEN 'high' THEN 0 WHEN 'warn' THEN 1 WHEN 'info' THEN 2 ELSE 3 END) AS worst
-                          FROM changes WHERE at > now() - interval '7 days' AND account_id = ANY($1) GROUP BY 1`, [ids]) : { rows: [] },
+                          FROM changes WHERE at > now() - make_interval(days => 7 + $2) AND at <= now() - make_interval(days => $2) AND account_id = ANY($1) GROUP BY 1`, [ids, back]) : { rows: [] },
     historyFor(accts),
   ]);
+  const then = back ? await pastShares(back, ids) : null;
   const actBy = new Map(act.rows.map((r) => [r.account_id, num(r.n)]));
   const pingBy = new Map(pings.rows.map((r) => [r.account_id, r]));
   const sev = ['high', 'warn', 'info', 'good'];
@@ -48,7 +55,8 @@ export async function estate(user, who = 'all') {
     return {
       id: a.id, name: a.name, awsAccountId: a.account_id, environment: a.environment, ou: a.ou || null,
       roles: a.roles, granted: num(a.granted), used: num(a.used), unused: num(a.unused), excess: num(a.granted) - num(a.used),
-      never: a.med == null ? null : Number(a.med), pooled: share(a.unused, a.granted), never7: d7.get(a.id)?.never ?? null, never30: d30.get(a.id)?.never ?? null, excess30: d30.get(a.id)?.excess ?? null,
+      never: then ? then.get(a.id)?.never ?? null : a.med == null ? null : Number(a.med), pooled: then ? then.get(a.id)?.pooled ?? null : share(a.unused, a.granted),
+      ...(then ? { excess: then.get(a.id)?.excess ?? 0, absent: !then.has(a.id) } : {}), never7: d7.get(a.id)?.never ?? null, never30: d30.get(a.id)?.never ?? null, excess30: d30.get(a.id)?.excess ?? null,
       high: a.high, unidentified: a.unidentified, calls24h: actBy.get(a.id) || 0,
       pings: pingBy.get(a.id)?.n || 0, pingSeverity: pingBy.has(a.id) ? sev[pingBy.get(a.id).worst] : null,
       isNew: Date.now() - new Date(a.created_at).getTime() < 7 * 864e5,
@@ -57,6 +65,7 @@ export async function estate(user, who = 'all') {
   });
   const withPast = out.filter((a) => a.excess30 != null);
   return {
+    asOf: back,
     accounts: out,
     totals: {
       accounts: out.length, roles: out.reduce((t, a) => t + a.roles, 0), excess: out.reduce((t, a) => t + a.excess, 0),

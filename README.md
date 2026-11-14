@@ -212,6 +212,10 @@ Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `r
 
 The Trust map is the one full list of who can get in. Space's panels and a role's Overview show the top few, worst first, with a link to the Trust map filtered to that account or role.
 
+### Radar and Space
+
+Radar's distance is the median role's never-called share (the pooled share is in the account card); *Replay* shows the estate up to 90 days back. Space shows any of the last 30 days, finds things on the map, and keeps what is picked in the address. Both have a *Wall view* for a monitor (`wall=1` in the address; Esc to leave).
+
 ## Google Cloud
 
 Connect a Google Cloud organization, folder or project on the Accounts page, *Google Cloud* tab (*Connect Google Cloud*). Accounts and Roles both have an *AWS | Google Cloud* tab; connections are only managed on Accounts. Curious Monkey reads IAM only: the hierarchy, every IAM policy (organization, folders, projects, service accounts), service accounts and their user-managed key metadata, custom and predefined role definitions, and workload identity pools and providers. **Audit logs are not read yet**, so Google Cloud shows what each identity *can* do and where it can come from, not what it used.

@@ -7,7 +7,7 @@
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in the shown time zone); play steps through them.
-import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, paint, syncUrl } from '../lib.js';
+import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, TZ, paint, syncUrl, wallMode } from '../lib.js';
 import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
 
@@ -242,7 +242,9 @@ function accountModel(d) {
 export async function spacePage(ctx) {
   const view = ctx.params.get('view') === 'account' ? 'account' : 'estate';
   // both views are fetched together and remembered briefly, so zooming into an account and back does not wait twice
-  const who = whoOf(ctx.params), wq = whoQs(who);
+  // ?day=N: the 24 hours of N days ago (hourly counts are kept 30 days); links and fetches carry it along
+  const day = Math.max(0, Math.min(29, Math.floor(Number(ctx.params.get('day')) || 0)));
+  const who = whoOf(ctx.params), wa = `${whoQs(who, '&')}${day ? `&day=${day}` : ''}`, wq = wa ? `?${wa.slice(1)}` : '';
   const wanted = view === 'account' && ctx.params.get('account') ? getCached(`/space/account/${ctx.params.get('account')}${wq}`) : null;
   wanted?.catch(() => {});
   const [est, envs, gcpData] = await Promise.all([getCached(`/space${wq}`), loadEnvironments(), view === 'estate' && who !== 'users' ? getCached('/space/gcp').catch(() => null) : null]);
@@ -669,7 +671,7 @@ export async function spacePage(ctx) {
     renderBar();
     // what is shown goes in the address, so reload and a copied link give the same view
     if (!ctx.inWindow) syncUrl({ view: M.view === 'account' ? 'account' : null, account: M.view === 'account' ? accountId : null, who: who === 'all' ? null : who,
-      sel: st.sel, zone: st.zone || null, dir: st.dir === 'both' ? null : st.dir, hour: st.hour === 23 ? null : st.hour });
+      sel: st.sel, zone: st.zone || null, dir: st.dir === 'both' ? null : st.dir, day: day || null, hour: st.hour === 23 ? null : st.hour });
   }
   let sideKey = null;
   // When a panel is rebuilt, the control that had focus is found again in the new one by what it says
@@ -871,7 +873,7 @@ export async function spacePage(ctx) {
                   window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }
                 : { label: `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`, meta: `from ${x.gcpProject}`, pick: l.id, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))),
               empty: 'No path to or from Google Cloud.' }] : [])],
-          actions: [['Zoom in', `#/space?view=account&account=${g.id}${whoQs(who, '&')}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
+          actions: [['Zoom in', `#/space?view=account&account=${g.id}${wa}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
     const s = M.sources.find((x) => x.id === id);
@@ -1038,6 +1040,22 @@ export async function spacePage(ctx) {
   }
 
   // ---------- beside the plane ----------
+  // find on the map: type a name, pick it, and the view flies to it
+  function findBox() {
+    const all = M.view === 'estate'
+      ? [...M.groups.filter((g) => !g.planned).map((g) => ({ id: g.id, label: g.name, meta: g.cloud === 'gcp' ? 'Google Cloud project' : 'account' })), ...M.sources.map((x) => ({ id: x.id, label: x.label, meta: 'outside your org' }))]
+      : [...M.roles.map((r) => ({ id: r.id, label: pretty(r.name).label, meta: 'role' })), ...M.sources.map((x) => ({ id: x.id, label: x.label, meta: 'outside your org' }))];
+    const input = h('input', { type: 'search', class: 'sp-find', placeholder: `Find ${M.view === 'estate' ? 'an account' : 'a role'} on the map`, 'aria-label': 'Find on the map', autocomplete: 'off' });
+    const list = h('div', { class: 'sp-find-list', role: 'listbox' });
+    const choose = (it) => { input.value = ''; list.replaceChildren(); st.sel = it.id; st.lit = true; st.filter = ''; st.showAll = false; if (!flyTo(it.id)) render(); };
+    const draw = () => { const q = input.value.trim().toLowerCase(); const m = q ? all.filter((x) => x.label.toLowerCase().includes(q)).slice(0, 8) : [];
+      list.replaceChildren(...(q && !m.length ? [h('p', { class: 'tiny muted' }, 'Nothing by that name here.')] : m.map((it) => h('button', { class: 'sp-row', role: 'option', onClick: () => choose(it) },
+        h('span', { class: 'sp-row-body' }, h('span', { class: 'sp-row-name' }, it.label), h('span', { class: 'sp-row-meta' }, it.meta)))))); };
+    input.addEventListener('input', draw);
+    input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { const q = input.value.trim().toLowerCase(), it = all.find((x) => x.label.toLowerCase().includes(q)); if (q && it) { ev.preventDefault(); choose(it); } } else if (ev.key === 'Escape') { input.value = ''; draw(); } });
+    return h('div', { class: 'stack', style: 'gap:4px' }, input, list);
+  }
+
   function renderSide() {
     const focus = st.zone, selRole = M.view === 'account' ? M.byRole.get(st.sel) : null;
     const card = (on, chip, name, val, meta, onClick) => h('button', { class: 'sp-zonecard', 'aria-pressed': String(on), onClick }, h('span', { class: 'sp-chip', style: chip }),
@@ -1046,7 +1064,7 @@ export async function spacePage(ctx) {
       h('span', { class: 'sp-row-body' }, h('span', { class: 'sp-row-name' }, name), h('span', { class: 'sp-row-meta' }, meta)), h('span', { class: 'mono sp-row-val' }, val));
     const views = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Space view' },
       h('button', { role: 'tab', 'aria-selected': String(M.view === 'estate'), onClick: () => go(`#/space${wq}`) }, 'Estate'),
-      h('button', { role: 'tab', 'aria-selected': String(M.view === 'account'), onClick: () => go(`#/space?view=account&account=${accountId}${whoQs(who, '&')}`) }, 'One account'));
+      h('button', { role: 'tab', 'aria-selected': String(M.view === 'account'), onClick: () => go(`#/space?view=account&account=${accountId}${wa}`) }, 'One account'));
     // who can get in, where it can go, or both
     const picked = M.view === 'estate' && M.by.has(st.sel) ? M.by.get(st.sel) : null;
     const whose = M.view === 'account' ? M.account.name : picked ? picked.name : 'your accounts';
@@ -1061,7 +1079,7 @@ export async function spacePage(ctx) {
         dirBtn('out', 'Out', `Where ${whose} can go: other accounts whose roles trust it, or that it chained into`)),
       M.view === 'estate' && !picked && st.dir !== 'both' ? h('p', { class: 'faint tiny', style: 'margin:4px 0 0' }, st.dir === 'in' ? 'Into your org from outside. Pick an account for its own.' : 'Between your accounts. Pick an account for its own.') : null);
     const pickWho = (k) => { const p = new URLSearchParams(ctx.params); if (k === 'all') p.delete('who'); else p.set('who', k); go(`#/space?${p}`); };
-    const tabs = h('div', { class: 'stack', style: 'gap:12px' }, views, whoControl(who, pickWho), dirs);
+    const tabs = h('div', { class: 'stack', style: 'gap:12px' }, views, findBox(), whoControl(who, pickWho), dirs);
     if (M.view === 'estate') {
       const zones = M.zones.map((z) => {
         if (z.cloud === 'gcp') return null;
@@ -1082,7 +1100,7 @@ export async function spacePage(ctx) {
           h('div', { class: 'sp-list' }, ...projects.map((g) => row(st.sel === g.id, `background:${ENV[g.env].base};border-radius:2px;outline:1px solid ${GCP}`, g.name, `${ENV[g.env].name}${g.high ? ` · ${g.high} high risk` : ''}`, String(g.roles), () => set({ sel: st.sel === g.id ? null : g.id }))))] : []));
     } else {
       const cur = selRole?.cluster || M.groups[0];
-      const accounts = h('select', { class: 'sp-select', 'aria-label': 'Account', onChange: (ev) => go(`#/space?view=account&account=${ev.target.value}${whoQs(who, '&')}`) },
+      const accounts = h('select', { class: 'sp-select', 'aria-label': 'Account', onChange: (ev) => go(`#/space?view=account&account=${ev.target.value}${wa}`) },
         ...est.accounts.filter((a) => !a.planned).map((a) => h('option', { value: a.id, selected: a.id === accountId }, a.name)));
       left.replaceChildren(tabs, accounts, h('h2', { class: 'eyebrow' }, 'Roles by the service they call most'),
         h('div', { class: 'sp-cards' }, ...M.groups.map((g) => card(cur === g, `border:2px solid ${ENV[g.env].base};border-radius:50%`, g.label, kfmt(g.calls7), `${g.roles.length + g.more} roles`, () => g.roles[0] && set({ sel: g.roles[0].id })))),
@@ -1137,9 +1155,12 @@ export async function spacePage(ctx) {
         onInput: (ev) => { stop(); set({ hour: Number(ev.target.value), playing: false }); } });
       const when = h('span', { class: 'sp-when' }), what = h('span');
       const fills = perHour.map((v) => h('span', { class: 'sp-fill', style: `height:${Math.max(3, Math.round((v / max) * 28))}px` }));
-      bar.replaceChildren(play, h('div', { class: 'sp-bar-body' }, h('div', { class: 'sp-bar-head' }, when, what),
+      const daySel = h('select', { class: 'sp-day', 'aria-label': 'Which day to show, hour by hour' }, ...Array.from({ length: 30 }, (_, d) => h('option', { value: d, selected: d === day },
+        d === 0 ? 'Last 24 h' : d === 1 ? 'Day before' : new Date(M.hourStart + 23 * 36e5 - (d - day) * 864e5).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: TZ }))));
+      daySel.addEventListener('change', () => { stop(); const p = new URLSearchParams(location.hash.split('?')[1] || ''); +daySel.value ? p.set('day', daySel.value) : p.delete('day'); p.delete('hour'); go(`#/space?${p}`); });
+      bar.replaceChildren(h('div', { class: 'stack', style: 'gap:6px;align-items:center' }, play, daySel), h('div', { class: 'sp-bar-body' }, h('div', { class: 'sp-bar-head' }, when, what),
         h('div', { class: 'sp-scrub' }, ...fills.map((fl, i) => { const ev = M.events.find((e) => e.hour === i); return h('span', { class: 'sp-col' }, fl, ev ? h('span', { class: 'sp-mark', style: `background:${TONE[ev.tone] || '#fff'}` }) : null); }), input),
-        h('div', { class: 'sp-ticks' }, ...[0, 6, 12, 18, 23].map((i) => h('span', null, i === 23 ? 'now' : hourLabel(i))))));
+        h('div', { class: 'sp-ticks' }, ...[0, 6, 12, 18, 23].map((i) => h('span', null, i === 23 && !day ? 'now' : hourLabel(i))))));
       tl = { play, input, when, what, fills, perHour, shown: null, playing: null };
     }
     if (tl.playing !== st.playing) {
@@ -1153,7 +1174,7 @@ export async function spacePage(ctx) {
       if (Number(tl.input.value) !== hour) tl.input.value = hour;
       tl.input.setAttribute('aria-valuetext', `${hourLabel(hour)} ${TZ_LABEL}`);
       tl.fills.forEach((fl, i) => fl.classList.toggle('on', i === hour));
-      tl.when.textContent = `${hourLabel(hour)}–${hourLabel(hour + 1)} ${TZ_LABEL}${hour === 23 ? ' · NOW' : ''} · ${kfmt(tl.perHour[hour])} CALLS`;
+      tl.when.textContent = `${hourLabel(hour)}–${hourLabel(hour + 1)} ${TZ_LABEL}${hour === 23 && !day ? ' · NOW' : ''} · ${kfmt(tl.perHour[hour])} CALLS`;
       // each event's own text already says what kind it is
       tl.what.textContent = nowEv.length ? nowEv.map((e) => e.text).join(' · ') : 'nothing flagged this hour';
       tl.what.style.color = nowEv.length ? paint(TONE[nowEv[0].tone] || '#fff') : 'var(--faint)';
@@ -1174,11 +1195,14 @@ export async function spacePage(ctx) {
         ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })]].map(btn)),
       h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Zoom'), ...[['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })],
           ['⌖', 'Go to what is picked (or press F, or double-click it)', () => { if (st.sel) flyTo(st.sel); }]].map(btn),
-        h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
+        wall.button, h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
   }
 
   // a change picked in the bell that this scene shows (the last 24 hours) is selected here, at its hour
+  const wall = wallMode(ctx);
   ctx.setChangePicker((c) => { const e = M.events.find((x) => x.id === `c${c.id}`); if (!e) return false; set({ sel: e.target || st.sel, hour: e.hour }); return true; });
   render();
+  // on the wall the day plays by itself
+  if (wall.on && !st.playing) { st.playing = true; st.timer = setInterval(() => { if (!page.isConnected) return stop(); set({ hour: (st.hour + 1) % 24 }); }, 2400); render(); }
   return page;
 }

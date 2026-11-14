@@ -572,7 +572,10 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 // ---- radar v3 ----
 const whoOf = (req) => (['roles', 'users'].includes(req.query.who) ? req.query.who : 'all');
 // Radar, like Space, is worked out at most every few seconds per viewer scope and kept warm while someone looks
-data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`radar:${scopeKey(req.user)}:${whoOf(req)}`, () => estate(req.user, whoOf(req))))));
+data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => {
+  const asOf = Math.max(0, Math.min(90, Number.parseInt(req.query.asof, 10) || 0));     // days ago, replayed from the daily snapshots
+  res.json(await cachedWarm(`radar:${scopeKey(req.user)}:${whoOf(req)}:${asOf}`, () => estate(req.user, whoOf(req), asOf)));
+}));
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
   const r = await cachedWarm(`radar:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => accountRadar(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
@@ -604,10 +607,12 @@ data.get('/events.csv', requirePerm('view'), wrap(async (req, res) => {
   res.send(eventsCsv(r.items));
 }));
 // Space is worked out at most every few seconds per viewer scope and kept warm while someone is looking (src/cache.js)
-data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}${whoOf(req) === 'all' ? '' : `:${whoOf(req)}`}`, () => spaceEstate(req.user, whoOf(req))))));
+// ?day=N shows the 24 hours of N days ago (up to 29: hourly counts are kept 30 days)
+const dayOf = (req) => Math.max(0, Math.min(29, Number.parseInt(req.query.day, 10) || 0));
+data.get('/space', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`space:${scopeKey(req.user)}${whoOf(req) === 'all' ? '' : `:${whoOf(req)}`}:${dayOf(req)}`, () => spaceEstate(req.user, whoOf(req), dayOf(req))))));
 data.get('/space/account/:id', requirePerm('view'), wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
-  const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => spaceAccount(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
+  const r = await cachedWarm(`space:${id}:${scopeKey(req.user)}:${whoOf(req)}:${dayOf(req)}`, () => spaceAccount(req.user, id, whoOf(req), dayOf(req))); if (!r) throw NotFound(); res.json(r);
 }));
 data.get('/changes', requirePerm('view'), wrap(async (req, res) => {
   const accountId = req.query.account ? uuid.parse(req.query.account) : null;

@@ -819,3 +819,13 @@ pre.diff .fold{color:var(--faint);font-style:italic}
 }
 /* Space's sidebar scrolls as one column; its lists never collapse to nothing */
 .space-page .space-layout>aside .sp-list{flex:0 0 auto;overflow:visible}
+.replay{position:absolute;right:16px;bottom:12px;display:flex;align-items:center;gap:8px;background:rgba(4,14,10,.88);border:1px solid var(--edge);padding:6px 10px}.replay input{width:180px}.replay .mono{min-width:120px}
+@media (max-width:760px){.replay input{width:110px}.replay .mono{min-width:0}}
+.sp-day{font:inherit;font-size:11px;background:var(--panel);color:var(--ink);border:1px solid var(--edge);padding:2px 4px;max-width:90px}
+.sp-find-list{display:flex;flex-direction:column;gap:2px}
+/* wall display: the scene alone */
+body.wall .rail,body.wall .status,body.wall .scene-layout>aside{display:none!important}
+body.wall .main{padding:0}
+body.wall .radar3 .radar-layout,body.wall .space-page .space-layout{grid-template-columns:minmax(0,1fr)!important;height:100vh!important}
+body.wall .radar3 .radar-layout>.scene,body.wall .space-page .space-layout>.scene{height:100vh!important}
+.wall-btn{white-space:nowrap}

@@ -2,7 +2,7 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, getCached, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1, syncUrl } from '../lib.js';
+import { h, svg, get, getCached, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1, syncUrl, wallMode } from '../lib.js';
 import { go, changeRow, refreshBell } from '../main.js';
 
 const CX = 400, CY = 400;
@@ -180,16 +180,20 @@ function feedSection(title, F, onPick) {
 // ---------------------------------------------------------------- estate
 async function estateView(ctx, shell) {
   ctx.setCrumbs('Radar', 'Estate');
-  const [E, F] = await Promise.all([get(`/radar/estate${whoQs(ctx.who)}`), get(`/changes?days=${feedDays(ctx)}`)]);
+  // replay: the estate as it was N days ago, from the daily snapshots (0 = now)
+  let asOf = Math.max(0, Math.min(90, Math.floor(Number(ctx.params.get('asof')) || 0)));
+  const estateUrl = () => `/radar/estate?${new URLSearchParams({ ...(ctx.who === 'all' ? {} : { who: ctx.who }), ...(asOf ? { asof: asOf } : {}) })}`;
+  let [E, F] = await Promise.all([get(estateUrl()), get(`/changes?days=${feedDays(ctx)}`)]);
   // looking at the estate's feed counts as seeing it: the bell empties (this page still marks what was new)
   post('/changes/seen').then(refreshBell).catch(() => {});
-  const accounts = E.accounts;
+  let accounts = E.accounts;
   if (!accounts.length) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet. ', h('a', { href: '#/accounts/new' }, 'Connect an AWS account'))); return; }
-  for (const a of accounts) { a.d30 = drift(a.never, a.never30); a.d7 = drift(a.never, a.never7); }
+  let maxEx = 1, maxAct = 1;
+  const prep = () => { for (const a of accounts) { a.d30 = drift(a.never, a.never30); a.d7 = drift(a.never, a.never7); } maxEx = Math.max(1, ...accounts.map((a) => a.excess)); maxAct = Math.max(1, ...accounts.map((a) => a.calls24h)); };
+  prep();
   let sel = accounts.find((a) => a.id === ctx.params.get('sel')) || null;
   if (['env', 'ou'].includes(ctx.params.get('group'))) ui.group = ctx.params.get('group');
   if (ctx.params.has('chip') || ctx.params.has('sel')) ui.chip = ctx.params.get('chip') || null;
-  const maxEx = Math.max(1, ...accounts.map((a) => a.excess)), maxAct = Math.max(1, ...accounts.map((a) => a.calls24h));
   const CHIPS = [['worse', 'Getting worse', '#f0b45a', (a) => (a.d30 ?? 0) > 0.04], ['better', 'Improving', '#6fe3b0', (a) => (a.d30 ?? 0) < -0.04],
     ['pinged', 'Has pings', '#ff5a4f', (a) => a.pings > 0], ['loading', 'Loading', '#f6e016', (a) => !a.complete]];
   const svgEl = stage('Estate radar: each contact is an AWS account. Distance is how much of its median role is never called; size is its excess permissions; trails show where it was 7 and 30 days ago.');
@@ -200,7 +204,7 @@ async function estateView(ctx, shell) {
     textScale(svgEl);
     if (ui.chip && !CHIPS.some((c) => c[0] === ui.chip)) ui.chip = null;
     // what is shown goes in the address: reload and a copied link give the same view
-    if (!ctx.inWindow) syncUrl({ who: ctx.who === 'all' ? null : ctx.who, feed: F.days === 7 ? null : F.days, group: ui.group === 'env' ? null : ui.group, chip: ui.chip, sel: sel?.id });
+    if (!ctx.inWindow) syncUrl({ who: ctx.who === 'all' ? null : ctx.who, feed: F.days === 7 ? null : F.days, asof: asOf || null, group: ui.group === 'env' ? null : ui.group, chip: ui.chip, sel: sel?.id });
     const cf = ui.chip ? CHIPS.find((c) => c[0] === ui.chip)[3] : null;
     const key = (a) => (ui.group === 'ou' ? a.ou || 'No OU set' : a.environment);
     const order = ui.group === 'ou' ? [...new Set(accounts.map(key))].sort() : [...new Set(accounts.map(key))].sort((x, y) => (envs().findIndex((e) => e.id === x) + 1 || 99) - (envs().findIndex((e) => e.id === y) + 1 || 99));
@@ -215,9 +219,10 @@ async function estateView(ctx, shell) {
     top();
     for (const a of accounts) if (!cf || cf(a)) trail(kids, a.ang, a.never30, a.never7, a.never, a.d30 ?? 0);
     for (const a of accounts) {
+      if (a.absent) continue;        // replaying a day before its first snapshot: it was not on the radar yet
       const on = !cf || cf(a);
       contact(kids, { d: shape('custom', a.x, a.y, a.s), x: a.x, y: a.y, s: a.s, fill: !a.complete ? '#030d08' : a.high >= 8 ? '#ff8a7a' : '#6fe3b0', stroke: !a.complete ? '#f6e016' : null,
-        base: on ? 0.45 : 0.1, act: on ? a.calls24h / maxAct : 0, ang: a.ang, sel: sel === a, isNew: a.isNew,
+        base: a.absent ? 0.06 : on ? 0.45 : 0.1, act: on && !a.absent ? a.calls24h / maxAct : 0, ang: a.ang, sel: sel === a, isNew: a.isNew,
         title: `${a.name} · ${pl(a.roles, 'role')} · median role ${Math.round((a.never ?? 0) * 100)}% never called · ${headText(a.d30)} in 30 days${a.complete ? '' : ` · ${a.progress}% read`}`,
         onClick: () => { sel = a; draw(); card(); } });
     }
@@ -241,7 +246,8 @@ async function estateView(ctx, shell) {
       })),
       h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', { class: 'eyebrow' }, ui.chip === 'worse' ? 'ACCOUNTS · WORST HEADING FIRST' : ui.chip === 'better' ? 'ACCOUNTS · MOST IMPROVED FIRST' : 'ACCOUNTS · MOST EXCESS FIRST'),
         h('span', { class: 'mono tiny muted' }, String(accounts.filter((a) => !cf || cf(a)).length))));
-    const listed = accounts.filter((a) => !cf || cf(a)).sort((x, y) => (ui.chip === 'better' ? (x.d30 ?? 0) - (y.d30 ?? 0) : ui.chip === 'worse' ? (y.d30 ?? 0) - (x.d30 ?? 0) : y.excess - x.excess));
+    const q = find.value.trim().toLowerCase();
+    const listed = accounts.filter((a) => (!cf || cf(a)) && (!q || `${a.name} ${a.awsAccountId} ${a.ou || ''}`.toLowerCase().includes(q))).sort((x, y) => (ui.chip === 'better' ? (x.d30 ?? 0) - (y.d30 ?? 0) : ui.chip === 'worse' ? (y.d30 ?? 0) - (x.d30 ?? 0) : y.excess - x.excess));
     listEl.replaceChildren(...listed.map((a) => h('button', { class: 'rank-row', 'aria-pressed': String(sel === a), onClick: () => { sel = sel === a ? null : a; draw(); card(); } },
       h('span', { class: 'rbody' },
         h('span', { class: 'rname' }, h('span', { class: 'n' }, a.name), a.pings > 0 && pill(`${a.pings} PING${a.pings > 1 ? 'S' : ''}`, SEV[a.pingSeverity])),
@@ -277,12 +283,48 @@ async function estateView(ctx, shell) {
   svgEl.addEventListener('click', unpick);
   const onKey = (ev) => { if (ev.key === 'Escape' && !ev.defaultPrevented && !document.querySelector('.win, .palette, dialog[open]')) unpick(); };
   document.addEventListener('keydown', onKey); ctx.onLeave?.(() => document.removeEventListener('keydown', onKey));
-  const T = E.totals;
-  shell.left.append(controls, listEl);
-  shell.scene.append(svgEl,
-    hudEl(`RADAR · ESTATE · ${num(T.accounts)} ACCOUNTS · ${num(T.roles)} ROLES`,
+  // find an account: filters the list; Enter picks the first match
+  const find = h('input', { type: 'search', placeholder: 'Find an account', 'aria-label': 'Find an account' });
+  find.addEventListener('input', () => draw());
+  find.addEventListener('keydown', (ev) => { if (ev.key !== 'Enter') return; const first = listEl.querySelector('.rank-row'); if (first) { ev.preventDefault(); first.click(); } });
+  shell.left.append(controls, ...(accounts.length > 6 ? [find] : []), listEl);
+  const wall = wallMode(ctx);
+  const dayLabel = (n) => (n ? new Date(Date.now() - n * 864e5).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) : 'today');
+  const hudNow = () => { const T = E.totals;
+    const gone = accounts.filter((a) => a.absent).length;
+    return hudEl(`RADAR · ESTATE${asOf ? ` · REPLAY ${dayLabel(asOf).toUpperCase()}` : ''} · ${num(T.accounts - gone)} ACCOUNTS${gone ? ` (${gone} NOT YET READ THEN)` : ''} · ${num(T.roles)} ROLES`,
       `${accounts.filter((a) => (a.d30 ?? 0) > 0.04).length} DRIFTING OUT · ${accounts.filter((a) => (a.d30 ?? 0) < -0.04).length} MOVING IN · ${num(F.total ?? F.items.length)} CHANGES · ${RANGE[F.days].toUpperCase()}`,
-      'CONTACT = ACCOUNT · DISTANCE = MEDIAN ROLE, NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
+      'CONTACT = ACCOUNT · DISTANCE = MEDIAN ROLE, NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'); };
+  let hud = hudNow();
+  // the replay: a slider over the last 90 days (right = today) and a play button that runs it forward to today
+  let playing = null, loading = null;
+  const range = h('input', { type: 'range', min: 0, max: 90, step: 1, value: 90 - asOf, 'aria-label': 'Replay: how many days ago to show the estate' });
+  const when = h('span', { class: 'mono tiny' });
+  const playBtn = h('button', { class: 'btn sm', 'aria-pressed': 'false' }, 'Play');
+  const showWhen = () => { when.textContent = asOf ? `${dayLabel(asOf)} · ${asOf} day${asOf === 1 ? '' : 's'} ago` : 'Now'; range.setAttribute('aria-valuetext', when.textContent); };
+  async function goBack(n) {
+    asOf = n; showWhen();
+    const mine = (loading = get(estateUrl()));
+    const next = await mine; if (loading !== mine) return;
+    E = next; accounts = E.accounts; prep();
+    sel = sel && accounts.find((a) => a.id === sel.id);
+    const fresh = hudNow(); hud.replaceWith(fresh); hud = fresh;
+    draw(); card();
+  }
+  const stopPlay = () => { if (playing) { clearInterval(playing); playing = null; playBtn.textContent = 'Play'; playBtn.setAttribute('aria-pressed', 'false'); } };
+  let t = null;
+  range.addEventListener('input', () => { stopPlay(); const n = 90 - Number(range.value); asOf = n; showWhen(); clearTimeout(t); t = setTimeout(() => goBack(n), 120); });
+  playBtn.addEventListener('click', () => {
+    if (playing) return stopPlay();
+    if (!asOf) { range.value = 60; goBack(30); }
+    playBtn.textContent = 'Pause'; playBtn.setAttribute('aria-pressed', 'true');
+    playing = setInterval(() => { if (!svgEl.isConnected) return stopPlay(); if (!asOf) return stopPlay(); range.value = 90 - (asOf - 1); goBack(asOf - 1); }, 700);
+  });
+  ctx.onLeave?.(stopPlay);
+  showWhen();
+  const replay = h('div', { class: 'replay' }, h('span', { class: 'eyebrow' }, 'Replay'), playBtn, range, when, wall.button);
+  shell.scene.append(svgEl, replay,
+    hud,
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Account (size = excess)'], ['width:10px;height:10px;border-radius:50%;background:#ff8a7a', '8+ high-risk roles'],
       ['width:16px;border-top:2px solid #f0b45a', 'Drifting out (30 d)'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
       ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping: change that matters'],

@@ -224,6 +224,23 @@ export function poll(fn, ms) {
 // ---------- filters live in the address ----------
 /** A comma list in the address, as a Set */
 export const urlSet = (params, key) => new Set((params.get(key) || '').split(',').filter(Boolean));
+/**
+ * Wall display: the scene alone, full screen, for a monitor on the wall. On while the address has wall=1; the page
+ * refreshes itself every few minutes while visible. Returns a button that turns it on, and turns it off on Esc.
+ */
+export function wallMode(ctx, { refreshMs = 5 * 60_000 } = {}) {
+  const on = new URLSearchParams(location.hash.split('?')[1] || '').get('wall') === '1' && !ctx.inWindow;
+  const flip = (want) => { const [path, qs] = location.hash.split('?'); const p = new URLSearchParams(qs || ''); want ? p.set('wall', '1') : p.delete('wall'); location.hash = `${path}${p.toString() ? `?${p}` : ''}`; };
+  document.body.classList.toggle('wall', on);
+  if (on) {
+    const t = setInterval(() => { if (!document.hidden) ctx.reload(); }, refreshMs);
+    const key = (ev) => { if (ev.key === 'Escape' && !ev.defaultPrevented) flip(false); };
+    document.addEventListener('keydown', key);
+    ctx.onLeave?.(() => { clearInterval(t); document.removeEventListener('keydown', key); document.body.classList.remove('wall'); });
+  }
+  return { on, button: h('button', { class: 'btn sm wall-btn', title: on ? 'Leave the wall display (Esc)' : 'Wall display: the scene alone, full screen, refreshing itself', onClick: () => flip(!on) }, on ? 'Exit wall view' : 'Wall view') };
+}
+
 /** Writes the page's filters into the address (only the ones that are set), without adding a history entry or redrawing.
  *  Reload, a copied link and Back to this page then give the same view. */
 export function syncUrl(filters) {
@@ -233,6 +250,8 @@ export function syncUrl(filters) {
     if (val == null || val === false || val === '') continue;
     p.set(k, String(val));
   }
+  // the wall display is a way of showing the page, not one of its filters: it stays
+  if (new URLSearchParams(location.hash.split('?')[1] || '').get('wall') === '1') p.set('wall', '1');
   const [path] = location.hash.split('?'), qs = p.toString();
   history.replaceState(null, '', `${path}${qs ? `?${qs}` : ''}`);
 }

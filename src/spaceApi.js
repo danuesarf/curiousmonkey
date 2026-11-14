@@ -20,10 +20,13 @@ const MAX_STARS = 2400;            // across the estate; each account gets a sha
 const MAX_SOURCES = 14;            // identities outside the org drawn off the plane
 
 // 24 one-hour buckets ending with the current hour. Bucket 23 is the hour in progress.
+// A past day (1-29 days back) shows the same 24 hours of that day; the 7-day heights stay today's.
 const BUCKETS = `date_trunc('hour', now()) - interval '23 hours'`;
+// the window as literal timestamps (numbers only, computed here), so every query reads exactly the hours shown
+const since = (start) => `to_timestamp(${Number(start) / 1000})`, until = (start) => `to_timestamp(${(Number(start) + 864e5) / 1000})`;
 const bucketOf = (t, start) => Math.max(0, Math.min(23, Math.floor((new Date(t).getTime() - start) / 36e5)));
 
-async function hourStart() { return new Date((await query(`SELECT ${BUCKETS} AS t`)).rows[0].t).getTime(); }
+async function hourStart(day = 0) { return new Date((await query(`SELECT ${BUCKETS} - make_interval(days => $1) AS t`, [day])).rows[0].t).getTime(); }
 
 // The last 24 hours, hour by hour. From the hourly rollups (calls counted in the hour they were made; sessions that
 // made a call in it): a few thousand small rows. Only an account whose last day is still being counted (a few
@@ -39,20 +42,20 @@ async function hourlyByAccount(ids, start) {
     ready.length ? query(
       `SELECT c.account_id, c.hour AS h, COALESCE(s.sessions, 0)::int AS sessions, c.calls, c.denied
          FROM (SELECT account_id, hour, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
-                 FROM call_hourly WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) c
-         LEFT JOIN (SELECT account_id, hour, count(DISTINCT session_id) AS sessions FROM session_hours WHERE account_id = ANY($1) AND hour >= ${BUCKETS} GROUP BY 1, 2) s
+                 FROM call_hourly WHERE account_id = ANY($1) AND hour >= ${since(start)} AND hour < ${until(start)} GROUP BY 1, 2) c
+         LEFT JOIN (SELECT account_id, hour, count(DISTINCT session_id) AS sessions FROM session_hours WHERE account_id = ANY($1) AND hour >= ${since(start)} AND hour < ${until(start)} GROUP BY 1, 2) s
            ON s.account_id = c.account_id AND s.hour = c.hour`, [ready]) : { rows: [] },
     behind.length ? query(`SELECT account_id, date_trunc('hour', started_at) AS h, count(*)::int AS sessions, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
-                             FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [behind]) : { rows: [] }]);
+                             FROM track_sessions WHERE account_id = ANY($1) AND started_at >= ${since(start)} AND started_at < ${until(start)} GROUP BY 1, 2`, [behind]) : { rows: [] }]);
   return { rows: [...a.rows, ...b.rows] };
 }
 async function hourlyByRole(accountId, start) {
   const [ready] = await split([accountId], start);
   if (ready.length) return query(
     `SELECT role_id, hour AS h, sum(n)::bigint AS calls, COALESCE(sum(n) FILTER (WHERE denied), 0)::bigint AS denied
-       FROM call_hourly WHERE account_id=$1 AND hour >= ${BUCKETS} GROUP BY 1, 2`, [accountId]);
+       FROM call_hourly WHERE account_id=$1 AND hour >= ${since(start)} AND hour < ${until(start)} GROUP BY 1, 2`, [accountId]);
   return query(`SELECT role_id, date_trunc('hour', started_at) AS h, sum(calls)::bigint AS calls, sum(denied)::bigint AS denied
-                  FROM track_sessions WHERE account_id=$1 AND started_at >= ${BUCKETS} GROUP BY 1, 2`, [accountId]);
+                  FROM track_sessions WHERE account_id=$1 AND started_at >= ${since(start)} AND started_at < ${until(start)} GROUP BY 1, 2`, [accountId]);
 }
 
 /** Identities outside the org that can enter roles in these accounts, grouped by source, worst trust first. */
@@ -110,7 +113,7 @@ async function scannerOf(ids, start) {
   const pr = (await query(`SELECT id, key, role_id, sessions_count, last_seen FROM principals WHERE role_id = ANY($1)`, [roles.map((r) => r.id)])).rows
     .filter((p) => keys.has(p.key) || [...accts].some((a) => p.key.startsWith(`acct:${a}:`)));
   const hours = new Map();
-  if (pr.length) for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h FROM role_sessions WHERE started_at >= ${BUCKETS} AND principal_id = ANY($1) GROUP BY 1, 2`,
+  if (pr.length) for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h FROM role_sessions WHERE started_at >= ${since(start)} AND started_at < ${until(start)} AND principal_id = ANY($1) GROUP BY 1, 2`,
     [pr.map((p) => p.id)])).rows) { if (!hours.has(x.principal_id)) hours.set(x.principal_id, new Set()); hours.get(x.principal_id).add(bucketOf(x.h, start)); }
   const home = idRows.length ? (await query(`SELECT id FROM cloud_accounts WHERE account_id = ANY($1) AND id = ANY($2) LIMIT 1`, [[...accts], ids])).rows[0]?.id || null : null;
   const targets = roles.map((r) => {
@@ -129,15 +132,15 @@ async function events(where, p, start) {
   const rows = (await query(
     `SELECT c.id, c.account_id, c.role_id, c.kind, c.severity, c.title, c.detail, c.at, r.name AS role_name
        FROM changes c LEFT JOIN roles r ON r.id=c.role_id
-      WHERE c.at >= ${BUCKETS} AND ${where} ORDER BY c.at DESC LIMIT 40`, p)).rows;
+      WHERE c.at >= ${since(start)} AND c.at < ${until(start)} AND ${where} ORDER BY c.at DESC LIMIT 40`, p)).rows;
   return rows.map((c) => ({ id: `c${c.id}`, kind: c.kind, severity: c.severity, title: c.title, detail: c.detail, at: c.at, hour: bucketOf(c.at, start), accountId: c.account_id, roleId: c.role_id, roleName: c.role_name }));
 }
 
-export async function spaceEstate(user, who = 'all') {
+export async function spaceEstate(user, who = 'all', day = 0) {
   const p = [];
   const accts = (await query(`SELECT a.id, a.name, a.account_id, a.environment, a.ou, a.status, a.note FROM cloud_accounts a WHERE ${scopeSql(user, 'a.id', p)} ORDER BY a.environment, a.ou NULLS LAST, a.name`, p)).rows;
   const ids = accts.map((a) => a.id);
-  const start = await hourStart();
+  const start = await hourStart(day);
   if (!ids.length) return { accounts: [], chains: [], outside: { items: [], hidden: 0 }, scanner: null, events: [], hourStart: new Date(start).toISOString() };
 
   const [roles, hourly, entries, ev] = await Promise.all([
@@ -174,7 +177,7 @@ export async function spaceEstate(user, who = 'all') {
   const scanner = await scannerOf(ids, start);
   const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && !scanner.principalIds.has(e.id) && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
   if (cross.length) {
-    for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h, count(*)::int AS n FROM role_sessions WHERE started_at >= ${BUCKETS} AND principal_id = ANY($1) GROUP BY 1, 2`,
+    for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h, count(*)::int AS n FROM role_sessions WHERE started_at >= ${since(start)} AND started_at < ${until(start)} AND principal_id = ANY($1) GROUP BY 1, 2`,
       [cross.map(({ e }) => e.id)])).rows) { if (!todayOf.has(x.principal_id)) todayOf.set(x.principal_id, []); todayOf.get(x.principal_id).push([bucketOf(x.h, start), x.n]); }
   }
   for (const { e, c } of cross) {
@@ -214,11 +217,11 @@ export async function spaceEstate(user, who = 'all') {
 
 const svcOf = (action) => String(action).split(':')[0];
 
-export async function spaceAccount(user, accountId, who = 'all') {
+export async function spaceAccount(user, accountId, who = 'all', day = 0) {
   if (!inScope(user, accountId)) return null;
   const a = (await query('SELECT id, name, account_id, environment, ou FROM cloud_accounts WHERE id=$1', [accountId])).rows[0];
   if (!a) return null;
-  const start = await hourStart();
+  const start = await hourStart(day);
   const [roles, acts, hourly, chains, ev] = await Promise.all([
     // cold: no allowed call stored, ever. One index probe per role, not a sum over every role's history.
     query(`SELECT r.id, r.name, r.kind, r.risk, EXISTS (SELECT 1 FROM activity_daily d WHERE d.role_id = r.id AND d.count > 0) AS used

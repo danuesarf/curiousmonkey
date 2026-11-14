@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- **Radar replay.** A slider over the last 90 days and a Play button show the estate as it was, from the daily snapshots (`/radar/estate?asof=N`). Role counts and risk stay today's; accounts not yet read then are left off.
+- **Space, any of the last 30 days.** A day picker beside Play shows that day's 24 hours (`?day=N`); the 7-day heights stay current.
+- **Find on the map.** Space: type an account, role or outside identity and the view flies to it (also F, double-click, or the go-to button). Radar: *Find an account* filters the list; Enter picks the first.
+- **Wall view** on both pages: the scene alone, full screen, refreshing itself every 5 minutes; Space plays the day. Esc leaves it.
 - **Alert rules by account.** A rule can name accounts as well as environments (the shared account picker); with both, an account must match both. Migration 030.
 - **Old alert messages are removed.** Sent and failed messages go after 90 days, an hour at a time in batches; set it on the Alerts page (*Keep for*) or with `ALERT_KEEP_DAYS`. A match now records when it was queued (`alert_hits.queued_at`), so removing its message never posts it again.
 - **Trigram indexes for search.** `Ctrl K` matches `%text%`, which a normal index cannot serve. Migration 030 adds `pg_trgm` (a trusted extension; if the database user cannot add it, search works as before) and GIN trigram indexes on role names and ARNs, access key IDs and Google Cloud principals.

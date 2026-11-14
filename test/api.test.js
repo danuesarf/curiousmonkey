@@ -797,6 +797,18 @@ test('radar: distance is the median role; the heading is a daily line, for an ac
   assert.equal((await (await memberOfB('trail-b@example.com')).get(`/api/radar/trail?account=${accA}`)).status, 404, 'another account is out of scope');
 });
 
+test('radar replays the estate from snapshots; space shows a past day', async () => {
+  const now = (await owner.get('/api/radar/estate')).json, back = (await owner.get('/api/radar/estate?asof=30')).json;
+  assert.equal(now.asOf, 0); assert.equal(back.asOf, 30);
+  assert.equal((await owner.get('/api/radar/estate?asof=500')).json.asOf, 90, 'capped at 90 days');
+  const a = back.accounts.find((x) => x.id === accA);
+  const old = (await db.query(`SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY unused::float8 / granted) AS m FROM role_snapshots
+    WHERE account_id=$1 AND granted > 0 AND day = (SELECT max(day) FROM role_snapshots WHERE account_id=$1 AND day <= current_date - 30)`, [accA])).rows[0].m;
+  if (old == null) assert.equal(a.absent, true); else assert.ok(Math.abs(a.never - old) < 1e-9, 'where it was 30 days ago');
+  const today = (await owner.get('/api/space')).json, past = (await owner.get('/api/space?day=3')).json;
+  assert.equal(new Date(today.hourStart) - new Date(past.hourStart), 3 * 864e5, 'the same 24 hours, three days back');
+});
+
 test('alert rules by account; old messages are removed without posting their matches again', async () => {
   const rx = await receiver();
   const { alertsTick, pruneDeliveries } = await import('../src/alerts.js');
