@@ -25,6 +25,7 @@ export const config = {
     digestAt: env.ALERT_DIGEST_AT || '09:00',        // local time (SCAN_TZ) the daily digests go out
     timeoutMs: Number(env.ALERT_TIMEOUT_SECONDS || 10) * 1000,
     everyMs: Number(env.ALERT_EVERY_SECONDS || 60) * 1000,
+    keepDays: Number(env.ALERT_KEEP_DAYS || 90),      // sent and failed messages older than this are removed
   },
 
   // IAM user credentials: when an access key should be rotated, and when an unused key or password should go

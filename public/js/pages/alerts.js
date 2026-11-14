@@ -1,6 +1,6 @@
 // Admin → Alerts: where alerts go, the rules that send them, and what was sent.
 // Rules are evaluated by the worker every minute; instant rules post within about a minute, daily ones once a day.
-import { h, get, post, api, num, ago, fmtDate, toast, modal, field, envs, envName, loadEnvironments } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, modal, field, envs, envName, loadEnvironments, accountPicker } from '../lib.js';
 
 const KIND = { slack: 'Slack', webhook: 'Webhook' };
 const SEV = [['high', 'High only'], ['medium', 'Medium and high'], ['low', 'Every severity']];
@@ -17,8 +17,12 @@ const STARTERS = [
 export async function alertsPage(ctx) {
   await loadEnvironments().catch(() => {});
   const root = h('div', { class: 'stack-lg' });
-  let d;
-  async function load() { d = await get('/alerts'); draw(); }
+  let d, accounts = [];
+  async function load() {
+    [d, accounts] = await Promise.all([get('/alerts'), get('/accounts').then((x) => x.items.filter((a) => a.status !== 'planned')).catch(() => [])]);
+    draw();
+  }
+  const acctName = (id) => accounts.find((a) => a.id === id)?.name || '(removed account)';
 
   // ---- destinations ----
   function destinationForm(prev) {
@@ -59,7 +63,7 @@ export async function alertsPage(ctx) {
   // ---- rules ----
   function ruleForm(prev, preset = {}) {
     if (!d.destinations.length) return toast('Add a destination first: rules need somewhere to post.', true);
-    const v = { mode: 'instant', minSeverity: 'high', changeKinds: [], environments: [], enabled: true, ...preset, ...(prev || {}) };
+    const v = { mode: 'instant', minSeverity: 'high', changeKinds: [], environments: [], accounts: [], enabled: true, ...preset, ...(prev || {}) };
     const name = h('input', { value: v.name || '', maxlength: 80 });
     const trigger = h('select', { disabled: !!prev }, Object.entries(d.triggers).map(([k, t]) => h('option', { value: k, selected: v.trigger === k }, t.label)));
     const triggerHint = h('span', { class: 'hint' });
@@ -69,6 +73,13 @@ export async function alertsPage(ctx) {
     const kindsField = h('div', { class: 'field' }, h('span', { class: 'label' }, 'Which changes'), h('div', { class: 'check-grid' }, kinds.map(([, l]) => l)), h('span', { class: 'hint' }, 'None ticked means every kind.'));
     const envBoxes = envs().map((e) => { const cb = h('input', { type: 'checkbox', value: e.id, checked: v.environments.includes(e.id) }); return [cb, h('label', { class: 'row small', style: 'gap:6px' }, cb, e.name)]; });
     const envField = h('div', { class: 'field' }, h('span', { class: 'label' }, 'Environments'), h('div', { class: 'check-grid' }, envBoxes.map(([, l]) => l)), h('span', { class: 'hint' }, 'None ticked means every environment.'));
+    // accounts: the shared picker; a rule naming an account that has since been removed keeps it until edited
+    const pickedAccts = new Set(v.accounts);
+    const acctHint = h('span', { class: 'hint' });
+    const acctNote = () => { const gone = [...pickedAccts].filter((id) => !accounts.some((a) => a.id === id)).length;
+      acctHint.textContent = `None picked means every account.${pickedAccts.size ? ' With environments ticked too, an account must match both.' : ''}${gone ? ` ${gone} picked account${gone === 1 ? ' was' : 's were'} removed; save to drop ${gone === 1 ? 'it' : 'them'}.` : ''}`; };
+    const picker = accountPicker({ accounts, selected: pickedAccts, onChange: acctNote }); acctNote();
+    const acctField = h('div', { class: 'field' }, h('span', { class: 'label' }, 'Accounts'), picker.el, picker.chips, acctHint);
     const dest = h('select', null, d.destinations.map((x) => h('option', { value: x.id, selected: v.destinationId === x.id }, `${x.name} (${KIND[x.kind]})`)));
     const mode = h('select', null, h('option', { value: 'instant', selected: v.mode === 'instant' }, 'At once (within a minute)'), h('option', { value: 'daily', selected: v.mode === 'daily' }, `Daily digest at ${d.digestAt}`));
     const show = () => {
@@ -84,13 +95,17 @@ export async function alertsPage(ctx) {
     const m = modal(prev ? `Edit ${prev.name}` : 'Add a rule', h('form', { class: 'stack', onSubmit: async (e) => {
       e.preventDefault(); err.textContent = ''; save.disabled = true;
       const body = { name: name.value, minSeverity: sev.value, changeKinds: kinds.filter(([c]) => c.checked).map(([c]) => c.value),
-        environments: envBoxes.filter(([c]) => c.checked).map(([c]) => c.value), destinationId: dest.value, mode: mode.value };
+        environments: envBoxes.filter(([c]) => c.checked).map(([c]) => c.value), accounts: [...pickedAccts].filter((id) => accounts.some((a) => a.id === id)),
+        destinationId: dest.value, mode: mode.value };
       try {
         if (prev) await api('PUT', `/alerts/rules/${prev.id}`, body); else await post('/alerts/rules', { ...body, trigger: trigger.value });
-        m.remove(); toast(prev ? 'Rule saved' : 'Rule added. It is checked every minute.'); load();
+        close(); toast(prev ? 'Rule saved' : 'Rule added. It is checked every minute.'); load();
       } catch (x) { err.textContent = x.message; save.disabled = false; }
-    } }, field('When', trigger), triggerHint, sevField, kindsField, envField, field('Send to', dest), field('How often', mode, 'A digest gathers everything since the last one into one message.'), field('Name', name), err,
-    h('div', { class: 'actions' }, save, h('button', { class: 'btn', type: 'button', onClick: () => m.remove() }, 'Cancel'))), h('span'));
+    } }, field('When', trigger), triggerHint, sevField, kindsField, envField, acctField, field('Send to', dest), field('How often', mode, 'A digest gathers everything since the last one into one message.'), field('Name', name), err,
+    h('div', { class: 'actions' }, save, h('button', { class: 'btn', type: 'button', onClick: () => close() }, 'Cancel'))), h('span'));
+    // the picker listens on the document; stop when the dialog goes, however it is closed
+    const close = () => m.remove();
+    new MutationObserver((_, o) => { if (!m.isConnected) { picker.destroy(); o.disconnect(); } }).observe(document.body, { childList: true, subtree: true });
   }
   async function toggle(r, cb) {
     try { await api('PUT', `/alerts/rules/${r.id}`, { enabled: cb.checked }); toast(cb.checked ? `${r.name} is on. It starts from now.` : `${r.name} is off`); load(); }
@@ -104,7 +119,21 @@ export async function alertsPage(ctx) {
     d.triggers[r.trigger].severity && SEV.find(([k]) => k === r.minSeverity)?.[1],
     r.trigger === 'change' && (r.changeKinds.length ? r.changeKinds.map((k) => d.changeKinds[k]).join(', ') : 'every change'),
     r.environments.length ? r.environments.map(envName).join(', ') : 'every environment',
+    r.accounts.length ? (r.accounts.length <= 3 ? r.accounts.map(acctName).join(', ') : `${r.accounts.length} accounts`) : null,
   ].filter(Boolean).join(' · ');
+
+  // how long messages are kept: the alerts.keepDays setting, saved through /settings like the rest of Configuration
+  function keepEl() {
+    const inp = h('input', { type: 'number', min: 7, max: 3650, step: 1, value: d.keepDays, style: 'width:6em', 'aria-label': 'Keep messages for (days)' });
+    const btn = h('button', { class: 'btn sm', hidden: true }, 'Save');
+    inp.addEventListener('input', () => { btn.hidden = Number(inp.value) === d.keepDays; });
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try { await api('PUT', '/settings', { 'alerts.keepDays': Number(inp.value) }); toast(`Messages are kept for ${inp.value} days`); load(); }
+      catch (e) { toast(e.message, true); btn.disabled = false; }
+    });
+    return h('label', { class: 'row small muted', style: 'gap:6px' }, 'Keep for', inp, 'days', btn);
+  }
 
   function draw() {
     const destCard = h('section', { class: 'card' },
@@ -137,7 +166,7 @@ export async function alertsPage(ctx) {
 
     const logCard = h('section', { class: 'card' },
       h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Recent messages'), h('p', { class: 'muted small' }, 'The last 50. A message that fails is tried once more two minutes later.')),
-        h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh')),
+        h('div', { class: 'row', style: 'gap:8px' }, keepEl(), h('button', { class: 'btn sm', onClick: () => load() }, 'Refresh'))),
       d.deliveries.length ? h('div', { class: 'scroll' }, h('table', { class: 'small' },
         h('thead', null, h('tr', null, h('th', null, 'When'), h('th', null, 'Rule'), h('th', null, 'Sent to'), h('th', null, 'Matches'), h('th', null, 'Result'))),
         h('tbody', null, d.deliveries.map((x) => { const [cls, label] = STATUS[x.status];

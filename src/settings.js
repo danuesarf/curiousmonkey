@@ -27,6 +27,7 @@ const DEFS = {
   'display.timeZone':         [z.string().trim().min(1).max(64).refine(isTimeZone, 'Use an IANA time zone such as Asia/Jakarta or Europe/London.'), ['display', 'timeZone']],
   'risk.keyRotateDays':       [z.number().int().min(7).max(730), ['risk', 'keyRotateDays']],
   'risk.keyUnusedDays':       [z.number().int().min(7).max(730), ['risk', 'keyUnusedDays']],
+  'alerts.keepDays':          [z.number().int().min(7).max(3650), ['alerts', 'keepDays']],
 };
 const at = (path) => path.reduce((o, k) => o?.[k], config);
 const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], config); o[path.at(-1)] = v; };

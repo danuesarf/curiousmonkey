@@ -783,6 +783,66 @@ test('alert messages for Slack: escaped, one line per match, the rest counted wi
   assert.match(b.text, /…and 57 more\. <https:\/\/cm\/#\/findings\|See them all>/);
 });
 
+test('alert rules by account; old messages are removed without posting their matches again', async () => {
+  const rx = await receiver();
+  const { alertsTick, pruneDeliveries } = await import('../src/alerts.js');
+  const { config } = await import('../src/config.js');
+  const rules = [];
+  try {
+    const dest = (await owner.post('/api/alerts/destinations', { name: 'acct', kind: 'webhook', url: rx.url('/ok/3') })).json;
+    // an account that does not exist is refused; one that does is kept and shown
+    assert.equal((await owner.post('/api/alerts/rules', { name: 'x', trigger: 'key-age', accounts: ['00000000-0000-4000-8000-000000000000'], destinationId: dest.id })).status, 400);
+    const keyIn = async (acct) => (await db.query(`SELECT count(*)::int n FROM iam_access_keys k JOIN roles r ON r.id=k.role_id WHERE r.account_id=$1 AND k.status='Active'
+      AND k.deleted_at IS NULL AND r.deleted_at IS NULL AND k.created_at < now() - interval '90 days'`, [acct])).rows[0].n;
+    const [inA, inB] = [await keyIn(accA), await keyIn(accB)];
+    assert.ok(inA > 0 && inB > 0, 'the demo has old keys in both accounts');
+    const r = await owner.post('/api/alerts/rules', { name: 'Old keys in A', trigger: 'key-age', accounts: [accA], destinationId: dest.id });
+    assert.equal(r.status, 201, r.text); rules.push(r.json.id); assert.deepEqual(r.json.accounts, [accA]);
+    await alertsTick();
+    assert.equal(rx.got.length, 1); assert.equal(rx.got[0].body.count, inA, 'only account A');
+    // widened to both: only B's keys are new
+    assert.equal((await owner.call('PUT', `/api/alerts/rules/${r.json.id}`, { accounts: [accA, accB] })).status, 200);
+    await alertsTick();
+    assert.equal(rx.got.length, 2); assert.equal(rx.got[1].body.count, inB);
+
+    // the messages age out: removed, but their matches stay sent
+    const before = (await db.query('SELECT count(*)::int n FROM alert_deliveries WHERE rule_id=$1', [r.json.id])).rows[0].n;
+    assert.equal(before, 2);
+    await db.query(`UPDATE alert_deliveries SET created_at = now() - make_interval(days => $1 + 1) WHERE rule_id=$2`, [config.alerts.keepDays, r.json.id]);
+    assert.ok(await pruneDeliveries(new Date(), { force: true }) >= 2);
+    assert.equal((await db.query('SELECT count(*)::int n FROM alert_deliveries WHERE rule_id=$1', [r.json.id])).rows[0].n, 0);
+    await alertsTick();
+    assert.equal(rx.got.length, 2, 'nothing is posted again');
+    assert.equal((await owner.get('/api/alerts')).json.rules.find((x) => x.id === r.json.id).waiting, 0);
+    // the setting is saved like the rest of Configuration
+    assert.equal((await owner.call('PUT', '/api/settings', { 'alerts.keepDays': 3 })).status, 400);
+    assert.equal((await owner.call('PUT', '/api/settings', { 'alerts.keepDays': 30 })).status, 200);
+    assert.equal((await owner.get('/api/alerts')).json.keepDays, 30);
+    await owner.call('PUT', '/api/settings', { 'alerts.keepDays': null });
+  } finally {
+    for (const id of rules) await owner.call('DELETE', `/api/alerts/rules/${id}`);
+    await db.query('DELETE FROM alert_destinations'); rx.close();
+  }
+});
+
+test('search has trigram indexes, and a %text% search over a large estate uses them', async () => {
+  const idx = (await db.query(`SELECT indexname FROM pg_indexes WHERE indexname LIKE '%_trgm'`)).rows.map((x) => x.indexname).sort();
+  assert.deepEqual(idx, ['gcp_principals_display_trgm', 'gcp_principals_email_trgm', 'gcp_principals_member_trgm', 'iam_access_keys_id_trgm', 'roles_arn_trgm', 'roles_name_trgm']);
+  const c = await db.pool.connect();
+  try {
+    await c.query('BEGIN');
+    // an estate-sized table (rolled back afterwards), so the planner judges it as it would in production
+    await c.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count, trust_policy)
+      SELECT $1, 'arn:aws:iam::222222222222:role/bulk-' || i, 'bulk-' || md5(i::text), 'custom', 1, '{}' FROM generate_series(1, 20000) i`, [accB]);
+    // new rows wait in GIN's pending list until autovacuum flushes it; do that now, as a running estate would have
+    await c.query(`SELECT gin_clean_pending_list('roles_name_trgm'), gin_clean_pending_list('roles_arn_trgm')`);
+    await c.query('ANALYZE roles');
+    const plan = (await c.query(`EXPLAIN SELECT id FROM roles r WHERE r.deleted_at IS NULL AND (r.name ILIKE '%deploy%' OR r.arn ILIKE '%deploy%')`)).rows.map((x) => x['QUERY PLAN']).join('\n');
+    assert.match(plan, /roles_(name|arn)_trgm/, plan);
+    await c.query('ROLLBACK');
+  } finally { c.release(); }
+});
+
 // ---------- CSV exports and access reviews ----------
 /** A fresh member limited to account B (the one from the RBAC test may be signed out by now). */
 async function memberOfB(email) {

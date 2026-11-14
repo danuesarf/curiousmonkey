@@ -799,3 +799,4 @@ pre.diff .fold{color:var(--faint);font-style:italic}
 .me .menu-list>button,.me .menu-list>a{font-size:13px;padding:8px 14px;width:auto;color:var(--ink);text-transform:none;letter-spacing:0}
 .bell-foot{display:flex;gap:8px;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--line)}
 .sp-full{margin-top:6px;margin-right:6px}
+.field label.acct-opt{flex-direction:row;font-weight:400}.field .acct-picker{align-self:flex-start}

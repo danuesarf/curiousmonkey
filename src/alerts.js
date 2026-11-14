@@ -61,6 +61,7 @@ export const RuleIn = z.object({
   minSeverity: z.enum(SEVERITIES).default('high'),
   changeKinds: z.array(z.enum(Object.keys(CHANGE_KINDS))).max(10).default([]),
   environments: z.array(z.string().trim().min(1).max(40)).max(20).default([]),
+  accounts: z.array(z.string().uuid()).max(500).default([]),   // empty means every account
   destinationId: z.string().uuid(),
   mode: z.enum(['instant', 'daily']).default('instant'),
   enabled: z.boolean().default(true),
@@ -70,7 +71,7 @@ export const RulePatch = RuleIn.omit({ trigger: true }).partial();
 export class AlertError extends Error { constructor(status, message, field) { super(message); this.status = status; this.field = field; } }
 
 const destView = (d) => ({ id: d.id, name: d.name, kind: d.kind, urlHint: d.url_hint, createdAt: d.created_at, updatedAt: d.updated_at, rules: d.rules ?? 0 });
-const ruleView = (r) => ({ id: r.id, name: r.name, trigger: r.trigger, minSeverity: r.min_severity, changeKinds: r.change_kinds, environments: r.environments,
+const ruleView = (r) => ({ id: r.id, name: r.name, trigger: r.trigger, minSeverity: r.min_severity, changeKinds: r.change_kinds, environments: r.environments, accounts: r.accounts || [],
   destinationId: r.destination_id, destinationName: r.destination_name, mode: r.mode, enabled: r.enabled, since: r.since, lastDigestDay: r.last_digest_day,
   createdAt: r.created_at, updatedAt: r.updated_at, waiting: r.waiting ?? 0, lastSentAt: r.last_sent_at ?? null });
 
@@ -79,7 +80,7 @@ export async function alertsView() {
   const [d, r, del] = await Promise.all([
     query(`SELECT d.*, (SELECT count(*)::int FROM alert_rules r WHERE r.destination_id = d.id) AS rules FROM alert_destinations d ORDER BY d.name`),
     query(`SELECT r.*, d.name AS destination_name,
-                  (SELECT count(*)::int FROM alert_hits h WHERE h.rule_id = r.id AND h.delivery_id IS NULL) AS waiting,
+                  (SELECT count(*)::int FROM alert_hits h WHERE h.rule_id = r.id AND h.queued_at IS NULL) AS waiting,
                   (SELECT max(x.sent_at) FROM alert_deliveries x WHERE x.rule_id = r.id AND x.status = 'sent') AS last_sent_at
              FROM alert_rules r JOIN alert_destinations d ON d.id = r.destination_id ORDER BY r.created_at`),
     query(`SELECT id, rule_id, rule_name, destination_name, kind, status, attempts, items, http_status, error, created_at, sent_at,
@@ -89,7 +90,7 @@ export async function alertsView() {
     destinations: d.rows.map(destView), rules: r.rows.map(ruleView),
     deliveries: del.rows.map((x) => ({ id: x.id, ruleId: x.rule_id, ruleName: x.rule_name, destinationName: x.destination_name, kind: x.kind, status: x.status,
       attempts: x.attempts, items: x.items, httpStatus: x.http_status, error: x.error, createdAt: x.created_at, sentAt: x.sent_at, firstTitle: x.first_title })),
-    triggers: TRIGGERS, changeKinds: CHANGE_KINDS, digestAt: config.alerts.digestAt, tz: config.schedule.tz, keyRules: keyRules(),
+    triggers: TRIGGERS, changeKinds: CHANGE_KINDS, digestAt: config.alerts.digestAt, tz: config.schedule.tz, keyRules: keyRules(), keepDays: config.alerts.keepDays,
   };
 }
 
@@ -120,13 +121,19 @@ const startMark = async (c) => (await c.query('SELECT coalesce(max(id), 0)::bigi
 async function checkDestination(c, id) {
   if (!(await c.query('SELECT 1 FROM alert_destinations WHERE id=$1', [id])).rowCount) throw new AlertError(400, 'Pick a destination.', 'destinationId');
 }
+async function checkAccounts(c, ids) {
+  if (!ids?.length) return;
+  const found = (await c.query('SELECT count(*)::int n FROM cloud_accounts WHERE id = ANY($1::uuid[])', [ids])).rows[0].n;
+  if (found !== new Set(ids).size) throw new AlertError(400, 'One of those accounts no longer exists. Reload and pick again.', 'accounts');
+}
 export async function createRule(body, userId) {
   const b = RuleIn.parse(body);
   return tx(async (c) => {
     await checkDestination(c, b.destinationId);
-    const r = (await c.query(`INSERT INTO alert_rules(name, trigger, min_severity, change_kinds, environments, destination_id, mode, enabled, since_change_id, created_by)
-                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [b.name, b.trigger, b.minSeverity, b.changeKinds, b.environments, b.destinationId, b.mode, b.enabled, await startMark(c), userId])).rows[0];
+    await checkAccounts(c, b.accounts);
+    const r = (await c.query(`INSERT INTO alert_rules(name, trigger, min_severity, change_kinds, environments, accounts, destination_id, mode, enabled, since_change_id, created_by)
+                               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [b.name, b.trigger, b.minSeverity, b.changeKinds, b.environments, b.accounts, b.destinationId, b.mode, b.enabled, await startMark(c), userId])).rows[0];
     return ruleView(r);
   });
 }
@@ -136,14 +143,15 @@ export async function updateRule(id, body) {
     const prev = (await c.query('SELECT * FROM alert_rules WHERE id=$1 FOR UPDATE', [id])).rows[0];
     if (!prev) throw new AlertError(404, 'That rule no longer exists.');
     if (b.destinationId) await checkDestination(c, b.destinationId);
+    await checkAccounts(c, b.accounts);
     // switched back on: start from now, as a new rule would; what happened while it was off is not posted
     const restart = b.enabled === true && !prev.enabled;
     const r = (await c.query(`UPDATE alert_rules SET name=coalesce($2,name), min_severity=coalesce($3,min_severity), change_kinds=coalesce($4,change_kinds),
         environments=coalesce($5,environments), destination_id=coalesce($6,destination_id), mode=coalesce($7,mode), enabled=coalesce($8,enabled),
-        since=CASE WHEN $9 THEN now() ELSE since END, since_change_id=CASE WHEN $9 THEN $10 ELSE since_change_id END, updated_at=now()
+        since=CASE WHEN $9 THEN now() ELSE since END, since_change_id=CASE WHEN $9 THEN $10 ELSE since_change_id END, accounts=coalesce($11,accounts), updated_at=now()
       WHERE id=$1 RETURNING *`,
-      [id, b.name ?? null, b.minSeverity ?? null, b.changeKinds ?? null, b.environments ?? null, b.destinationId ?? null, b.mode ?? null, b.enabled ?? null, restart, restart ? await startMark(c) : 0])).rows[0];
-    if (restart) await c.query('DELETE FROM alert_hits WHERE rule_id=$1 AND delivery_id IS NULL', [id]);
+      [id, b.name ?? null, b.minSeverity ?? null, b.changeKinds ?? null, b.environments ?? null, b.destinationId ?? null, b.mode ?? null, b.enabled ?? null, restart, restart ? await startMark(c) : 0, b.accounts ?? null])).rows[0];
+    if (restart) await c.query('DELETE FROM alert_hits WHERE rule_id=$1 AND queued_at IS NULL', [id]);
     return ruleView(r);
   });
 }
@@ -155,7 +163,8 @@ export async function deleteRule(id) {
 
 // ---------- what each trigger matches ----------
 const link = (hash) => `${config.publicUrl}/${hash}`;
-const envSql = (n) => `(cardinality($${n}::text[]) = 0 OR a.environment = ANY($${n}::text[]))`;
+// which accounts a rule covers: $n its environments, $m its accounts; empty means all
+const envSql = (n, m) => `(cardinality($${n}::text[]) = 0 OR a.environment = ANY($${n}::text[])) AND (cardinality($${m}::uuid[]) = 0 OR a.id = ANY($${m}::uuid[]))`;
 const days = (d) => Math.floor((Date.now() - new Date(d).getTime()) / 864e5);
 
 /** Matches for one rule: [{ dedupe, item }]. `state` triggers return everything true now; the others only what is new. */
@@ -163,9 +172,9 @@ const SOURCES = {
   async finding(r) {
     const rows = (await query(`SELECT f.id, f.title, f.severity, f.created_at, r.id AS role_id, r.name AS role_name, r.kind AS role_kind, a.name AS account_name, a.environment
         FROM flags f JOIN roles r ON r.id = f.role_id JOIN cloud_accounts a ON a.id = r.account_id
-       WHERE f.status = 'open' AND r.deleted_at IS NULL AND f.created_at >= $1 AND f.severity = ANY($2) AND ${envSql(3)}
+       WHERE f.status = 'open' AND r.deleted_at IS NULL AND f.created_at >= $1 AND f.severity = ANY($2) AND ${envSql(3, 5)}
          AND NOT EXISTS (SELECT 1 FROM alert_hits h WHERE h.rule_id = $4 AND h.dedupe = 'flag:' || f.id)
-       ORDER BY f.created_at LIMIT 2000`, [r.since, atLeast(r.min_severity), r.environments, r.id])).rows;
+       ORDER BY f.created_at LIMIT 2000`, [r.since, atLeast(r.min_severity), r.environments, r.id, r.accounts || []])).rows;
     return rows.map((x) => ({ dedupe: `flag:${x.id}`, item: { title: x.title, subject: x.role_name, subjectKind: x.role_kind === 'iam-user' ? 'IAM user' : 'role',
       account: x.account_name, environment: x.environment, severity: x.severity, url: link(`#/identities/${x.role_id}?tab=findings`), at: x.created_at } }));
   },
@@ -173,8 +182,8 @@ const SOURCES = {
     const top = await startMark({ query });
     const rows = (await query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.role_id, a.id AS account_id, a.name AS account_name, a.environment
         FROM changes c JOIN cloud_accounts a ON a.id = c.account_id
-       WHERE c.id > $1 AND c.id <= $2 AND c.severity = ANY($3) AND (cardinality($4::text[]) = 0 OR c.kind = ANY($4::text[])) AND ${envSql(5)}
-       ORDER BY c.id`, [r.since_change_id, top, CHANGE_SEV[r.min_severity], r.change_kinds, r.environments])).rows;
+       WHERE c.id > $1 AND c.id <= $2 AND c.severity = ANY($3) AND (cardinality($4::text[]) = 0 OR c.kind = ANY($4::text[])) AND ${envSql(5, 6)}
+       ORDER BY c.id`, [r.since_change_id, top, CHANGE_SEV[r.min_severity], r.change_kinds, r.environments, r.accounts || []])).rows;
     // move the mark even past changes this rule does not want, so they are not read again
     await query('UPDATE alert_rules SET since_change_id = $2 WHERE id = $1 AND since_change_id < $2', [r.id, top]);
     return rows.map((x) => ({ dedupe: `change:${x.id}`, item: { title: x.title, subject: x.detail || '', account: x.account_name, environment: x.environment,
@@ -183,16 +192,16 @@ const SOURCES = {
   async 'key-age'(r) {
     const rows = (await query(`SELECT k.key_id, k.created_at, r.id AS role_id, r.name AS user_name, a.name AS account_name, a.environment
         FROM iam_access_keys k JOIN roles r ON r.id = k.role_id JOIN cloud_accounts a ON a.id = r.account_id
-       WHERE k.status = 'Active' AND k.deleted_at IS NULL AND r.deleted_at IS NULL AND k.created_at < now() - make_interval(days => $1) AND ${envSql(2)}
-       ORDER BY k.created_at`, [keyRules().rotateDays, r.environments])).rows;
+       WHERE k.status = 'Active' AND k.deleted_at IS NULL AND r.deleted_at IS NULL AND k.created_at < now() - make_interval(days => $1) AND ${envSql(2, 3)}
+       ORDER BY k.created_at`, [keyRules().rotateDays, r.environments, r.accounts || []])).rows;
     return rows.map((x) => ({ dedupe: `key-age:${x.key_id}`, item: { title: `Access key ${x.key_id} is ${days(x.created_at)} days old`, subject: x.user_name, subjectKind: 'IAM user',
       account: x.account_name, environment: x.environment, severity: 'medium', url: link(`#/identities/${x.role_id}?tab=credentials`), at: x.created_at } }));
   },
   async 'console-no-mfa'(r) {
     const rows = (await query(`SELECT r.id AS role_id, r.name AS user_name, d.password_last_used, a.name AS account_name, a.environment
         FROM iam_user_details d JOIN roles r ON r.id = d.role_id JOIN cloud_accounts a ON a.id = r.account_id
-       WHERE d.password_enabled AND jsonb_array_length(d.mfa) = 0 AND r.deleted_at IS NULL AND ${envSql(1)}
-       ORDER BY r.name`, [r.environments])).rows;
+       WHERE d.password_enabled AND jsonb_array_length(d.mfa) = 0 AND r.deleted_at IS NULL AND ${envSql(1, 2)}
+       ORDER BY r.name`, [r.environments, r.accounts || []])).rows;
     return rows.map((x) => ({ dedupe: `nomfa:${x.role_id}`, item: { title: 'Console password without MFA', subject: x.user_name, subjectKind: 'IAM user',
       account: x.account_name, environment: x.environment, severity: 'high', url: link(`#/identities/${x.role_id}?tab=credentials`),
       at: x.password_last_used, detail: x.password_last_used ? `last signed in ${days(x.password_last_used)} days ago` : 'never signed in' } }));
@@ -200,9 +209,9 @@ const SOURCES = {
   async 'scan-failed'(r) {
     const rows = (await query(`SELECT j.id, j.kind, j.region, j.last_error, coalesce(j.finished_at, j.heartbeat_at, j.created_at) AS at, a.name AS account_name, a.environment
         FROM scan_jobs j JOIN cloud_accounts a ON a.id = j.account_id
-       WHERE j.status IN ('failed', 'dead') AND coalesce(j.finished_at, j.heartbeat_at, j.created_at) >= $1 AND ${envSql(2)}
+       WHERE j.status IN ('failed', 'dead') AND coalesce(j.finished_at, j.heartbeat_at, j.created_at) >= $1 AND ${envSql(2, 4)}
          AND NOT EXISTS (SELECT 1 FROM alert_hits h WHERE h.rule_id = $3 AND h.dedupe = 'job:' || j.id)
-       ORDER BY 5 LIMIT 500`, [r.since, r.environments, r.id])).rows;
+       ORDER BY 5 LIMIT 500`, [r.since, r.environments, r.id, r.accounts || []])).rows;
     return rows.map((x) => ({ dedupe: `job:${x.id}`, item: { title: `${x.kind}${x.region && x.region !== '*' ? ` ${x.region}` : ''} job failed`, subject: (x.last_error || 'no error recorded').split('\n')[0].slice(0, 200),
       account: x.account_name, environment: x.environment, severity: 'high', url: link('#/operations/scans'), at: x.at } }));
   },
@@ -225,7 +234,7 @@ export async function collect(rule) {
 /** Puts every match not sent yet into one message. Returns the delivery id, or null when there is nothing to send. */
 export async function flush(rule, kind = rule.mode) {
   return tx(async (c) => {
-    const hits = (await c.query(`SELECT dedupe, item FROM alert_hits WHERE rule_id = $1 AND delivery_id IS NULL ORDER BY found_at, dedupe FOR UPDATE SKIP LOCKED`, [rule.id])).rows;
+    const hits = (await c.query(`SELECT dedupe, item FROM alert_hits WHERE rule_id = $1 AND queued_at IS NULL ORDER BY found_at, dedupe FOR UPDATE SKIP LOCKED`, [rule.id])).rows;
     if (!hits.length) return null;
     const dest = (await c.query('SELECT name FROM alert_destinations WHERE id = $1', [rule.destination_id])).rows[0];
     const t = TRIGGERS[rule.trigger];
@@ -233,7 +242,7 @@ export async function flush(rule, kind = rule.mode) {
       items: hits.slice(0, MAX_ITEMS).map((h) => h.item), more: link(t.more) };
     const id = (await c.query(`INSERT INTO alert_deliveries(rule_id, destination_id, rule_name, destination_name, kind, items, payload) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
       [rule.id, rule.destination_id, rule.name, dest?.name, kind, hits.length, JSON.stringify(payload)])).rows[0].id;
-    await c.query('UPDATE alert_hits SET delivery_id = $3 WHERE rule_id = $1 AND dedupe = ANY($2::text[])', [rule.id, hits.map((h) => h.dedupe), id]);
+    await c.query('UPDATE alert_hits SET delivery_id = $3, queued_at = now() WHERE rule_id = $1 AND dedupe = ANY($2::text[])', [rule.id, hits.map((h) => h.dedupe), id]);
     return id;
   });
 }
@@ -328,9 +337,26 @@ export async function alertsTick(now = new Date(), { log = () => {} } = {}) {
           }
         } catch (e) { log('error', 'alert rule failed', { rule: rule.name, error: e.message }); }
       }
+      out.pruned = await pruneDeliveries();   // by the real clock: `now` is only what the digests go by
       return out;
     } finally { await client.query('SELECT pg_advisory_unlock($1)', [LOCK]); }
   } finally { client.release(); }
 }
 const deliverIfAny = (id) => (id ? deliver(id) : null);
+
+// Old messages, sent or failed, go after alerts.keepDays; one still being retried stays. Their matches keep queued_at,
+// so nothing is posted twice. Runs at most once an hour, in batches, so a first run on a big log does not hold the lock.
+let prunedAt = 0;
+export async function pruneDeliveries(now = new Date(), { force = false } = {}) {
+  if (!force && now.getTime() - prunedAt < 3600e3) return 0;
+  prunedAt = now.getTime();
+  let total = 0;
+  for (let i = 0; i < 20; i++) {
+    const n = (await query(`DELETE FROM alert_deliveries WHERE id IN (SELECT id FROM alert_deliveries WHERE status <> 'pending' AND created_at < $1::timestamptz - make_interval(days => $2) LIMIT 5000)`,
+      [now, config.alerts.keepDays])).rowCount;
+    total += n;
+    if (n < 5000) break;
+  }
+  return total;
+}
 const localDay = (d) => (d instanceof Date ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : String(d).slice(0, 10));
