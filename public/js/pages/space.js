@@ -7,7 +7,7 @@
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in the shown time zone); play steps through them.
-import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, paint } from '../lib.js';
+import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, paint, syncUrl } from '../lib.js';
 import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
 
@@ -258,7 +258,9 @@ export async function spacePage(ctx) {
   // the bell (and links) can open Space on one thing at one hour; otherwise nothing is picked and the overview shows
   { const want = ctx.params.get('sel'), hr = Number(ctx.params.get('hour'));
     if (want && (M.view === 'estate' ? M.by.has(want) : M.byRole.has(want))) { st.sel = want; st.lit = true; }
-    if (ctx.params.get('hour') != null && hr >= 0 && hr <= 23) st.hour = Math.floor(hr); }
+    if (ctx.params.get('hour') != null && hr >= 0 && hr <= 23) st.hour = Math.floor(hr);
+    if (['in', 'out'].includes(ctx.params.get('dir'))) st.dir = ctx.params.get('dir');
+    if (M.view === 'estate' && (ctx.params.get('zone') === 'outer' || M.zones.some((z) => z.id === ctx.params.get('zone')))) st.zone = ctx.params.get('zone'); }
   const left = h('aside', { class: 'left' }), right = h('aside', { class: 'right' });
   const stage = svg('svg', { class: 'space-svg', viewBox: `0 0 ${W} ${H}`, role: 'img' });
   const box = h('div', { class: 'space-box' }, stage);
@@ -618,9 +620,25 @@ export async function spacePage(ctx) {
         ...Object.entries(ENV).map(([k, e]) => svg('radialGradient', { id: `sp-h-${k}` }, svg('stop', { offset: 0, 'stop-color': e.base, 'stop-opacity': 0.8 }), svg('stop', { offset: 0.5, 'stop-color': e.base, 'stop-opacity': 0.24 }), svg('stop', { offset: 1, 'stop-color': e.base, 'stop-opacity': 0 })))),
       svg('g', { 'pointer-events': 'none' }, ...out.floor), svg('g', { 'pointer-events': 'none' }, ...out.halo), ...out.rings, svg('g', { 'pointer-events': 'none' }, ...out.towers, ...out.stems, ...out.stars.map(([, el]) => el)),
       svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.paths, ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels);
-    const typing = document.activeElement?.classList?.contains('sp-filter');
-    renderSide(); renderBar();
-    if (typing) { const i = right.querySelector('.sp-filter'); if (i) { i.focus(); i.setSelectionRange(i.value.length, i.value.length); } }
+    // The side panels change only with what is picked and shown, not with the camera or (mostly) the hour: rebuilding
+    // them on every frame cost time and took the keyboard focus away.
+    const sKey = JSON.stringify([st.sel, st.zone, st.dir, st.lit, st.sel === CM_ID ? st.hour : null, (() => { const x = sessions.get(st.sel); return Array.isArray(x) ? x.length : x || null; })()]);
+    if (sKey !== sideKey) { sideKey = sKey; keepFocus(renderSide); }
+    renderBar();
+    // what is shown goes in the address, so reload and a copied link give the same view
+    if (!ctx.inWindow) syncUrl({ view: M.view === 'account' ? 'account' : null, account: M.view === 'account' ? accountId : null, who: who === 'all' ? null : who,
+      sel: st.sel, zone: st.zone || null, dir: st.dir === 'both' ? null : st.dir, hour: st.hour === 23 ? null : st.hour });
+  }
+  let sideKey = null;
+  // When a panel is rebuilt, the control that had focus is found again in the new one by what it says
+  function keepFocus(fn) {
+    const a = document.activeElement, host = a && [left, right].find((x) => x.contains(a));
+    if (!host) return fn();
+    const key = (e) => `${e.tagName}|${e.className}|${e.getAttribute('aria-label') || ''}|${e.textContent.trim().slice(0, 80)}`, k = key(a), typing = a.classList.contains('sp-filter');
+    fn();
+    if (host.contains(a)) return;
+    const m = [...host.querySelectorAll('button, a[href], input, select, summary')].find((e) => key(e) === k || (typing && e.classList.contains('sp-filter')));
+    if (m) { m.focus({ preventScroll: true }); if (typing) m.setSelectionRange(m.value.length, m.value.length); }
   }
 
   // ---------- the card ----------
@@ -1099,11 +1117,14 @@ export async function spacePage(ctx) {
       tl.what.style.color = nowEv.length ? paint(TONE[nowEv[0].tone] || '#fff') : 'var(--faint)';
       tl.what.title = tl.what.textContent;
     }
-    hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} ${TZ_LABEL}`),
+    // the HUD is aria-live: rebuilt only when its words change, or every frame of a drag would be read out again
+    { const next = [h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} ${TZ_LABEL}`),
       h('div', null, M.view === 'estate' ? `${awsGroups().length} ACCOUNTS · ${num(awsGroups().reduce((s, g) => s + g.roles, 0))} ${noun.toUpperCase()} · ${M.sources.filter((x) => !x.gcp).length + M.hidden} OUTSIDE${M.gcp ? ` · GOOGLE CLOUD ${M.gcp.projects.length} PROJECTS · ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} CROSS-CLOUD` : ''}` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
-      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM'));
+      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM')];
+      const t = next.map((x) => x.textContent).join('\n'); if (hud.dataset.t !== t) { hud.dataset.t = t; hud.replaceChildren(...next); } }
     const btn = ([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon);
     const moved = st.px || st.py || st.az !== -14 || st.el !== 33 || st.zoom !== 1.15;
+    if (cam.firstChild) { cam.querySelector('.cam-reset').disabled = !moved; return; }
     cam.replaceChildren(
       h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Move'), ...[['←', 'Move the view left', () => set({ px: clampPan(st.px + 120, W) })], ['→', 'Move the view right', () => set({ px: clampPan(st.px - 120, W) })],
         ['↑', 'Move the view up', () => set({ py: clampPan(st.py + 80, H) })], ['↓', 'Move the view down', () => set({ py: clampPan(st.py - 80, H) })]].map(btn)),

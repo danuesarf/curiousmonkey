@@ -2,7 +2,7 @@
 //   Estate  — each contact is an AWS account. Distance = share of permissions never called; size = excess permissions;
 //             trail = where it was 7 and 30 days ago; brightness = activity in the last 24 h; pings = changes that matter.
 //   Account — the same for one account's roles, sectored by kind.
-import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1 } from '../lib.js';
+import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, r1, syncUrl } from '../lib.js';
 import { go, changeRow, refreshBell } from '../main.js';
 
 const CX = 400, CY = 400;
@@ -166,7 +166,9 @@ async function estateView(ctx, shell) {
   const accounts = E.accounts;
   if (!accounts.length) { shell.scene.append(h('div', { class: 'card empty', style: 'margin:40px' }, 'No accounts yet. ', h('a', { href: '#/accounts/new' }, 'Connect an AWS account'))); return; }
   for (const a of accounts) { a.d30 = drift(a.never, a.never30); a.d7 = drift(a.never, a.never7); }
-  let sel = null;
+  let sel = accounts.find((a) => a.id === ctx.params.get('sel')) || null;
+  if (['env', 'ou'].includes(ctx.params.get('group'))) ui.group = ctx.params.get('group');
+  if (ctx.params.has('chip') || ctx.params.has('sel')) ui.chip = ctx.params.get('chip') || null;
   const maxEx = Math.max(1, ...accounts.map((a) => a.excess)), maxAct = Math.max(1, ...accounts.map((a) => a.calls24h));
   const CHIPS = [['worse', 'Getting worse', '#f0b45a', (a) => (a.d30 ?? 0) > 0.04], ['better', 'Improving', '#6fe3b0', (a) => (a.d30 ?? 0) < -0.04],
     ['pinged', 'Has pings', '#ff5a4f', (a) => a.pings > 0], ['loading', 'Loading', '#f6e016', (a) => !a.complete]];
@@ -175,6 +177,9 @@ async function estateView(ctx, shell) {
   const hasOu = accounts.some((a) => a.ou);
 
   function draw() {
+    if (ui.chip && !CHIPS.some((c) => c[0] === ui.chip)) ui.chip = null;
+    // what is shown goes in the address: reload and a copied link give the same view
+    if (!ctx.inWindow) syncUrl({ who: ctx.who === 'all' ? null : ctx.who, feed: F.days === 7 ? null : F.days, group: ui.group === 'env' ? null : ui.group, chip: ui.chip, sel: sel?.id });
     const cf = ui.chip ? CHIPS.find((c) => c[0] === ui.chip)[3] : null;
     const key = (a) => (ui.group === 'ou' ? a.ou || 'No OU set' : a.environment);
     const order = ui.group === 'ou' ? [...new Set(accounts.map(key))].sort() : [...new Set(accounts.map(key))].sort((x, y) => (envs().findIndex((e) => e.id === x) + 1 || 99) - (envs().findIndex((e) => e.id === y) + 1 || 99));
@@ -279,7 +284,7 @@ async function accountView(ctx, shell) {
   ctx.setCrumbs(h('a', { href: '#/' }, 'Radar'), acct.name);
   for (const r of roles) r.d30 = drift(r.never, r.never30 ?? r.never7);
   const ranked = roles.slice().sort((x, y) => (!!y.ping - !!x.ping) || (y.risk === 'High') - (x.risk === 'High') || (y.d30 ?? 0) - (x.d30 ?? 0) || y.excess - x.excess);
-  let sel = ranked[0];
+  let sel = ranked.find((r) => r.id === ctx.params.get('role')) || ranked[0];
   const maxEx = Math.max(1, ...roles.map((r) => r.excess)), maxAct = Math.max(1, ...roles.map((r) => r.calls24h));
   const kinds = Object.keys(KIND_LABEL);
   const secs = sectors(kinds.map((k) => ({ id: k, name: KIND_LABEL[k].toUpperCase(), list: roles.filter((r) => r.kind === k) })).filter((g) => g.list.length).map((g) => ({ ...g, weight: g.list.length })), roles.length, 5);
@@ -326,6 +331,7 @@ async function accountView(ctx, shell) {
   }
   async function card() {
     const r = sel;
+    if (!ctx.inWindow) syncUrl({ view: 'account', account: id, who: ctx.who === 'all' ? null : ctx.who, feed: F.days === 7 ? null : F.days, role: r.id });
     const items = F.items.filter((f) => f.role_id === r.id);
     shell.right.replaceChildren(
       h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, `ROLE · ${acct.name.toUpperCase()}`),
