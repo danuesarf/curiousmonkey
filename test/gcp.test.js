@@ -246,3 +246,13 @@ test('federation pools: the GKE pool and other managed pools are skipped, and a 
   assert.deepEqual(out.map((p) => p.name), [`${P}/aws/providers/a1`]);
   assert.ok(!asked.some((u) => /svc\.id\.goog\/providers|trust\/providers/.test(u)), 'managed pools are not asked for providers');
 });
+
+test('the Google Cloud analysis follows the policy: a control off is not reported, a severity set is used', async () => {
+  const { DEFAULT_POLICY } = await import('../src/controlCatalog.js');
+  const snap = { org: { domain: 'acme.io' }, projects: [{ project_id: 'p1', ancestors: [] }], roleDefs: new Map([['roles/viewer', ['x.get']]]), serviceAccounts: [], providers: [],
+    bindings: [{ member: 'user:eve@other.io', role: 'roles/viewer', resource: 'projects/p1', resource_type: 'project', project_id: 'p1', condition: null }] };
+  const ids = (policy) => [...analyzeGcp({ ...snap, policy }).values()].flatMap((x) => x.reasons.map((r) => `${r.id}:${r.severity}`));
+  assert.ok(ids(DEFAULT_POLICY).includes('external:medium'));
+  assert.ok(ids({ over: new Map([['gcp.external', { severity: 'high', enabled: true }]]), custom: [] }).includes('external:high'));
+  assert.ok(!ids({ over: new Map([['gcp.external', { severity: null, enabled: false }]]), custom: [] }).some((x) => x.startsWith('external:')));
+});

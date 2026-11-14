@@ -6,6 +6,7 @@
 // Who can become a service account: holders of getAccessToken / signJwt / implicitDelegation (impersonate), of
 // actAs (attach it to something they deploy), of serviceAccountKeys.create (mint a key), workload identity users
 // (federated identities from AWS, GitHub... and GKE pods), and anyone holding one of its keys.
+import { severityOf } from '../controlCatalog.js';
 
 const IMPERSONATE = ['iam.serviceAccounts.getAccessToken', 'iam.serviceAccounts.implicitDelegation', 'iam.serviceAccounts.signJwt', 'iam.serviceAccounts.signBlob', 'iam.serviceAccounts.getOpenIdToken'];
 const ACT_AS = 'iam.serviceAccounts.actAs';
@@ -110,7 +111,8 @@ export function analyzeGcp(s) {
   const external = (email) => { const d = String(email || '').split('@')[1]?.toLowerCase(); return !!domain && !!d && d !== domain && !d.endsWith(`.${domain}`) && !/gserviceaccount\.com$/.test(d); };
 
   for (const x of out.values()) {
-    const f = (id, severity, title, detail) => x.reasons.push({ id, severity, title, detail });
+    // the workspace's policy (Manage policy): a control turned off is not reported; one given a severity gets it
+    const f = (id, builtIn, title, detail) => { const severity = s.policy ? severityOf(s.policy, `gcp.${id}`, builtIn) : builtIn; if (severity) x.reasons.push({ id, severity, title, detail }); };
     // what it can do
     const roles = [], all = new Set(), reach = new Set();
     for (const b of x.bindings) {

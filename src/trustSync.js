@@ -53,21 +53,21 @@ async function fileFindings(ix) {
       if (f.severity !== 'high' && f.severity !== 'medium') continue;   // low ones stay on the map, out of the inbox
       rows.push({ role: e.roleId, key: flagKey(e, f.id), title: f.title, severity: f.severity, reason: f.detail || f.title,
         evidence: `${e.source} → ${e.role} (${e.account}), statement ${e.sid || e.statement + 1}: ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`.slice(0, 2000),
-        suggestion: SUGGEST[f.id] || null });
+        suggestion: f.fix || SUGGEST[f.id] || null, control: f.custom ? f.id : `trust.${f.id}` });
     }
   }
   const cols = (k) => rows.map((r) => r[k]);
   // new or changed findings; an unchanged one is left alone, so alerts and "updated" stay meaningful
   const up = await query(
-    `INSERT INTO flags(role_id, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, status, updated_at)
-     SELECT r, 'trust', k, t, '{}', '{}', re, ev, sg, '{}', sv, 'open', now()
-       FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[]) AS x(r, k, t, re, ev, sg, sv)
+    `INSERT INTO flags(role_id, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, control, status, updated_at)
+     SELECT r, 'trust', k, t, '{}', '{}', re, ev, sg, '{}', sv, ct, 'open', now()
+       FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[]) AS x(r, k, t, re, ev, sg, sv, ct)
      ON CONFLICT (role_id, category, key) DO UPDATE SET title=EXCLUDED.title, reason=EXCLUDED.reason, evidence=EXCLUDED.evidence, suggestion=EXCLUDED.suggestion,
-       severity=EXCLUDED.severity, status='open', updated_at=now()
-       WHERE (flags.title, flags.reason, flags.evidence, coalesce(flags.suggestion, ''), flags.severity, flags.status)
-          IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.reason, EXCLUDED.evidence, coalesce(EXCLUDED.suggestion, ''), EXCLUDED.severity, 'open')
+       severity=EXCLUDED.severity, control=EXCLUDED.control, status='open', updated_at=now()
+       WHERE (flags.title, flags.reason, flags.evidence, coalesce(flags.suggestion, ''), flags.severity, flags.status, coalesce(flags.control, ''))
+          IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.reason, EXCLUDED.evidence, coalesce(EXCLUDED.suggestion, ''), EXCLUDED.severity, 'open', EXCLUDED.control)
      RETURNING (xmax = 0) AS inserted`,
-    [cols('role'), cols('key'), cols('title'), cols('reason'), cols('evidence'), cols('suggestion'), cols('severity')]);
+    [cols('role'), cols('key'), cols('title'), cols('reason'), cols('evidence'), cols('suggestion'), cols('severity'), cols('control')]);
   // gone from the trust policy, or now expected: resolved (a decision stays with it, should it come back)
   const res = await query(
     `UPDATE flags f SET status='resolved', updated_at=now()

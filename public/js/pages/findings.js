@@ -3,7 +3,7 @@
 import { h, get, post, api, num, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { session } from '../main.js';
 
-export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', trust: 'Trust policy', 'role-idle': 'Idle role' };
+export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', trust: 'Trust policy', custom: 'Custom control', 'role-idle': 'Idle role' };
 export const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 /** The decisions a finding takes, in the order the buttons and the 1–3 keys use. */
 export const OPTIONS = { action: [['keep_scoped', 'Keep, scoped'], ['keep', 'Keep as is'], ['remove', 'Remove']], other: [['accept', 'Accept'], ['investigate', 'Investigate']] };
@@ -43,6 +43,7 @@ export function findingCard(f, { onDecided, onIdentify, head } = {}) {
       f.actions.length > 0 && h('div', { class: 'acts' }, f.actions.slice(0, 40).map((a) => h('code', null, a)), actionCount > 40 && h('span', { class: 'small muted' }, `+${actionCount - 40} more`)),
       f.resources.length > 0 && h('p', { class: 'small mono muted' }, `Granted on: ${f.resources.slice(0, 4).join(', ')}${resourceCount > 4 ? '…' : ''}`),
       f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
+      f.control && h('p', { class: 'tiny muted' }, 'Control: ', h('a', { href: `#/admin/policy?q=${encodeURIComponent(f.control)}`, class: 'mono' }, f.control)),
       f.category === 'unmapped-event' && onIdentify && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => onIdentify(null) }, 'Identify these event names')),
       (f.category === 'trust' || f.category === 'trust-wildcard') && f.role_id && h('div', { class: 'row' }, h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`roleid:${f.role_id}`)}&tab=ways` }, 'Show on the Trust map')),
       canDecide() && h('div', { class: 'stack' }, isAct && res, note,
@@ -55,7 +56,7 @@ export function findingCard(f, { onDecided, onIdentify, head } = {}) {
 }
 
 // ---------- the inbox ----------
-const DEFAULT = { q: '', severity: new Set(), category: '', accounts: new Set(), who: 'all', state: 'open', mine: false, sort: 'severity', page: 1 };
+const DEFAULT = { q: '', control: '', severity: new Set(), category: '', accounts: new Set(), who: 'all', state: 'open', mine: false, sort: 'severity', page: 1 };
 const SIZE = 50;
 const STATES = [['open', 'Needs a decision'], ['decided', 'Decided'], ['all', 'All open findings']];
 const SORTS = [['severity', 'Most severe first'], ['role', 'By role'], ['newest', 'Newest first']];
@@ -64,7 +65,7 @@ export async function findingsPage(ctx) {
   if (ctx.params.get('state') === 'drafts') return draftsPage(ctx);
   ctx.setCrumbs('Review', 'Findings');
   const P = ctx.params;
-  const f = { ...DEFAULT, q: P.get('q') || '', severity: urlSet(P, 'severity'), category: P.get('category') || '', accounts: urlSet(P, 'accounts'),
+  const f = { ...DEFAULT, q: P.get('q') || '', control: /^[a-z0-9.-]{3,80}$/.test(P.get('control') || '') ? P.get('control') : '', severity: urlSet(P, 'severity'), category: P.get('category') || '', accounts: urlSet(P, 'accounts'),
     who: ['roles', 'users'].includes(P.get('who')) ? P.get('who') : 'all', state: STATES.some(([k]) => k === P.get('state')) ? P.get('state') : 'open',
     mine: P.get('mine') === '1', sort: SORTS.some(([k]) => k === P.get('sort')) ? P.get('sort') : 'severity', page: Math.max(1, Number(P.get('page')) || 1) };
   const [accts] = await Promise.all([get('/accounts'), loadEnvironments().catch(() => [])]);
@@ -87,6 +88,9 @@ export async function findingsPage(ctx) {
 
   const search = searchBox({ value: f.q, placeholder: 'Find a role or finding', label: 'Search role, account or finding', onSearch: (v) => { f.q = v.trim(); f.page = 1; load(); } });
   ctx.onLeave(search.cancel);
+  // findings of one control (from Manage policy): shown as a chip that can be taken off
+  const ctlChip = f.control ? h('button', { class: 'chip', type: 'button', 'aria-pressed': 'true', title: 'Show findings of every control',
+    onClick: () => { f.control = ''; f.page = 1; ctlChip.remove(); load(); } }, `Control: ${f.control} ×`) : null;
   const catSel = h('select', { 'aria-label': 'Finding type' });
   catSel.addEventListener('change', () => { f.category = catSel.value; f.page = 1; load(); });
   const select = (label, options, key) => {
@@ -102,11 +106,11 @@ export async function findingsPage(ctx) {
     return h('label', { class: 'row small', style: 'gap:6px', title: `Roles ${TEAM[session.user.team] || session.user.team} reviews, and roles both teams review` }, cb, 'My team’s');
   })();
 
-  const toUrl = () => syncUrl({ q: f.q, severity: f.severity, category: f.category, accounts: f.accounts, who: f.who === 'all' ? '' : f.who,
+  const toUrl = () => syncUrl({ q: f.q, control: f.control, severity: f.severity, category: f.category, accounts: f.accounts, who: f.who === 'all' ? '' : f.who,
     state: f.state === 'open' ? '' : f.state, mine: f.mine, sort: f.sort === 'severity' ? '' : f.sort, page: f.page > 1 ? f.page : '' });
   const qs = () => {
     const p = new URLSearchParams({ page: f.page, limit: SIZE, sort: f.sort, state: f.state });
-    if (f.q) p.set('q', f.q); if (f.severity.size) p.set('severity', [...f.severity].join(',')); if (f.category) p.set('category', f.category);
+    if (f.q) p.set('q', f.q); if (f.control) p.set('control', f.control); if (f.severity.size) p.set('severity', [...f.severity].join(',')); if (f.category) p.set('category', f.category);
     if (f.accounts.size) p.set('accounts', [...f.accounts].join(',')); if (f.who !== 'all') p.set('who', f.who); if (f.mine) p.set('mine', '1');
     return p.toString();
   };
@@ -262,7 +266,7 @@ export async function findingsPage(ctx) {
       h('div', { class: 'stack', style: 'align-items:flex-end;gap:8px' }, waiting, viewSwitch('findings'))),
     tiles,
     h('section', { class: 'card' },
-      h('div', { class: 'filters' }, search, catSel, picker.el, mineBox, select('Identities', [['all', 'Roles and IAM users'], ['roles', 'Roles'], ['users', 'IAM users']], 'who'),
+      h('div', { class: 'filters' }, search, ctlChip, catSel, picker.el, mineBox, select('Identities', [['all', 'Roles and IAM users'], ['roles', 'Roles'], ['users', 'IAM users']], 'who'),
         select('Decision', STATES, 'state'), select('Order', SORTS, 'sort'), count),
       picker.chips, bulk,
       h('div', { class: 'inbox' }, listEl, detail)),

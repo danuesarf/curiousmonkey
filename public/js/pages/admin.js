@@ -5,8 +5,9 @@ import { membersPage } from './members.js';
 import { auditPage } from './audit.js';
 import { settingsPage } from './settings.js';
 import { alertsPage } from './alerts.js';
+import { controlsPage } from './controls.js';
 
-const TABS = [['members', 'Members', 'members', membersPage], ['audit', 'Audit log', 'audit', auditPage], ['alerts', 'Alerts', 'settings', alertsPage], ['config', 'Configuration', 'settings', settingsPage]];
+const TABS = [['members', 'Members', 'members', membersPage], ['audit', 'Audit log', 'audit', auditPage], ['alerts', 'Alerts', 'settings', alertsPage], ['policy', 'Manage policy', 'view', controlsPage], ['config', 'Configuration', 'settings', settingsPage]];
 /** The Admin tabs this person may open. */
 export const adminTabs = (user) => TABS.filter(([, , perm]) => user?.permissions.includes(perm));
 

@@ -6,6 +6,7 @@ import { unloggableReason, dataEventResource } from './unloggable.js';
 import { trustFindings } from './trust.js';
 import { normalizeStatements } from './policy.js';
 import { isMatchAll } from './wildcard.js';
+import { controlOfFlag, severityOf, DEFAULT_POLICY } from '../controlCatalog.js';
 
 const SEV_BY_LEVEL = { Permissions: 'high', Write: 'high', Tagging: 'medium', Read: 'medium', List: 'low' };
 const RANK = { high: 3, medium: 2, low: 1 };
@@ -28,7 +29,7 @@ const REASONS = {
   'unmapped-event': (s) => `This role made ${s} calls whose CloudTrail event names are not IAM action names, so any of these could be the permission they needed. Map the event names on the account's Event coverage page, then re-analyze.`,
 };
 
-export function analyze({ role, policies, boundaryDoc = null, activity, advisor = [], windowStart, now = new Date() }) {
+export function analyze({ role, policies, boundaryDoc = null, activity, advisor = [], windowStart, now = new Date(), policy = DEFAULT_POLICY }) {
   const grants = computeGrants(policies, { permissionsBoundary: boundaryDoc });
   const observed = activity.actions;                       // Map(action -> {count, lastSeen})
   const passed = activity.passroles || [];
@@ -63,7 +64,7 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     }
   }
 
-  const flags = [];
+  let flags = [];
   for (const [k, list] of unconfirmed) {
     const [cat, svc] = k.split('|');
     const key = cat === 'authorization-only' ? list.map((x) => x.action).sort()[0] : svc;
@@ -108,6 +109,13 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
   if (idle) flags.push({ category: 'role-idle', key: 'idle', title: 'Role not used in the window', actions: [], resources: [],
     reason: `No successful use in the last ${Math.round((now - windowStart) / 864e5)} days.`, evidence: role.last_used_at ? `Last used ${new Date(role.last_used_at).toISOString().slice(0, 10)}.` : 'IAM has never recorded a use.',
     suggestion: 'Delete the role if nothing depends on it.', suggestedResources: [], severity: 'medium', decisionKind: 'other' });
+
+  // the workspace's policy: each finding names its control; one turned off is not made, one given a severity gets it
+  flags = flags.flatMap((f) => {
+    const control = controlOfFlag(f.category, f.key);
+    const severity = control ? severityOf(policy, control, f.severity) : f.severity;
+    return severity ? [{ ...f, control, severity }] : [];
+  });
 
   const counts = { granted: rows.length, used: 0, unused: 0, unconfirmed: 0 };
   for (const r of rows) counts[r.status]++;

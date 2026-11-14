@@ -25,6 +25,8 @@ function whereFor(user, q, params, skip = null) {
   if (skip !== 'severity' && sev.length) add('f.severity = ANY(?)', sev);
   const cats = list(q.category);
   if (skip !== 'category' && cats.length) add('f.category = ANY(?)', cats);
+  const ctl = list(q.control).filter((x) => /^[a-z0-9.-]{3,80}$/.test(x));
+  if (ctl.length) add('f.control = ANY(?)', ctl);
   const accts = list(q.accounts).filter((x) => uuid.safeParse(x).success);
   if (accts.length) add('r.account_id = ANY(?::uuid[])', accts);
   if (q.who === 'roles') where.push("r.kind <> 'iam-user'");
@@ -57,7 +59,7 @@ export async function listFindings(user, q) {
   const sp = [], cp = [], tp = [];
   const [rows, bySev, byCat, totals] = await Promise.all([
     query(`
-      SELECT f.id, f.category, f.key, f.title, f.severity, f.reason, f.evidence, f.suggestion, f.created_at,
+      SELECT f.id, f.category, f.key, f.control, f.title, f.severity, f.reason, f.evidence, f.suggestion, f.created_at,
              f.actions[1:41] AS actions, cardinality(f.actions)::int AS action_count,
              f.resources[1:5] AS resources, cardinality(f.resources)::int AS resource_count, f.suggested_resources,
              r.id AS role_id, r.name AS role_name, r.kind AS role_kind, r.risk AS role_risk, r.reviewer_team, r.requires_both,
