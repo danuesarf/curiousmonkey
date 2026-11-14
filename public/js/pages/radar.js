@@ -6,6 +6,11 @@ import { h, svg, get, post, num, ago, loadEnvironments, envName, envs, paint, wh
 import { go, changeRow, refreshBell } from '../main.js';
 
 const CX = 400, CY = 400;
+// drawn text is enlarged when the dish is shown small, so it never renders under about 11 px (set before each draw)
+let FZ = 1;
+const textScale = (el) => { const r = el.getBoundingClientRect(), k = Math.min(r.width / 1020, r.height / 800); FZ = k > 0 ? Math.max(1, Math.min(1.8, 11 / (10 * k))) : 1; };
+// redraw when the dish changes size (a panel opens below, the window is resized)
+const onResize = (el, fn) => { let last = ''; new ResizeObserver(() => { const r = el.getBoundingClientRect(), s = `${Math.round(r.width)}x${Math.round(r.height)}`; if (r.width && s !== last) { last = s; fn(); } }).observe(el); };
 const SEV = COLOR;
 const KIND_LABEL = { custom: 'Custom', 'identity-center': 'Identity Center', 'service-linked': 'Service-linked', 'iam-user': 'IAM users' };
 const ui = { group: 'env', chip: null };          // remembered while you move between views
@@ -51,9 +56,9 @@ function base(kids, rings, ringLabels) {
   for (const [r, fill, dash] of rings) kids.push(svg('circle', { cx: CX, cy: CY, r: r1(r), fill, stroke: '#1a4231', 'stroke-dasharray': dash }));
   return () => {     // call after sectors: labels go on top of them
     for (const [t, rr, color] of ringLabels) {
-      const y = r1(CY - rr + 4), bw = t.length * 6.6 + 10;
-      kids.push(svg('rect', { x: r1(CX - bw / 2), y: r1(y - 11.5), width: r1(bw), height: 16, fill: '#030d08', opacity: 0.85, 'pointer-events': 'none' }),
-        svg('text', { x: CX, y, 'text-anchor': 'middle', fill: color, 'font-family': 'Geist Mono, monospace', 'font-size': 10, 'letter-spacing': 1.2, 'pointer-events': 'none' }, t));
+      const y = r1(CY - rr + 4 * FZ), bw = (t.length * 6.6 + 10) * FZ;
+      kids.push(svg('rect', { x: r1(CX - bw / 2), y: r1(y - 11.5 * FZ), width: r1(bw), height: r1(16 * FZ), fill: '#030d08', opacity: 0.85, 'pointer-events': 'none' }),
+        svg('text', { x: CX, y, 'text-anchor': 'middle', fill: color, 'font-family': 'Geist Mono, monospace', 'font-size': r1(10 * FZ), 'letter-spacing': 1.2, 'pointer-events': 'none' }, t));
     }
   };
 }
@@ -71,14 +76,14 @@ function drawSectors(kids, secs, sub, onClick) {
     if (secs.length > 1) kids.push(svg('path', { d: `M${ex0} ${ey0} L${ex1} ${ey1}`, stroke: '#2a5c45', 'stroke-width': 1.2 }));
     kids.push(svg('path', { d: `M${ax0} ${ay0} A324 324 0 ${s.a1 - s.a0 > 180 ? 1 : 0} 1 ${ax1} ${ay1}`, fill: 'none', stroke: s.color || '#2f6e52', 'stroke-width': 3 }, svg('title', null, `${s.name} · ${sub(s)}`)));
     if (s.a1 - s.a0 < 10) continue;
-    const mid = (s.a0 + s.a1) / 2; const [lx, lyr] = P(mid, 344); const ly = r1(lyr + (lyr < CY ? -8 : 6));
+    const mid = (s.a0 + s.a1) / 2; const [lx, lyr] = P(mid, 344 + 6 * (FZ - 1)); const ly = r1(lyr + (lyr < CY ? -8 - 12 * (FZ - 1) : 6));
     const anchor = Math.abs(lx - CX) < 40 ? 'middle' : lx > CX ? 'start' : 'end';
     const t2 = sub(s); const fit = (w) => (anchor === 'start' ? Math.min(lx, 906 - w) : anchor === 'end' ? Math.max(lx, -106 + w) : lx);
-    const bw = Math.max(s.name.length * 7.3, t2.length * 5.6), bx = fit(bw), x0 = anchor === 'start' ? bx : anchor === 'end' ? bx - bw : bx - bw / 2;
-    boxes.push([x0, ly - 12, x0 + bw, ly + 18]);
+    const bw = Math.max(s.name.length * 7.3, t2.length * 5.6) * FZ, bx = fit(bw), x0 = anchor === 'start' ? bx : anchor === 'end' ? bx - bw : bx - bw / 2;
+    boxes.push([x0, ly - 12 * FZ, x0 + bw, ly + 18 * FZ]);
     kids.push(svg('g', onClick ? { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); onClick(s); } } : null,
-      svg('text', { x: r1(fit(s.name.length * 7.3)), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': 12 }, s.name),
-      svg('text', { x: r1(fit(t2.length * 5.6)), y: ly + 14, 'text-anchor': anchor, fill: '#7e978a', 'font-size': 11 }, t2)));
+      svg('text', { x: r1(fit(s.name.length * 7.3 * FZ)), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': r1(12 * FZ) }, s.name),
+      svg('text', { x: r1(fit(t2.length * 5.6 * FZ)), y: r1(ly + 14 * FZ), 'text-anchor': anchor, fill: '#7e978a', 'font-size': r1(11 * FZ) }, t2)));
   }
   return boxes;
 }
@@ -108,29 +113,30 @@ function trail(kids, ang, from, mid, to, d) {
     svg('circle', { cx: ox, cy: oy, r: 1.6, fill: color, opacity: strong ? 0.95 : 0.5, 'pointer-events': 'none' }));
 }
 function tags(kids, cands, max, extraBoxes = []) {
-  const placed = [[CX - 60, CY - 50, CX + 60, CY + 50], ...extraBoxes]; let n = 0;
+  const placed = [[CX - 60 * FZ, CY - 50 * FZ, CX + 60 * FZ, CY + 50 * FZ], ...extraBoxes]; let n = 0;
   for (const c of cands) {
     if (n >= max) break;
-    const bw = c.text.length * 6.6 + 10;
+    const bw = (c.text.length * 6.6 + 10) * FZ, bh = 18 * FZ;
     for (const push of [16, 32, -20, 48]) {
-      const [tx, ty] = P(c.ang, c.rad + push); const left = tx < CX; const bx = left ? tx - bw : tx, by = ty - 9;
-      const box = [bx, by, bx + bw, by + 18];
+      const [tx, ty] = P(c.ang, c.rad + push * FZ); const left = tx < CX; const bx = left ? tx - bw : tx, by = ty - bh / 2;
+      const box = [bx, by, bx + bw, by + bh];
       if (box[0] < -100 || box[2] > 900 || box[1] < 4 || box[3] > 796) continue;
       if (placed.some((q) => box[0] < q[2] + 2 && box[2] > q[0] - 2 && box[1] < q[3] + 2 && box[3] > q[1] - 2)) continue;
       placed.push(box); n++;
       kids.push(svg('g', { 'pointer-events': 'none' },
-        svg('path', { d: `M${c.x} ${c.y} L${r1(left ? bx + bw : bx)} ${r1(by + 9)}`, stroke: c.color, 'stroke-width': 1, opacity: 0.7 }),
-        svg('rect', { x: r1(bx), y: r1(by), width: r1(bw), height: 18, fill: '#030d08', stroke: c.color, 'stroke-width': 1 }),
-        svg('text', { x: r1(bx + 5), y: r1(by + 13), fill: c.color, 'font-family': 'Geist Mono, monospace', 'font-size': 10.5 }, c.text)));
+        svg('path', { d: `M${c.x} ${c.y} L${r1(left ? bx + bw : bx)} ${r1(by + bh / 2)}`, stroke: c.color, 'stroke-width': 1, opacity: 0.7 }),
+        svg('rect', { x: r1(bx), y: r1(by), width: r1(bw), height: r1(bh), fill: '#030d08', stroke: c.color, 'stroke-width': 1 }),
+        svg('text', { x: r1(bx + 5 * FZ), y: r1(by + 13 * FZ), fill: c.color, 'font-family': 'Geist Mono, monospace', 'font-size': r1(10.5 * FZ) }, c.text)));
       break;
     }
   }
 }
 function dial(kids, top, value, color, trend, trendColor) {
-  kids.push(svg('circle', { cx: CX, cy: CY, r: 46, fill: '#030d08', stroke: '#2a5c45' }),
-    svg('text', { x: CX, y: CY - 11, 'text-anchor': 'middle', fill: '#7e978a', 'font-family': 'Geist Mono, monospace', 'font-size': 8.5, 'letter-spacing': 1 }, top),
-    svg('text', { x: CX, y: CY + 8, 'text-anchor': 'middle', fill: color, 'font-size': 19, 'font-weight': 500 }, value),
-    svg('text', { x: CX, y: CY + 23, 'text-anchor': 'middle', fill: trendColor, 'font-family': 'Geist Mono, monospace', 'font-size': 9.5 }, trend));
+  const k = Math.min(FZ, 1.25);    // the dial grows less than the text, so it does not cover the dish
+  kids.push(svg('circle', { cx: CX, cy: CY, r: r1(46 * k), fill: '#030d08', stroke: '#2a5c45' }),
+    svg('text', { x: CX, y: r1(CY - 11 * k), 'text-anchor': 'middle', fill: '#7e978a', 'font-family': 'Geist Mono, monospace', 'font-size': r1(8.5 * FZ), 'letter-spacing': 1 }, top),
+    svg('text', { x: CX, y: r1(CY + 8 * k), 'text-anchor': 'middle', fill: color, 'font-size': r1(19 * k), 'font-weight': 500 }, value),
+    svg('text', { x: CX, y: r1(CY + 23 * k), 'text-anchor': 'middle', fill: trendColor, 'font-family': 'Geist Mono, monospace', 'font-size': r1(9.5 * FZ) }, trend));
 }
 const stage = (label) => svg('svg', { class: 'stage', viewBox: '-110 0 1020 800', preserveAspectRatio: 'xMidYMid meet', role: 'img', 'aria-label': label });
 const hudEl = (a, b, c) => h('div', { class: 'hud' }, h('div', { class: 'hot' }, `● ${a}`), h('div', null, b), h('div', null, c));
@@ -177,6 +183,7 @@ async function estateView(ctx, shell) {
   const hasOu = accounts.some((a) => a.ou);
 
   function draw() {
+    textScale(svgEl);
     if (ui.chip && !CHIPS.some((c) => c[0] === ui.chip)) ui.chip = null;
     // what is shown goes in the address: reload and a copied link give the same view
     if (!ctx.inWindow) syncUrl({ who: ctx.who === 'all' ? null : ctx.who, feed: F.days === 7 ? null : F.days, group: ui.group === 'env' ? null : ui.group, chip: ui.chip, sel: sel?.id });
@@ -267,7 +274,7 @@ async function estateView(ctx, shell) {
       ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping: change that matters'],
       ['width:10px;height:10px;border-radius:50%;border:1.2px dashed #8ec5ff;box-sizing:border-box', 'New account'],
       ['width:10px;height:10px;border-radius:50%;border:1.4px solid #f6e016;box-sizing:border-box', 'History still loading']]));
-  draw(); card();
+  draw(); card(); onResize(svgEl, draw);
 }
 
 // ---------------------------------------------------------------- one account
@@ -298,6 +305,7 @@ async function accountView(ctx, shell) {
   search.addEventListener('input', () => list());
 
   function draw() {
+    textScale(svgEl);
     const kids = []; const top = base(kids, ZONE_RINGS, ZONE_LABELS);
     drawSectors(kids, secs, (s) => pl(s.list.length, s.id === 'iam-user' ? 'user' : 'role'));
     top();
@@ -360,7 +368,7 @@ async function accountView(ctx, shell) {
       ['width:10px;height:10px;border-radius:50%;border:1.5px solid #ff5a4f;box-sizing:border-box', 'Ping'], ['width:10px;height:10px;border-radius:50%;border:1.2px dashed #8ec5ff;box-sizing:border-box', 'New role'],
       ['width:10px;height:10px;border-radius:50%;border:1.4px dashed #f0b45a;box-sizing:border-box', 'Unidentified calls']]));
   if (!roles.length) { shell.scene.append(h('div', { class: 'card empty', style: 'position:absolute;inset:auto 40px 80px' }, 'No roles in this account yet.')); return; }
-  draw(); list(); card();
+  draw(); list(); card(); onResize(svgEl, draw);
 }
 
 

@@ -361,7 +361,13 @@ export async function spacePage(ctx) {
   }
   const hourLabel = (b) => fmtClock(M.hourStart + b * 36e5);
 
+  // drawn text is enlarged when the scene is shown small, so it stays readable (about 11 px at least)
+  let FZ = 1;
+  const textScale = () => { const r = stage.getBoundingClientRect(), k = Math.min(r.width / W, r.height / H); FZ = k > 0 ? Math.max(1, Math.min(1.8, 11 / (10.5 * k))) : 1; stage.style.setProperty('--fz', FZ); };
+  let lastSize = '';
+  new ResizeObserver(() => { const r = stage.getBoundingClientRect(), s = `${Math.round(r.width)}x${Math.round(r.height)}`; if (s !== lastSize && r.width) { lastSize = s; render(); } }).observe(stage);
   function render() {
+    textScale();
     const hour = st.hour, sel = st.sel, motion = !still() && !st.dragging, focus = M.view === 'estate' ? st.zone : '';
     const dimOf = (env) => (!focus ? 1 : focus === 'outer' ? 0.3 : env === focus ? 1 : 0.22);
     const rel = st.lit && sel ? related(M, sel) : null;
@@ -585,24 +591,24 @@ export async function spacePage(ctx) {
         svg('text', { x: f(pl[1]), y: f(pl[2] + 13), 'text-anchor': pl[0], fill: '#c9b39b', class: 'sp-small' }, sub)));
     }
     for (const c of flagC.sort((a, x) => x.pr - a.pr)) {
-      const bw = Math.round(c.text.length * 6.3 + 14);
-      for (const [dx, dy] of [[0, -22], [bw / 2 + 12, -14], [-bw / 2 - 12, -14], [0, 22], [0, -44]]) {
-        const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - 9, cx + bw / 2, cy + 9];
+      const bw = Math.round((c.text.length * 6.3 + 14) * FZ), bh = 9 * FZ;
+      for (const [dx, dy] of [[0, -22 * FZ], [bw / 2 + 12, -14 * FZ], [-bw / 2 - 12, -14 * FZ], [0, 22 * FZ], [0, -44 * FZ]]) {
+        const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - bh, cx + bw / 2, cy + bh];
         if (!fits(r)) continue;
         blocks.push(r);
         out.labels.push(svg('g', { class: 'sp-hit', onClick: c.pick }, svg('title', null, 'What is this about?'), svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.bg, 'stroke-width': 0.9, opacity: 0.8 }),
-          svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: 18, rx: 2, fill: c.bg }), svg('text', { x: f(cx), y: f(cy + 3.5), 'text-anchor': 'middle', fill: '#05110b', class: 'sp-flag' }, c.text)));
+          svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: f(2 * bh), rx: 2, fill: c.bg }), svg('text', { x: f(cx), y: f(cy + 3.5 * FZ), 'text-anchor': 'middle', fill: '#05110b', class: 'sp-flag' }, c.text)));
         break;
       }
     }
     for (const c of cands.sort((a, x) => x.pr - a.pr)) {
-      const bw = Math.round(c.text.length * 6.5 + 16);
-      for (const [dx, dy] of [[0, -24], [bw / 2 + 14, -14], [-bw / 2 - 14, -14], [0, -46], [0, c.below]]) {
-        const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - 10, cx + bw / 2, cy + 10];
+      const bw = Math.round((c.text.length * 6.5 + 16) * FZ), bh = 10 * FZ;
+      for (const [dx, dy] of [[0, -24 * FZ], [bw / 2 + 14, -14 * FZ], [-bw / 2 - 14, -14 * FZ], [0, -46 * FZ], [0, c.below * FZ]]) {
+        const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - bh, cx + bw / 2, cy + bh];
         if (!fits(r)) continue;
         blocks.push(r);
         out.labels.push(svg('g', { class: 'sp-hit', onClick: c.pick }, svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.color, 'stroke-width': 0.8, opacity: 0.7 }),
-          svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: 20, rx: 3, fill: '#03100b', 'fill-opacity': 0.88, stroke: c.color }), svg('text', { x: f(cx), y: f(cy + 3.6), 'text-anchor': 'middle', fill: '#e3efe8', class: 'sp-pill' }, c.text)));
+          svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: f(2 * bh), rx: 3, fill: '#03100b', 'fill-opacity': 0.88, stroke: c.color }), svg('text', { x: f(cx), y: f(cy + 3.6 * FZ), 'text-anchor': 'middle', fill: '#e3efe8', class: 'sp-pill' }, c.text)));
         if (c.faded && rel) out.labels[out.labels.length - 1].setAttribute('opacity', FADE + 0.15);
         break;
       }
