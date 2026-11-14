@@ -3,7 +3,7 @@
 import { h, get, post, api, num, ago, toast, KIND, TEAM, loadEnvironments, tile, pager, searchBox, accountPicker, syncUrl, urlSet } from '../lib.js';
 import { session } from '../main.js';
 
-export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', 'role-idle': 'Idle role' };
+export const CAT = { 'data-event': 'Data events', 'authorization-only': 'Not logged', 'not-logged': 'Not logged', 'before-window': 'Before window', 'service-unknown': 'Service used', 'unmapped-event': 'Unmapped events', wildcard: 'Wildcard', 'external-principal': 'Unexpected principal', 'trust-wildcard': 'Trust policy', trust: 'Trust policy', 'role-idle': 'Idle role' };
 export const ACTION_CATS = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 /** The decisions a finding takes, in the order the buttons and the 1–3 keys use. */
 export const OPTIONS = { action: [['keep_scoped', 'Keep, scoped'], ['keep', 'Keep as is'], ['remove', 'Remove']], other: [['accept', 'Accept'], ['investigate', 'Investigate']] };
@@ -44,6 +44,7 @@ export function findingCard(f, { onDecided, onIdentify, head } = {}) {
       f.resources.length > 0 && h('p', { class: 'small mono muted' }, `Granted on: ${f.resources.slice(0, 4).join(', ')}${resourceCount > 4 ? '…' : ''}`),
       f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
       f.category === 'unmapped-event' && onIdentify && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => onIdentify(null) }, 'Identify these event names')),
+      (f.category === 'trust' || f.category === 'trust-wildcard') && f.role_id && h('div', { class: 'row' }, h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`roleid:${f.role_id}`)}&tab=ways` }, 'Show on the Trust map')),
       canDecide() && h('div', { class: 'stack' }, isAct && res, note,
         h('div', { class: 'row' }, opts.map(([v, l], i) => { const b = h('button', { class: `btn sm${f.decision === v ? ' primary' : ''}`, title: `Key ${i + 1}` }, l); b.addEventListener('click', () => choose(v, b)); return b; }),
           f.decision && h('button', { class: 'btn sm', onClick: clearIt }, 'Clear decision'))));

@@ -120,12 +120,11 @@ test('the map: one line per source and account, account to account between your 
   const m = mapOf(rows, accts, accts);
   const vendor = m.links.find((l) => l.from === `src:acct:${THIRD}`);
   assert.equal(m.links.filter((l) => l.from === `src:acct:${THIRD}`).length, 1, 'two roles, one line');
-  assert.equal(vendor.roles.length, 2); assert.equal(vendor.worst, 'high'); assert.equal(vendor.kind, 'outside');
-  assert.equal(vendor.roles[0].role, 'vendor-a', 'the worst role first');
+  assert.equal(vendor.roles, 2); assert.equal(vendor.worst, 'high'); assert.equal(vendor.kind, 'outside');
   const s = m.sources.find((x) => x.id === `src:acct:${THIRD}`);
   assert.equal(s.vendor, false, 'one statement lacks ExternalId');
   const between = m.links.find((l) => l.kind === 'account');
-  assert.deepEqual([between.from, between.to, between.roles.map((r) => r.role)], ['stg', 'acct', ['from-stg']]);
+  assert.deepEqual([between.from, between.to, between.roles], ['stg', 'acct', 1]);
   const a = m.accounts.find((x) => x.id === 'acct');
   assert.equal(a.own, 1); assert.equal(a.services, 1); assert.equal(a.inbound.roles, 3); assert.equal(a.inbound.worst, 'high');
 });
@@ -161,4 +160,85 @@ test('IAM last used beats "never used": the role is used even when no sign-in wa
   assert.match(e.findings.find((f) => f.id === 'used-per-iam').detail, /before the 30 days of CloudTrail read/);
   [e] = edgesOf({ ...r, last_used_at: null }, c);
   assert.match(e.findings.find((f) => f.id === 'never-used').detail, /IAM has no record/);
+});
+
+test('Bitbucket: a wildcard after the repository pins it (the step changes every run); after repository and environment it is fine', () => {
+  const bb = 'api.bitbucket.org/2.0/workspaces/krom/pipelines-config/identity/oidc', arn = `arn:aws:iam::${OWN}:oidc-provider/${bb}`;
+  const st = (sub) => ({ Effect: 'Allow', Principal: { Federated: arn }, Action: 'sts:AssumeRoleWithWebIdentity',
+    Condition: { StringEquals: { [`${bb}:aud`]: 'ari:cloud:bitbucket::workspace/x' }, StringLike: { [`${bb}:sub`]: sub } } });
+  const [repo, env, any] = edgesOf(role('deploy', [st('{7f91ae86-0388-45be-9a20-35cbc4fc5f75}:*'), st('{7f91ae86-0388-45be-9a20-35cbc4fc5f75}:{c84baa79-f46a-414f-ab4d-e05775a5af99}:*'), st('*')]), { ...ctx, complete: new Set() });
+  assert.deepEqual(ids(repo), ['low:oidc-broad-sub']);
+  assert.deepEqual(ids(env), []);
+  assert.deepEqual(ids(any), ['high:oidc-broad-sub']);
+  assert.equal(repo.pkind, 'bitbucket');
+});
+
+test('Cognito: judged by the pool (aud) and guests (amr), not by a subject', () => {
+  const st = (cond) => ({ Effect: 'Allow', Principal: { Federated: 'cognito-identity.amazonaws.com' }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: cond });
+  const aud = { 'cognito-identity.amazonaws.com:aud': 'ap-southeast-3:12345678-abcd-abcd-abcd-123456790ab' };
+  const [signedIn, guests, noAmr, noAud] = edgesOf(role('app', [
+    st({ StringEquals: aud, 'ForAnyValue:StringLike': { 'cognito-identity.amazonaws.com:amr': 'authenticated' } }),
+    st({ StringEquals: aud, 'ForAnyValue:StringLike': { 'cognito-identity.amazonaws.com:amr': 'unauthenticated' } }),
+    st({ StringEquals: aud }),
+    st({ 'ForAnyValue:StringLike': { 'cognito-identity.amazonaws.com:amr': 'authenticated' } }),
+  ]), { ...ctx, complete: new Set() });
+  assert.deepEqual(ids(signedIn), []);
+  assert.deepEqual(ids(guests), ['medium:cognito-guest']);
+  assert.deepEqual(ids(noAmr), ['low:cognito-no-amr']);
+  assert.deepEqual(ids(noAud), ['high:cognito-no-aud']);
+});
+
+test('your own account with MFA required (break-glass) is low; without it medium', () => {
+  const [mfa, plain] = edgesOf(role('break-glass', [
+    { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${OWN}:root` }, Action: 'sts:AssumeRole', Condition: { Bool: { 'aws:MultiFactorAuthPresent': 'true' } } },
+    { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${OWN}:root` }, Action: 'sts:AssumeRole' },
+  ]), { ...ctx, complete: new Set() });
+  assert.deepEqual(ids(mfa), ['low:account-root']);
+  assert.deepEqual(ids(plain), ['medium:account-root']);
+});
+
+test('a web identity sign-in vouches only for the statement whose provider and subject it matches', () => {
+  const gh = 'token.actions.githubusercontent.com', arn = `arn:aws:iam::${OWN}:oidc-provider/${gh}`;
+  const st = (sub) => ({ Effect: 'Allow', Principal: { Federated: arn }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: { StringEquals: { [`${gh}:aud`]: 'sts.amazonaws.com' }, StringLike: { [`${gh}:sub`]: sub } } });
+  const r = role('ci', [st('repo:acme/app:*'), st('repo:acme/infra:*')]);
+  const seen = new Map([[r.id, [{ key: `fed:${arn}:sts.amazonaws.com:repo:acme/app:ref:refs/heads/main`, kind: 'federated', display: 'repo:acme/app', last_seen: new Date(), sessions_count: 10 }]]]);
+  const [app, infra] = edgesOf(r, { ...ctx, seen });
+  assert.equal(app.sessions, 10); assert.equal(app.callerCount, 1);
+  assert.equal(infra.sessions, 0, 'repository B is not used because repository A signed in');
+  // another EKS cluster in the same region is another provider
+  const eks = (id) => `oidc.eks.ap-southeast-3.amazonaws.com/id/${id}`;
+  const r2 = role('irsa', [{ Effect: 'Allow', Principal: { Federated: `arn:aws:iam::${OWN}:oidc-provider/${eks('AAAA1111')}` }, Action: 'sts:AssumeRoleWithWebIdentity' }]);
+  const [e] = edgesOf(r2, { ...ctx, seen: new Map([[r2.id, [{ key: `fed:arn:aws:iam::${OWN}:oidc-provider/${eks('BBBB2222')}:sts.amazonaws.com:system:serviceaccount:a:b`, kind: 'federated', display: 'x', last_seen: new Date(), sessions_count: 3 }]]]) });
+  assert.equal(e.sessions, 0);
+});
+
+test('a line and a source count each sign-in once, however many statements it matched', async () => {
+  const { mapOf } = await import('../src/trustmap.js');
+  const accts = [{ id: 'acct', name: 'payments-prod', account_id: OWN, environment: 'production', status: 'connected' }];
+  const r = role('vendor', [
+    { Effect: 'Allow', Principal: { AWS: [`arn:aws:iam::${THIRD}:root`, `arn:aws:iam::${THIRD}:role/ci`] }, Action: 'sts:AssumeRole', Condition: { StringEquals: { 'sts:ExternalId': 'x' } } }]);
+  const seen = new Map([[r.id, [{ key: `role:${THIRD}:ci`, kind: 'role', display: 'role/ci', last_seen: new Date(), sessions_count: 7 }]]]);
+  const es = edgesOf(r, { ...ctx, seen });
+  assert.equal(es.length, 2); assert.ok(es.every((e) => e.sessions === 7));
+  const m = mapOf(es, accts, accts);
+  assert.equal(m.links[0].sessions, 7); assert.equal(m.sources[0].sessions, 7);
+  assert.equal(es[0].seen.length, 1);
+  assert.equal(JSON.parse(JSON.stringify(es[0])).callers, undefined, 'every caller stays off the answer');
+});
+
+test('the query language: a comma means either, source: takes provider kinds, mistakes are named', async () => {
+  const { queryWarnings } = await import('../src/trustmap.js');
+  const es = edgesOf(role('deployer', [
+    { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${THIRD}:root` }, Action: 'sts:AssumeRole' },
+    { Effect: 'Allow', Principal: { Federated: 'arn:aws:iam::1:oidc-provider/oidc.eks.ap-southeast-3.amazonaws.com/id/ABCDEF12' }, Action: 'sts:AssumeRoleWithWebIdentity' },
+    { Effect: 'Allow', Principal: { Service: 'eks.amazonaws.com' }, Action: 'sts:AssumeRole' },
+  ]), { ...ctx, complete: new Set() });
+  const find = (q) => es.filter((e) => matchesQuery(e, parseQuery(q))).map((e) => e.type);
+  assert.deepEqual(find('source:eks'), ['oidc'], 'the EKS kind, not the AWS service named eks');
+  assert.deepEqual(find('source:external,eks'), ['aws-root', 'oidc']);
+  assert.deepEqual(find('finding:account-root,oidc-no-sub'), ['aws-root', 'oidc']);
+  assert.deepEqual(find('used:no -source:service'), ['aws-root', 'oidc']);
+  assert.deepEqual(queryWarnings(parseQuery('fnding:account-root')), ['No filter called "fnding", so it was searched as text. Did you mean finding:account-root?']);
+  assert.deepEqual(queryWarnings(parseQuery('finding:acount-root')), ['No finding called "acount-root". Did you mean account-root?']);
+  assert.deepEqual(queryWarnings(parseQuery('finding:account-root role:deploy')), []);
 });

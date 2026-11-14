@@ -2,6 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import helmet from 'helmet';
+import compression from 'compression';
 import { ZodError } from 'zod';
 import { config, assertConfig } from './config.js';
 import { query, closePool } from './db.js';
@@ -30,6 +31,8 @@ export function createApp() {
       connectSrc: ["'self'"], objectSrc: ["'none'"], frameAncestors: ["'none'"], baseUri: ["'self'"], formAction: ["'self'"] } },
     crossOriginEmbedderPolicy: false,
   }));
+  // answers such as the Trust map run to megabytes of JSON; compressed they are about a fifth of that
+  app.use(compression());
   app.use(express.json({ limit: '256kb' }));
 
   app.get('/healthz', async (req, res) => { try { await query('SELECT 1'); res.send('ok'); } catch { res.status(503).send('db down'); } });

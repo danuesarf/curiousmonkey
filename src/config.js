@@ -47,6 +47,8 @@ export const config = {
     advisorConcurrency: Number(env.ADVISOR_CONCURRENCY || 3),
     provisionalEveryMs: Number(env.PROVISIONAL_EVERY_SECONDS ?? 300) * 1000,   // refresh results while a long read runs
     sessionRetentionDays: Math.max(1, Number(env.SESSION_RETENTION_DAYS || 30)),   // session replay; counts are kept regardless
+    // callers not seen for this long are removed, with their per-day counts (0 keeps them for ever)
+    callerKeepDays: Math.max(0, Number(env.CALLER_KEEP_DAYS ?? 400)),
   },
 
   schedule: {

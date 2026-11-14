@@ -92,11 +92,9 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     }
   }
 
-  // who is allowed in
-  for (const f of trustFindings(role.trust_policy || {})) {
-    flags.push({ category: 'trust-wildcard', key: f.key, title: 'Broad trust policy', actions: [], resources: [], reason: f.reason, evidence: null,
-      suggestion: 'Restrict the trust policy to the specific principals that use this role.', suggestedResources: [], severity: f.severity, decisionKind: 'other' });
-  }
+  // who is allowed in: it counts toward the role's risk here; the findings themselves are the Trust map's (one rule set,
+  // filed as category 'trust' by trustSync.js, which knows the whole estate: connected accounts, Identity Center…)
+  const trust = trustFindings(role.trust_policy || {});
   // an IAM user has no trust policy: what calls as it is its own keys or console, never an unexpected principal
   for (const p of role.kind === 'iam-user' ? [] : activity.principals || []) {
     if (p.trust && !p.trust.matched && p.kind !== 'service') {
@@ -114,7 +112,7 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
   const counts = { granted: rows.length, used: 0, unused: 0, unconfirmed: 0 };
   for (const r of rows) counts[r.status]++;
 
-  const { risk, score, reasons } = scoreRisk({ rows, flags, role, counts });
+  const { risk, score, reasons } = scoreRisk({ rows, flags, role, counts, trust });
   const { team, both } = reviewer({ role, rows, risk });
 
   const hash = crypto.createHash('sha256');
@@ -135,7 +133,7 @@ function evidenceFor(cat, svc, advisorBy, activity) {
   return null;
 }
 
-export function scoreRisk({ rows, flags, role, counts }) {
+export function scoreRisk({ rows, flags, role, counts, trust = [] }) {
   let s = 0; const reasons = [];
   const add = (n, why) => { s += n; reasons.push(why); };
   if (counts.granted > 20000) add(40, 'Grants effectively every AWS action');
@@ -145,7 +143,7 @@ export function scoreRisk({ rows, flags, role, counts }) {
   if (uw) add(Math.min(15, Math.ceil(uw / 10)), `${uw} unused write actions`);
   const wild = flags.filter((f) => f.category === 'wildcard').length;
   if (wild) add(Math.min(20, wild * 10), `${wild} wildcard grant(s) on all resources`);
-  const tw = flags.filter((f) => f.category === 'trust-wildcard');
+  const tw = trust;
   if (tw.some((f) => f.severity === 'high')) add(30, 'Anyone can assume this role');
   else if (tw.length) add(10, 'Broad trust policy');
   if (flags.some((f) => f.category === 'external-principal')) add(20, 'Unexpected principal used the role');

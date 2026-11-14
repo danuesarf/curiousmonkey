@@ -23,7 +23,7 @@ export const TRIGGERS = {
   // not built from matches: at its time it posts the team's "Do this first" list from Home (see homeApi.js)
   todo: { label: 'What to do first (daily digest)', more: '#/', digest: true, hint: 'Once a day, the list Home shows a review team: what is waiting, most urgent first. Off until you add a rule.' },
 };
-export const CHANGE_KINDS = { 'new-caller': 'New caller entered a role', grew: 'Role gained permissions', denied: 'First denied calls', 'new-role': 'Role created', unidentified: 'New event name not identified', dead: 'Role went idle (90 days)', cleaned: 'Role trimmed' };
+export const CHANGE_KINDS = { 'new-caller': 'New caller entered a role', grew: 'Role gained permissions', denied: 'First denied calls', 'new-role': 'Role created', unidentified: 'New event name not identified', dead: 'Role went idle (90 days)', cleaned: 'Role trimmed', 'new-trust': 'New way into a role', 'trust-weakened': 'Guard taken off a trust policy' };
 const SEVERITIES = ['high', 'medium', 'low'];
 const atLeast = (min) => SEVERITIES.slice(0, SEVERITIES.indexOf(min) + 1);
 // Radar changes have their own scale: high, warn, info, good

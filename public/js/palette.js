@@ -27,7 +27,7 @@ export function openPalette({ user, navigate }) {
   if (open) return;
   const can = (p) => [].concat(p).some((x) => user.permissions.includes(x));
   const pages = PAGES.filter(([, , perm, , only]) => can(perm) && !(only === 'unscoped' && user.scope_accounts));
-  const input = h('input', { type: 'search', class: 'pal-input', placeholder: 'Search roles, users, keys, accounts, pages…', 'aria-label': 'Search everything', autocomplete: 'off', spellcheck: 'false',
+  const input = h('input', { type: 'search', class: 'pal-input', placeholder: 'Search roles, users, keys, accounts, vendors, pages…', 'aria-label': 'Search everything', autocomplete: 'off', spellcheck: 'false',
     role: 'combobox', 'aria-expanded': 'true', 'aria-controls': 'pal-list', 'aria-autocomplete': 'list' });
   const list = h('div', { class: 'pal-list', id: 'pal-list', role: 'listbox', 'aria-label': 'Results' });
   const foot = h('div', { class: 'pal-foot tiny muted' }, h('kbd', null, '↑'), ' ', h('kbd', null, '↓'), ' move · ', h('kbd', null, 'Enter'), ' open · ', h('kbd', null, 'Esc'), ' close');
@@ -52,6 +52,9 @@ export function openPalette({ user, navigate }) {
         ...r.keys.map((x) => ({ kind: 'KEY', name: x.id, sub: `${x.status} · ${x.user} · ${x.account}`, risk: x.risk, href: `#/identities/${x.userId}?tab=credentials` })),
         ...r.gcp.map((x) => ({ kind: GCP_KIND[x.kind] || 'GOOGLE', name: x.name, sub: x.project || 'Google Cloud', risk: x.risk, href: `#/identities/gcp/${x.id}` })),
         ...r.accounts.map((x) => ({ kind: 'ACCOUNT', name: x.name, sub: `${x.awsAccountId} · ${envName(x.environment)} · its roles`, href: `#/identities?accounts=${x.id}` })),
+        ...(r.trust || []).map((x) => ({ kind: 'TRUST', name: x.name, sub: `${x.aws && x.aws !== x.name ? `${x.aws} · ` : ''}into ${x.roles} role${x.roles === 1 ? '' : 's'} in ${x.accounts} account${x.accounts === 1 ? '' : 's'} · on the Trust map`,
+          href: x.node?.startsWith('src:') ? `#/trust?sel=${encodeURIComponent(x.node)}` : `#/trust?q=${encodeURIComponent(x.query)}&tab=ways` })),
+        ...(r.views || []).map((x) => ({ kind: 'VIEW', name: x.name, sub: `Trust map${x.shared ? ' · shared' : ''}`, href: `#/${x.page}?${x.query}` })),
       ] : []),
       ...pages.filter(([label, , , words]) => !needle || `${label} ${words}`.toLowerCase().includes(needle)).map(([label, href]) => ({ kind: 'GO TO', name: label, sub: '', href })),
       ...(q.length >= 2 && can('view') ? [{ kind: 'GO TO', name: `Events for “${q}”`, sub: 'search every call', href: `#/events?q=${encodeURIComponent(q)}` }] : []),

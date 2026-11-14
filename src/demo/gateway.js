@@ -107,6 +107,25 @@ export function demoGateway(account) {
       if (process.env.DEMO_SAML_DENIED) throw Object.assign(new Error('User is not authorized to perform: iam:ListSAMLProviders'), { name: 'AccessDenied' });
       return samlProvidersOf(acct);
     },
+    // EKS clusters: one per EKS OIDC provider the estate's roles trust, named demo-<region>-<n>
+    async listEksClusters() {
+      const issuers = new Set();
+      for (const r of estate) for (const m of JSON.stringify(r.trust).matchAll(/oidc\.eks\.([a-z0-9-]+)\.amazonaws\.com\/id\/([A-Z0-9]+)/g)) issuers.add(`${m[1]}|${m[2]}`);
+      return [...issuers].map((x, i) => { const [region, id] = x.split('|'); return { region, name: `demo-${region}-${i + 1}`, arn: `arn:aws:eks:${region}:${acct}:cluster/demo-${region}-${i + 1}`, oidcIssuer: `https://oidc.eks.${region}.amazonaws.com/id/${id}` }; });
+    },
+    // Organizations and Identity Center answer only in the management account: 111111111111 in the demo
+    async listOrgAccounts() {
+      if (acct !== '111111111111') throw Object.assign(new Error('You don\'t have permissions to access this resource.'), { name: 'AccessDeniedException' });
+      return [['111111111111', 'payments-prod'], ['222222222222', 'data-stg'], ['333333333333', 'legacy-tools'], ['444444444444', 'ml-sandbox']]
+        .map(([accountId, name]) => ({ accountId, name, email: `aws+${name}@example.com`, status: 'ACTIVE' }));
+    },
+    async listIdcAssignments() {
+      if (acct !== '111111111111') throw Object.assign(new Error('You don\'t have permissions to access this resource.'), { name: 'AccessDeniedException' });
+      const inst = 'arn:aws:sso:::instance/ssoins-demo0000000001';
+      return ['111111111111', '222222222222'].flatMap((a) => [
+        { instanceArn: inst, accountId: a, permissionSet: 'PlatformEngineer', principalType: 'GROUP', principalId: 'g-platform', principalName: 'platform-engineers' },
+        { instanceArn: inst, accountId: a, permissionSet: 'PlatformEngineer', principalType: 'USER', principalId: 'u-dewi', principalName: 'dewi@acme' }]);
+    },
     async listRoles() {
       return estate.map((r) => ({ arn: r.arn, name: r.name, path: r.path, createDate: new Date(demoNow() - 400 * DAY), trustPolicy: r.trust, boundaryArn: null }));
     },

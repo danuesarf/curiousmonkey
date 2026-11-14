@@ -77,8 +77,8 @@ async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12, rows 
     // what the trust statement says, so a click on the path can explain the warning
     if (t.edges.length < edgeCap) t.edges.push({ roleId: e.roleId, role: e.role, principal: e.principal, actions: e.actions, conditions: e.conditions, worst: e.worst, sid: e.sid || null,
       findings: e.findings.filter((x) => x.severity !== 'info').map((x) => ({ title: x.title, severity: x.severity, detail: x.detail || null })),
-      sessions: e.seen.reduce((n, x) => n + num(x.sessions), 0), lastSeen: e.seen.map((x) => x.lastSeen).filter(Boolean).sort().pop() || null });
-    for (const seen of e.seen) { t.sessions += num(seen.sessions); s.sessions += num(seen.sessions); if (seen.lastSeen && (!s.lastSeen || new Date(seen.lastSeen) > new Date(s.lastSeen))) s.lastSeen = seen.lastSeen; }
+      sessions: num(e.sessions), lastSeen: e.lastSeen || null });
+    t.sessions += num(e.sessions); s.sessions += num(e.sessions); if (e.lastSeen && (!s.lastSeen || new Date(e.lastSeen) > new Date(s.lastSeen))) s.lastSeen = e.lastSeen;
   }
   const all = [...by.values()].sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4) || b.targets.size - a.targets.size || b.sessions - a.sessions);
   return {

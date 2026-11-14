@@ -175,6 +175,7 @@ A cross-account AssumeRole appears in the target account's CloudTrail with no AR
 - **Database:** free disk under Postgres, database size and its growth a day, days until the disk is full at the last 7 days' rate, connections, cache hit rate, the largest tables with their dead rows and last vacuum, the longest running query, idle open transactions and transaction ID age. Warnings start at 80% disk used or under 45 days to full; critical at 90% or under 14 days.
 - **Free disk:** Postgres cannot see it. The compose file mounts the database volume read-only into the app container at `/pgdata` and sets `DB_DATA_PATH=/pgdata`; the app reads free space from it and reads nothing else. Without the mount the page says the disk is not visible. On Kubernetes, mount the database's volume the same way or leave it unset.
 - **History:** the app samples sizes every hour into `db_samples` (90 days kept), so growth needs about a day of samples before it shows.
+- Callers not seen for `CALLER_KEEP_DAYS` (default 400; 0 keeps them) are removed with their per-day counts. Bitbucket Pipelines callers are kept one per repository (and deployment environment), not one per pipeline step.
 - If the disk gets tight, `SESSION_RETENTION_DAYS` is the main lever: call history (`track_calls`, `track_sessions`) is usually most of the database.
 
 ## Event history
@@ -189,32 +190,61 @@ An account can be added before anyone deploys the scanner role in it: **Accounts
 
 ## Trust map
 
-**Trust** in the rail shows who can get into your AWS, read from the trust policies, as a 2D map:
+**Trust** in the rail shows who can get into your AWS, read from role trust policies. The page has three rows above the view, each with one job:
 
-- **Left:** where it comes from, grouped: anyone, outside AWS accounts (vendors and other tenants, marked *vendor · ExternalId* when every statement requires `sts:ExternalId`, otherwise *no ExternalId*), OIDC providers, SAML, deleted identities.
-- **Middle:** your accounts, grouped by environment. One line per source → account however many roles are behind it: red when the worst trust behind it is high risk, amber when medium, green otherwise; dashed when never seen used; thicker with more roles.
-- **Right:** arcs between your own accounts (A trusts into B), one per direction, coloured the same way.
-- Click a line for the roles it can assume (worst first, with findings, conditions and whether it was used), a source for the accounts it can get into, or an account for who can get in and what it can get into. The selection is kept in the URL (`sel=`), **Filter to this** turns it into a query, and the **Ways in** list below follows it, 20 rows a page.
-- Trust from inside the account itself and from AWS services is not drawn: it is counted on each account and listed in the sidebar under *Reachable from*.
+- **Filter.** A search box (free text, or `key:value` and Enter), menus for accounts, environment, where it comes from, finding and use, and one pill per filter with an ×. A filter narrows everything below: the tiles, the map, both tables and the export. A mistyped key or finding is named, with the fix one click away.
+- **Summary.** Tiles that answer a question and filter when pressed: what needs attention (a high or medium finding nobody has accepted or marked as expected), new in the last 7 days (and how many lost a guard), expected, anyone, outside accounts, CI and web identity, trust between your accounts, never used.
+- **View.** *Map*, *Sources* and *Ways in*, with a panel for whatever is picked (a drawer under about 1300 px wide). A pick is a history entry: Back or Esc closes it.
 
-Each way in (statement × principal) is one row of **Ways in**, with:
+The **map** starts folded: kinds of source on the left (anyone, outside AWS accounts, CI and web identity, Identity Center and SAML, deleted identities), environments on the right, one bundled line per pair. Click a group to open it in place; what is open is kept in the address. By default only lines that need attention (worst finding high or medium) are drawn; *Everything* shows the rest. A small map (40 lines or fewer) opens everything. Lines are red for high, amber for medium, green otherwise; dashed when never used; thicker with more roles. Arcs on the right are your accounts trusting each other. Two things are counted rather than drawn: **hubs**, accounts whose trust reaches a third of the estate (management, audit, tooling…), listed under the map; and **EKS clusters**, counted on the account they are in. Picking a source, an account or a line focuses the map on it and what it connects to, every line whatever its severity. The map is one tab stop: arrow keys move between boxes, Enter opens or picks, Esc closes.
 
-- where it comes from: the same account, your other connected accounts, AWS accounts outside your estate, OIDC (GitHub Actions, Bitbucket Pipelines, GitLab, EKS service accounts, Terraform Cloud…), SAML, Google, AWS services, or anyone;
-- the conditions on the way in, and what was actually seen coming in through it;
-- findings: trusts a whole account (`:root`) instead of a role; principal `*` or `NotPrincipal`; an account outside your estate with no `sts:ExternalId`; OIDC with no `sub` condition, or a broad wildcard `sub`; no `aud`; SAML with no `SAML:aud`; an IAM user; a deleted identity; `sts:*`; never used.
+**Sources** is every source, inside your accounts too, sortable by severity, roles, accounts, high-risk roles behind it, sessions and last sign-in. **Ways in** is every statement × principal, paged by the server and sortable; open a row for its conditions, findings with their explanation, the latest callers and its actions.
 
-Everything is a query, so a view is a shareable link and a CSV export:
+Each way in carries:
+
+- where it comes from: the same account, your other connected accounts, AWS accounts outside your estate, OIDC (GitHub Actions, Bitbucket Pipelines, GitLab, EKS service accounts, Terraform Cloud…), Cognito identity pools, SAML and IAM Identity Center, Google, AWS services, or anyone;
+- what guards it (ExternalId, subject, audience, MFA, organisation…), what was seen coming in through it (sessions, callers, last seen), and the risk of the role it leads to;
+- findings: trusts a whole account (`:root`) instead of a role (low when MFA is required on your own account); principal `*` or `NotPrincipal`; an account outside your estate with no `sts:ExternalId`; OIDC with no `sub` condition, or a broad wildcard `sub` (Bitbucket's `{repository}:*` is low: its subject changes with every pipeline step); no `aud`; Cognito without a pool (`aud`), open to guests, or without `amr`; SAML with no `SAML:aud`; an IAM user; a deleted identity; `sts:*`; never used.
+
+A web identity sign-in counts for a statement only when the provider is the statement's own (one EKS cluster, one Bitbucket workspace) and its subject passes the statement's `:sub` conditions. Sign-ins are counted once per role and caller on a line or a source, however many statements they matched.
+
+**Reviewing.** The Trust map's findings are the trust findings everywhere: high and medium ones are filed in the *Findings* inbox (category *Trust policy*, one per role, statement, principal and finding, with what to change), where they are decided, alerted on and reviewed like any other; low ones stay on the map. A way in shows its decisions, and *Accept* or *Investigate* can be chosen from its row. A way in whose every finding is accepted leaves *Needs attention*.
+
+**Expected trust** is a way in a reviewer has looked at and accepts as it is: the management account into `AWSControlTowerExecution`, a named vendor with ExternalId, the organisation's Identity Center. *Mark as expected…* (from a source, a line or a way in) records where it comes from, which roles (a name or pattern) and accounts it covers, the findings it is accepted with, why, and when to look again. Covered ways in stay on the map and in exports, marked *Expected*, but leave *Needs attention*, the map's colour and the Findings inbox. A finding it was not accepted with, or the review date passing (*Review due*), brings them back. The panel lists every rule, what it covers now, and removes it. `GET/POST /api/trust/expected`, `DELETE /api/trust/expected/:id` (the *decide* permission; scoped reviewers only for their accounts; audited).
+
+**What changed.** A way in added in the last 30 days (a new statement or principal, or a new role), or one that lost a guard (ExternalId, subject, audience, MFA, organisation…), is marked *New* or *Guard off*, from the trust policy's history. The worker sends the last two days' to the change feed (*New way in*, *Guard taken off*), so the bell and alert rules see them.
+
+**Names and reach.** An outside AWS account is named from the public list of known AWS accounts ([fwd:cloudsec](https://github.com/fwdcloudsec/known_aws_accounts), bundled; see `THIRD_PARTY_NOTICES.md`), and *Name it…* on any source sets the workspace's own name, owner, purpose and review date (shown to everyone, so set by reviewers who see every account; `POST/DELETE /api/trust/names`). Names are searched by the filter, `from:` and the search box (Ctrl K). Each way in, line and source says what it leads to: the role's risk, *Admin* when the role can do 15,000 things or more (as Radar counts it), and how many accounts a source can administer; *Reaches* sorts by how loose the trust is and what it reaches, together. Sources show when they were first and last seen.
+
+**Around the trust policies.** Where the scanner role may, a scan also reads EKS clusters (`eks:ListClusters`, `eks:DescribeCluster`: a cluster's OIDC provider is shown by its cluster name), the organisation's accounts (`organizations:ListAccounts`, from the management or a delegated administrator account: an "outside" account that is the organisation's own is shown as *yours, not onboarded*, left out of the third-party report and `has:org`, with *Add as planned*), and IAM Identity Center assignments (`sso:ListInstances`, `sso:ListPermissionSets`, `sso:DescribePermissionSet`, `sso:ListAccountsForProvisionedPermissionSet`, `sso:ListAccountAssignments`, `identitystore:DescribeUser`, `identitystore:DescribeGroup`: an `AWSReservedSSO_…` way in lists the groups and people given that permission set in that account). These are in the generated scanner policy; without them, or from any other account, the reads are denied, skipped and what is stored stays.
+
+**Where it leads next.** A source's or an account's panel follows role chaining up to four steps: the roles it gets into, the roles that name those in their trust policies, and so on (`GET /api/trust/chain?sel=`). A role whose whole account is trusted is counted as *possible*, since what follows depends on its permissions. Administrator roles on the way are counted.
+
+**A tighter trust policy.** *Tighter trust policy…* on a way in works out a new trust policy for the role from what was seen: principals nobody came in through are removed, a whole account (or `*`) becomes the roles that came in from it, a web identity gets the subjects and audience it was used with, an outside account gets an ExternalId to fill in. Shown beside the current one, to copy; nothing is changed in AWS (`GET /api/trust/suggest/:roleId`).
+
+**Grid.** Sources down, your accounts across (by environment), one cell per pair in the colour of what still needs a look, hollow when never used. A source that is everywhere is a full row; an odd cell stands out.
+
+**The same trust, grouped.** *Group the same trust* in *Ways in* lists one row per role name, source and findings, with the accounts it is in (a vendor role in 100 accounts is one row). A decision (*Accept in all N accounts*, *Investigate*) or *Mark as expected…* applies to the whole group.
+
+**Third-party access.** *Export → Third-party access (CSV)*: one row per source outside your estate (outside accounts, anyone, CI and identity providers, deleted identities) with its name, known vendor, owner, purpose, review date, accounts, roles, high-risk roles, accounts it administers, ExternalId coverage, worst finding, what needs attention, what is expected, sessions, first and last seen.
+
+**Views and sharing.** *Views* saves the filter, pick and tab under a name, for you or shared with the workspace; saved views and sources are offered in the search box (Ctrl K). *Export → The map as a picture* saves the map as drawn as a PNG. A trust finding in the Findings inbox has *Show on the Trust map*.
+
+Everything is a query, so a view is a shareable link and a CSV export (*Export*: the ways in, or the sources):
 
 ```
 finding:account-root                      roles that trust a whole account
+finding:account-root,external-no-externalid   either finding
 from:123456789012                         roles that trust that account (or a connected account's name)
 account:payments-prod source:oidc         OIDC ways into one account's roles
-provider:github finding:oidc-broad-sub    GitHub Actions trust with a wildcard subject
+source:github,bitbucket                   GitHub Actions or Bitbucket Pipelines
 source:external -cond:ExternalId          outside accounts with no ExternalId condition
 role:deploy has:findings used:no          …
 ```
 
-Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `roleid` (one role exactly) `cond` `env` `has` `no` `used`; prefix `-` to exclude; anything else is free text.
+Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `roleid` (one role exactly) `cond` `env` `has` `no` `used` `attention` (`yes`/`no`) `expected` (`yes`, `no`, `due`) `decided` (`yes`, `no`, `accepted`) `new` (days, e.g. `new:7`, or `new:weakened`); `has:`/`no:` also take `admin` and `name`; a comma inside a value means either; prefix `-` to exclude; anything else is free text. `source:` takes `public`, `external`, `connected`, `same`, `aws`, `oidc`, `saml`, `service`, `unknown` and the provider kinds `github`, `bitbucket`, `gitlab`, `eks`, `terraform`, `circleci`, `azure`, `buildkite`, `google`, `cognito`, `identity-center`. `used:` takes `yes` (a sign-in came through it), `iam` (no sign-in tied to it, but IAM says the role is used) or `no`.
+
+The ways in are worked out once and kept by the API process: a signature of what they are read from (roles and their trust policies, callers, accounts, SAML providers, Google service accounts, the history read) is checked on each request and, while the page is in use, every minute; only when it changes are they worked out again. `GET /api/trust` answers the counts, sources and map; `GET /api/trust/ways` the ways in, a page at a time (`sort`, `dir`, `page`, `size`, `sel`).
 
 The Trust map is the one full list of who can get in. Space's panels and a role's Overview show the top few, worst first, with a link to the Trust map filtered to that account or role.
 

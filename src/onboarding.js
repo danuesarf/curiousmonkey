@@ -11,6 +11,11 @@ export const SCANNER_ALLOW = [
   'iam:GenerateServiceLastAccessedDetails', 'iam:GetServiceLastAccessedDetails', 'cloudtrail:LookupEvents', 'cloudtrail:DescribeTrails',
   'cloudtrail:GetEventSelectors', 'cloudtrail:ListEventDataStores', 'organizations:DescribeOrganization',
   'iam:ListSAMLProviders', 'iam:GetSAMLProvider',   // which IdP, or IAM Identity Center instance, each SAML provider is
+  'eks:ListClusters', 'eks:DescribeCluster',         // names EKS clusters whose OIDC providers roles trust
+  // from the management (or a delegated administrator) account only; elsewhere these are denied and skipped
+  'organizations:ListAccounts',                      // the organisation's accounts not onboarded here are yours, not outsiders
+  'sso:ListInstances', 'sso:ListPermissionSets', 'sso:DescribePermissionSet', 'sso:ListAccountsForProvisionedPermissionSet', 'sso:ListAccountAssignments',
+  'identitystore:DescribeUser', 'identitystore:DescribeGroup',   // who is behind each Identity Center permission set
   // IAM users: their policies (and their groups'), access key metadata and last use, console password and MFA
   'iam:ListUsers', 'iam:GetUser', 'iam:ListAccessKeys', 'iam:GetAccessKeyLastUsed', 'iam:ListMFADevices', 'iam:GetLoginProfile', 'iam:ListGroupsForUser',
   'iam:ListUserPolicies', 'iam:GetUserPolicy', 'iam:ListAttachedUserPolicies', 'iam:ListGroupPolicies', 'iam:GetGroupPolicy', 'iam:ListAttachedGroupPolicies',
