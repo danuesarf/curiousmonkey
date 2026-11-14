@@ -1,5 +1,5 @@
 // Configuration: Bedrock, how far back CloudTrail history is read, and the environments accounts belong to.
-import { h, get, api, post, num, ago, fmtDay, toast, copy, loadEnvironments, ROLE_LABEL, TEAM } from '../lib.js';
+import { h, get, api, post, num, ago, fmtDay, toast, copy, loadEnvironments, ROLE_LABEL, TEAM, tzName, setWorkspaceTimeZone } from '../lib.js';
 import { session } from '../main.js';
 
 const MODELS = [
@@ -42,6 +42,7 @@ export async function settingsPage(ctx) {
         const r = await api('PUT', '/settings', patch);
         toast(r.changed.length ? 'Saved. The worker picks it up within 30 seconds.' : 'Nothing changed.');
         await load();
+        setWorkspaceTimeZone(d.settings['display.timeZone']?.value);      // this browser follows a new workspace zone at once
       } catch (e) { toast(e.message, true); }
     }
     const saveBar = (keys) => {
@@ -118,6 +119,21 @@ export async function settingsPage(ctx) {
           h('p', { class: 'small muted' }, 'Raising a limit makes the next scan backfill the extra days; history already read is kept and not read again.'))),
       historyTable(d.history));
 
+    // ---- time zone ----
+    const zones = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return []; } })();
+    const tzInput = bind(h('input', { value: draft['display.timeZone'], list: 'tz-list', class: 'mono', spellcheck: 'false', autocomplete: 'off' }), 'display.timeZone', (v) => v.trim());
+    const tzNow = h('span', { class: 'hint' });
+    const showNow = () => { try { tzNow.textContent = `Now there: ${new Date().toLocaleString('en-GB', { timeZone: draft['display.timeZone'], hour: '2-digit', minute: '2-digit', weekday: 'short' })} ${tzName(draft['display.timeZone'])}.`; } catch { tzNow.textContent = 'Not a time zone this browser knows.'; } };
+    tzInput.addEventListener('input', showNow); showNow();
+    const clock = h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Time zone'), h('p', { class: 'muted small' }, 'The zone times are shown in for everyone. Each person can switch to their own browser’s zone from their menu (the avatar at the bottom of the rail).'))),
+      h('div', { class: 'card-b settings-grid' },
+        h('div', { class: 'stack' },
+          h('div', { class: 'field' }, h('label', null, 'Show times in', tzInput), h('datalist', { id: 'tz-list' }, zones.map((z) => h('option', { value: z }))), tzNow,
+            h('span', { class: 'hint' }, 'An IANA zone, such as Asia/Jakarta, Asia/Singapore or Europe/London.'), origin('display.timeZone')),
+          saveBar(['display.timeZone'])),
+        h('div', { class: 'stack' }, h('p', { class: 'small muted' }, `The daily scan and alert digests run on the server’s schedule zone (${d.scheduleTz || 'SCAN_TZ'}), which this does not change.`))));
+
     // ---- risk thresholds ----
     const rotate = bind(h('input', { type: 'number', min: 7, max: 730, step: 1, value: draft['risk.keyRotateDays'] }), 'risk.keyRotateDays', Number);
     const unused = bind(h('input', { type: 'number', min: 7, max: 730, step: 1, value: draft['risk.keyUnusedDays'] }), 'risk.keyUnusedDays', Number);
@@ -136,7 +152,7 @@ export async function settingsPage(ctx) {
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, risk, environmentsCard(d.environments, load));
+      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, risk, clock, environmentsCard(d.environments, load));
     refreshSave();
   }
 

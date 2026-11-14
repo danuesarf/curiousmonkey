@@ -1,4 +1,4 @@
-import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint } from './lib.js';
+import { h, svg, clear, get, getCached, post, setCsrf, toast, ApiError, ROLE_LABEL, TEAM, freshness, TONE_COLOR, COLOR, CHANGE_KIND, fmtClock, poll, paint, menu, tzName, tzChoice, setTzChoice, workspaceTimeZone, setWorkspaceTimeZone, BROWSER_TZ } from './lib.js';
 import { theme, setTheme, initTheme } from './theme.js';
 import { openPalette, closePalette, paletteOpen } from './palette.js';
 import * as authPages from './pages/auth.js';
@@ -265,7 +265,13 @@ function shell(active, content, full) {
       group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },
-        h('span', { class: 'avatar', title: `${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}` }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()),
+        // the avatar opens this person's menu: who they are, and which clock times are shown in (kept in this browser)
+        menu(h('span', { class: 'avatar' }, (state.user.name || '?').split(/[.\s_-]+/).map((x) => x[0]).join('').slice(0, 2).toUpperCase()), [
+          [`${state.user.name} · ${ROLE_LABEL[state.user.role]}${state.user.team ? `, ${TEAM[state.user.team]}` : ''}`, null],
+          ['Show times in', null],
+          [`Workspace time: ${tzName(workspaceTimeZone())} (${workspaceTimeZone()})`, () => { setTzChoice('workspace'); render(); }, { checked: tzChoice() === 'workspace' }],
+          [`My browser's time: ${tzName(BROWSER_TZ)} (${BROWSER_TZ})`, () => { setTzChoice('browser'); render(); }, { checked: tzChoice() === 'browser' }],
+        ], { title: `${state.user.name}: your menu`, align: 'start', btnClass: 'avatar-btn' }),
         h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
     h('div', { class: 'frame' }, statusBar, h('main', { class: full ? 'main full' : 'main', id: 'content' }, content)));
 }
@@ -283,7 +289,7 @@ async function render() {
   try {
     if (path === '#/reset') return mount(authPages.resetPassword(params));
     if (!state.user) {
-      try { const me = await get('/auth/me'); state.user = me.user; setCsrf(me.csrf); } catch (e) { if (!(e instanceof ApiError) || e.status !== 401) throw e; }
+      try { const me = await get('/auth/me'); state.user = me.user; setCsrf(me.csrf); setWorkspaceTimeZone(me.display?.timeZone); } catch (e) { if (!(e instanceof ApiError) || e.status !== 401) throw e; }
     }
     const st = state.user ? null : await get('/auth/state');
     if (!state.user) {

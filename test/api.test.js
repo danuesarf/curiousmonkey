@@ -870,3 +870,15 @@ test('access reviews: a frozen snapshot, filtered and exported; both teams sign 
   assert.equal((await owner.call('DELETE', `/api/reviews/${tmp}`)).status, 200);
   assert.equal((await owner.get(`/api/reviews/${tmp}`)).status, 404);
 });
+
+test('display time zone: a workspace setting, validated, sent with the session', async () => {
+  assert.equal((await owner.get('/api/auth/me')).json.display.timeZone, 'Asia/Jakarta');
+  const bad = await owner.call('PUT', '/api/settings', { 'display.timeZone': 'Mars/Olympus_Mons' });
+  assert.equal(bad.status, 400);
+  assert.equal((await owner.call('PUT', '/api/settings', { 'display.timeZone': 'Asia/Singapore' })).status, 200);
+  try {
+    assert.equal((await owner.get('/api/auth/me')).json.display.timeZone, 'Asia/Singapore');
+    assert.equal((await reviewerClient.get('/api/auth/me')).json.display.timeZone, 'Asia/Singapore', 'every member gets it, not only those who may change settings');
+  } finally { await owner.call('PUT', '/api/settings', { 'display.timeZone': null }); }
+  assert.equal((await owner.get('/api/auth/me')).json.display.timeZone, 'Asia/Jakarta');
+});

@@ -6,7 +6,7 @@
 //                  pinned. Role chaining between accounts arcs above the plane and lights up in the hours it happened.
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
-// The bar under the scene picks the hour (the last 24, in WIB); play steps through them.
+// The bar under the scene picks the hour (the last 24, in the shown time zone); play steps through them.
 import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL } from '../lib.js';
 import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';

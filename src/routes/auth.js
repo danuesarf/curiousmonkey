@@ -10,6 +10,8 @@ import { createSession, destroySession, requireUser, needsMfaSetup, throttle } f
 import { PERMS } from '../auth/rbac.js';
 import { ssoVersion } from '../sso.js';
 
+/** Workspace display settings every member needs: the time zone times are shown in. */
+const display = () => ({ timeZone: config.display.timeZone });
 export const auth = Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 const email = z.string().trim().toLowerCase().email().max(200);
@@ -55,7 +57,7 @@ auth.post('/signup', wrap(async (req, res) => {
   req.user = user;
   await audit(req, 'auth.signup', { type: 'user', id: user.id }, { role: user.role });
   const csrf = await createSession(res, user, req);
-  res.status(201).json({ user: publicUser(user), csrf });
+  res.status(201).json({ user: publicUser(user), csrf, display: display() });
 }));
 
 auth.post('/signin', wrap(async (req, res) => {
@@ -73,7 +75,7 @@ auth.post('/signin', wrap(async (req, res) => {
   req.user = u;
   const csrf = await createSession(res, u, req);
   await audit(req, 'auth.signin', { type: 'user', id: u.id });
-  res.json({ user: publicUser(u), csrf });
+  res.json({ user: publicUser(u), csrf, display: display() });
 }));
 
 // ---------- password reset (link made by an owner on the Members page) ----------
@@ -113,7 +115,7 @@ auth.post('/signout', wrap(async (req, res) => { await audit(req, 'auth.signout'
 
 auth.get('/me', wrap(async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'unauthenticated' });
-  res.json({ user: publicUser(req.user), csrf: req.session.csrf });
+  res.json({ user: publicUser(req.user), csrf: req.session.csrf, display: display() });
 }));
 
 auth.post('/mfa/start', requireUser, wrap(async (req, res) => {

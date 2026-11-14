@@ -1,4 +1,4 @@
-import { h, svg, post, get, field, toast, setCsrf, copy } from '../lib.js';
+import { h, svg, post, get, field, toast, setCsrf, copy, setWorkspaceTimeZone } from '../lib.js';
 import { session, go, mark } from '../main.js';
 const logo = () => mark(28);
 
@@ -25,7 +25,7 @@ function radarArt() {
     svg('text', { x: 218, y: 500, fill: '#a9bfb2', 'font-size': 12 }, 'never called · 90 days'));
 }
 
-async function afterAuth(res) { session.user = res.user; setCsrf(res.csrf); go('#/'); }
+async function afterAuth(res) { session.user = res.user; setCsrf(res.csrf); setWorkspaceTimeZone(res.display?.timeZone); go('#/'); }
 
 export function signIn(st) {
   const err = h('div', { class: 'err', role: 'alert' });

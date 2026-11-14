@@ -77,7 +77,26 @@ export function modal(title, body, footer) {
 export const copy = async (text) => { try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed. Select the text and copy it yourself.', true); } };
 
 // Every time on screen is shown in one zone. This is the only place that names it.
-export const TZ = 'Asia/Jakarta', TZ_LABEL = 'WIB';
+// ---------- time zone ----------
+// Times show in the workspace's zone (Configuration, sent with the session) or, if this person chose so, their
+// browser's. TZ and TZ_LABEL are live: every formatter reads them when it runs.
+const SHORT = { 'Asia/Jakarta': 'WIB', 'Asia/Pontianak': 'WIB', 'Asia/Makassar': 'WITA', 'Asia/Jayapura': 'WIT', UTC: 'UTC', 'Etc/UTC': 'UTC' };
+export const BROWSER_TZ = (() => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } })();
+const validTz = (tz) => { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; } };
+/** A short name for a zone: WIB, WITA, WIT for Indonesia, else what the browser calls it (PST, GMT+8, CET…). */
+export function tzName(tz) {
+  if (SHORT[tz]) return SHORT[tz];
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName')?.value || tz; } catch { return tz; }
+}
+let workspaceTz = 'Asia/Jakarta';
+export let TZ = workspaceTz, TZ_LABEL = 'WIB';
+export const workspaceTimeZone = () => workspaceTz;
+/** 'workspace' or 'browser', remembered in this browser. */
+export const tzChoice = () => { try { return localStorage.getItem('cm-tz') === 'browser' ? 'browser' : 'workspace'; } catch { return 'workspace'; } };
+const applyTz = () => { TZ = tzChoice() === 'browser' ? BROWSER_TZ : workspaceTz; TZ_LABEL = tzName(TZ); };
+export function setWorkspaceTimeZone(tz) { if (tz && validTz(tz)) workspaceTz = tz; applyTz(); }
+export function setTzChoice(c) { try { c === 'browser' ? localStorage.setItem('cm-tz', 'browser') : localStorage.removeItem('cm-tz'); } catch { /* storage blocked: this visit only */ } applyTz(); }
+applyTz();
 export const fmtDate = (d) => d ? new Date(d).toLocaleString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: TZ }) + ` ${TZ_LABEL}` : 'never';
 export const fmtDay = (d) => d ? new Date(d).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', timeZone: TZ }) : 'never';
 /** 14:05, or 14:05:09 with seconds */
@@ -274,29 +293,33 @@ export function accountPicker({ accounts, selected, onChange, multi = true }) {
 }
 
 /**
- * A "More" menu: a button that opens a short list of actions. items: [label, href | onClick, { danger, disabled }].
+ * A "More" menu: a button that opens a short list of actions. items: [label, href | onClick | null, { danger, disabled, checked }];
+ * null makes a heading. `align: 'start'` opens it from the button's left edge (for the rail).
  * Arrow keys move, Escape or a click outside closes, focus returns to the button.
  */
-export function menu(label, items, { title } = {}) {
+export function menu(label, items, { title, align = 'end', btnClass = 'btn sm' } = {}) {
   const list = h('div', { class: 'menu-list', role: 'menu', hidden: true });
-  const btn = h('button', { class: 'btn sm menu-btn', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: title || label }, label);
+  const btn = h('button', { class: `${btnClass} menu-btn`, type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: title || (typeof label === 'string' ? label : '') }, label);
   const wrap = h('div', { class: 'menu' }, btn, list);
   const close = (focus = false) => { list.hidden = true; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', outside, true); window.removeEventListener('scroll', onMove, true); window.removeEventListener('resize', onMove); if (focus) btn.focus(); };
   const onMove = () => close();
   // placed against the window, so a scrolling table or card around the button cannot clip it; opens upward near the bottom
   const place = () => {
     const r = btn.getBoundingClientRect(), w = list.offsetWidth, ht = list.offsetHeight;
-    list.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+    list.style.left = `${Math.max(8, Math.min(align === 'start' ? r.left : r.right - w, window.innerWidth - w - 8))}px`;
     list.style.top = `${r.bottom + 4 + ht > window.innerHeight - 8 ? Math.max(8, r.top - 4 - ht) : r.bottom + 4}px`;
   };
   const outside = (e) => { if (!wrap.contains(e.target)) close(); };
-  const entries = items.filter(Boolean).map(([l, act, o = {}]) => {
+  const rows = items.filter(Boolean).map(([l, act, o = {}]) => {
+    if (act === null) return h('div', { class: 'menu-head', role: 'presentation' }, l);
     const el = typeof act === 'string' ? h('a', { href: act, role: 'menuitem', class: o.danger ? 'danger' : '' }, l)
-      : h('button', { type: 'button', role: 'menuitem', class: o.danger ? 'danger' : '', disabled: !!o.disabled }, l);
+      : h('button', { type: 'button', role: o.checked != null ? 'menuitemradio' : 'menuitem', 'aria-checked': o.checked != null ? String(!!o.checked) : null, class: o.danger ? 'danger' : '', disabled: !!o.disabled },
+        o.checked != null && h('span', { class: 'menu-check', 'aria-hidden': 'true' }, o.checked ? '✓' : ''), l);
     el.addEventListener('click', (e) => { e.stopPropagation(); close(); if (typeof act === 'function') act(e); });
     return el;
   });
-  list.append(...entries);
+  const entries = rows.filter((x) => !x.classList.contains('menu-head'));
+  list.append(...rows);
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!list.hidden) return close();

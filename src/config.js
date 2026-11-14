@@ -18,6 +18,9 @@ export const config = {
   // 'aws' talks to real AWS. 'demo' generates a believable fake estate so the portal can be tried without credentials.
   awsMode: env.AWS_MODE || 'aws',
 
+  // how times are shown in the portal (each person can switch to their browser's zone); scheduling uses `schedule.tz`
+  display: { timeZone: env.DISPLAY_TZ || env.SCAN_TZ || 'Asia/Jakarta' },
+
   alerts: {
     digestAt: env.ALERT_DIGEST_AT || '09:00',        // local time (SCAN_TZ) the daily digests go out
     timeoutMs: Number(env.ALERT_TIMEOUT_SECONDS || 10) * 1000,

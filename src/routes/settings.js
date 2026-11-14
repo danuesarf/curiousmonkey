@@ -16,7 +16,7 @@ const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).cat
 
 const ENV = { 'ai.enabled': 'BEDROCK_ENABLED', 'ai.region': 'BEDROCK_REGION', 'ai.modelId': 'BEDROCK_MODEL_ID', 'ai.maxTokens': 'AI_MAX_TOKENS',
   'history.defaultLookbackDays': 'DEFAULT_LOOKBACK_DAYS', 'history.maxLookbackDays': 'MAX_LOOKBACK_DAYS', 'history.sliceHours': 'SCAN_SLICE_HOURS', 'history.tailEveryMinutes': 'TAIL_EVERY_MINUTES',
-  'risk.keyRotateDays': 'KEY_ROTATE_DAYS', 'risk.keyUnusedDays': 'KEY_UNUSED_DAYS' };
+  'display.timeZone': 'DISPLAY_TZ', 'risk.keyRotateDays': 'KEY_ROTATE_DAYS', 'risk.keyUnusedDays': 'KEY_UNUSED_DAYS' };
 
 /** What the account form needs: the lookback it may offer. */
 settings.get('/settings/limits', requirePerm('view'), (req, res) => res.json({
@@ -38,7 +38,7 @@ settings.get('/settings', requirePerm('settings'), wrap(async (req, res) => {
   res.json({
     settings: Object.fromEntries(Object.entries(current()).map(([k, v]) => [k, { ...v, env: ENV[k] }])),
     choices: { sliceHours: SLICE_CHOICES, lookbackCeiling: LOOKBACK_CEILING_DAYS, eventHistoryMaxDays: EVENT_HISTORY_MAX_DAYS },
-    awsMode: config.awsMode,
+    awsMode: config.awsMode, scheduleTz: config.schedule.tz,
     ai: { recommendations: recs.rows, mappingSuggestions: maps.rows[0] },
     history: accts.rows.map((a) => {
       const eff = effectiveLookback(a);

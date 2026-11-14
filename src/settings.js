@@ -11,6 +11,9 @@ export const EVENT_HISTORY_MAX_DAYS = 90;        // AWS limit for LookupEvents; 
 export const LOOKBACK_CEILING_DAYS = 730;        // the most this tool will ever read back from an S3 trail
 export const SLICE_CHOICES = [6, 2, 1, 0.5, 0.25];
 
+/** A time zone this runtime knows (IANA name, e.g. Asia/Jakarta). */
+export function isTimeZone(tz) { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; } }
+
 // key -> [schema, path in config, read from env at startup]
 const DEFS = {
   'ai.enabled':               [z.boolean(), ['ai', 'enabled']],
@@ -21,6 +24,7 @@ const DEFS = {
   'history.maxLookbackDays':  [z.number().int().min(EVENT_HISTORY_MAX_DAYS).max(LOOKBACK_CEILING_DAYS), ['scanner', 'maxLookbackDays']],
   'history.sliceHours':       [z.number().refine((v) => SLICE_CHOICES.includes(v), 'Pick one of the slice sizes.'), ['scanner', 'sliceHours']],
   'history.tailEveryMinutes': [z.number().int().min(0).max(1440), ['scanner', 'tailEveryMinutes']],
+  'display.timeZone':         [z.string().trim().min(1).max(64).refine(isTimeZone, 'Use an IANA time zone such as Asia/Jakarta or Europe/London.'), ['display', 'timeZone']],
   'risk.keyRotateDays':       [z.number().int().min(7).max(730), ['risk', 'keyRotateDays']],
   'risk.keyUnusedDays':       [z.number().int().min(7).max(730), ['risk', 'keyUnusedDays']],
 };

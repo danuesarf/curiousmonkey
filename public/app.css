@@ -791,3 +791,9 @@ pre.diff .fold{color:var(--faint);font-style:italic}
 .acct-table .mini-track{display:inline-block;width:70px;height:6px;background:var(--surface);border:1px solid var(--line);vertical-align:middle;margin-right:6px}
 .acct-table .mini-track i{display:block;height:100%;background:var(--amber)}
 .acct-table .mini-track i.done{background:#5fd3a2}
+.menu-head{padding:8px 14px 4px;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;color:var(--faint);white-space:nowrap}
+.menu-head:first-child{color:var(--muted);font-family:inherit;font-size:12.5px;letter-spacing:0;padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.menu-check{display:inline-block;width:16px;color:var(--banana)}
+.avatar-btn{background:none;border:0;padding:0;cursor:pointer;border-radius:50%}
+.avatar-btn:focus-visible{outline:2px solid var(--banana);outline-offset:2px}
+.me .menu-list>button,.me .menu-list>a{font-size:13px;padding:8px 14px;width:auto;color:var(--ink);text-transform:none;letter-spacing:0}
