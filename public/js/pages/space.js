@@ -120,11 +120,17 @@ const isGcp = (id) => String(id).startsWith('gcp:');
 function withGcp(M, g) {
   const aws = { id: 'aws', label: 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 };
   if (!g?.projects?.length) { M.planes = [aws]; return M; }
-  for (const x of M.groups) { x.y += DY; x.stars.forEach((st) => { st.y += DY; }); }
-  for (const z of M.zones) { z.y0 += DY; z.y1 += DY; z.cloud = 'aws'; }
-  for (const x of M.sources) x.y += DY;
-  if (M.scanner) M.scanner.y += DY;
-  M.planes = [{ ...aws, y0: -380 + DY, y1: 380 + DY }, { id: 'gcp', label: 'GOOGLE CLOUD', x0: -560, x1: 560, y0: -380 - DY, y1: 380 - DY }];
+  // AWS in front (smaller y is nearer the camera), Google Cloud behind it
+  // AWS's outside identities sit off its far edge, which now faces Google Cloud: move them to its left and right edges
+  M.sources.filter((x) => !x.gcp).forEach((x, i) => {
+    const left = i % 2 === 0, k = Math.floor(i / 2), [gap, z] = PLACE[x.risk] || PLACE.none;
+    Object.assign(x, off(left ? 180 + k * 16 : 360 - k * 16, gap, z));
+  });
+  for (const x of M.groups) { x.y -= DY; x.stars.forEach((st) => { st.y -= DY; }); }
+  for (const z of M.zones) { z.y0 -= DY; z.y1 -= DY; z.cloud = 'aws'; }
+  for (const x of M.sources) x.y -= DY;
+  if (M.scanner) M.scanner.y -= DY;
+  M.planes = [{ ...aws, y0: -380 - DY, y1: 380 - DY }, { id: 'gcp', label: 'GOOGLE CLOUD', x0: -560, x1: 560, y0: -380 + DY, y1: 380 + DY }];
   const envs = ORDER.filter((e) => g.projects.some((p) => p.environment === e));
   const weight = (e) => Math.max(1, g.projects.filter((p) => p.environment === e).length) ** 0.75;
   const totalW = envs.reduce((n, e) => n + weight(e), 0);
@@ -132,10 +138,10 @@ function withGcp(M, g) {
   const gz = [], gg = [];
   for (const env of envs) {
     const w = (1120 * weight(env)) / totalW, x0 = x1 - w, list = g.projects.filter((p) => p.environment === env);
-    gz.push({ id: env, x0, x1, y0: -380 - DY, y1: 380 - DY, cloud: 'gcp' });
+    gz.push({ id: env, x0, x1, y0: -380 + DY, y1: 380 + DY, cloud: 'gcp' });
     const cols = Math.max(1, Math.round(Math.sqrt((list.length * w) / 760))), rows = Math.ceil(list.length / cols), cw = w / cols, ch = 760 / rows;
     list.forEach((p, i) => {
-      const cx = x0 + cw * (i % cols + 0.5), cy = 380 - ch * (Math.floor(i / cols) + 0.5) - DY;
+      const cx = x0 + cw * (i % cols + 0.5), cy = -380 + ch * (Math.floor(i / cols) + 0.5) + DY;
       const R = Math.max(14, Math.min(18 + Math.sqrt(p.accounts.length) * 5.5, 0.4 * Math.min(cw, ch)));
       const stars = cloud(cx, cy, R, p.accounts.filter((a) => !a.managed).map((a) => ({ id: `gsa:${a.id}`, sa: a, risk: a.risk, calls7: a.permissions })), 0, hash(p.projectId));
       gg.push({ id: `gcp:${p.projectId}`, cloud: 'gcp', project: p, name: p.projectId, label: p.projectId, env, x: cx, y: cy, R, coldShare: 0, prof: Array(24).fill(0), hourly: [], stars,
@@ -148,9 +154,9 @@ function withGcp(M, g) {
   // identities from outside the organization, off the far edge of the Google Cloud field
   const outs = g.outside.filter((o) => o.targets.some((t) => M.by.has(`gcp:${t.projectId}`)));
   const srcs = outs.map((o, i) => {
-    const deg = outs.length === 1 ? 270 : 222 + (96 * i) / (outs.length - 1), [gap, z] = PLACE[o.worst] || PLACE.none, at = off(deg, gap, z);
+    const deg = outs.length === 1 ? 90 : 42 + (96 * i) / (outs.length - 1), [gap, z] = PLACE[o.worst] || PLACE.none, at = off(deg, gap, z);
     return { id: `gsrc:${o.key}`, key: o.key, gcp: true, label: o.label, sub: o.sub, group: o.group, kind: o.group === 'oidc' ? 'oidc' : o.group === 'public' ? 'web' : 'account', risk: o.worst, findings: [],
-      principal: o.principal || null, targets: o.targets.map((t) => ({ accountId: `gcp:${t.projectId}`, roles: t.principals, edges: [] })), sessions: 0, ...at, y: at.y - DY };
+      principal: o.principal || null, targets: o.targets.map((t) => ({ accountId: `gcp:${t.projectId}`, roles: t.principals, edges: [] })), sessions: 0, ...at, y: at.y + DY };
   });
   M.sources.push(...srcs);
   for (const x of srcs) for (const t of x.targets) M.links.push({ from: x.id, to: t.accountId, kind: x.risk === 'high' ? 'extHigh' : x.risk === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: [], roles: t.roles.length, gcp: true });
@@ -327,12 +333,38 @@ export async function spacePage(ctx) {
   // a sideways swipe (or Shift+wheel) moves the view left and right
   stage.addEventListener('wheel', (ev) => { ev.preventDefault();
     if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey) { set({ px: clampPan(st.px - (ev.deltaX || ev.deltaY) * 0.8, W) }); return; }
-    set({ zoom: Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015))) }); }, { passive: false });
+    const z2 = Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015)));
+    const m = stage.getScreenCTM(), q = m ? new DOMPoint(ev.clientX, ev.clientY).matrixTransform(m.inverse()) : null;
+    if (!q || !st.cam) return set({ zoom: z2 });
+    set(zoomAbout(q.x, q.y, z2)); }, { passive: false });
+  // the camera change that zooms to z2 while the scene point at (sx, sy) stays where it is on screen
+  const zoomAbout = (sx, sy, z2) => {
+    const { CX, CY, F, ox, ou } = st.cam, r = z2 / st.zoom, F2 = F * r;
+    return { zoom: z2, px: clampPan(st.px + (sx - CX) * (1 - r) + (F2 - F) * ox, W), py: clampPan(st.py + (sy - CY) * (1 - r) - (F2 - F) * ou, H) };
+  };
+  // fly to something: zoom in and bring it to the middle (double-click a thing, or F with it picked)
+  let lastPick = null;
+  const whereIs = (id) => {
+    if (M.view === 'estate' && M.by.has(id)) { const g = M.by.get(id); return [g.x, g.y, 0]; }
+    if (M.view === 'account' && M.byRole.has(id)) { const r = M.byRole.get(id); return [r.x, r.y, r.z]; }
+    const s = M.sources.find((x) => x.id === id); if (s) return [s.x, s.y, s.z];
+    if (id === CM_ID && M.scanner) return [M.scanner.x, M.scanner.y, M.scanner.z];
+    return null;
+  };
+  const flyTo = (id) => {
+    const at = whereIs(id); if (!at) return false;
+    st.zoom = Math.max(st.zoom, M.view === 'estate' ? 2 : 1.8); render();
+    const q = camera()(...at);
+    set({ px: clampPan(st.px + W / 2 - q[0], W), py: clampPan(st.py + H / 2 - q[1], H) });
+    return true;
+  };
+  stage.addEventListener('dblclick', (ev) => { ev.preventDefault(); if (lastPick && Date.now() - lastPick.at < 800) { st.sel = lastPick.id; st.lit = true; flyTo(lastPick.id); } });
   stage.setAttribute('tabindex', '0');
   stage.addEventListener('keydown', (ev) => {
     const z = { '+': 1.25, '=': 1.25, '-': 0.8, _: 0.8 }[ev.key];
     if (z) { ev.preventDefault(); set({ zoom: Math.max(0.6, Math.min(3, st.zoom * z)) }); return; }
     if (ev.key === '0') { ev.preventDefault(); set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }); return; }
+    if ((ev.key === 'f' || ev.key === 'F') && st.sel) { ev.preventDefault(); flyTo(st.sel); return; }
     const d = { ArrowLeft: [90, 0], ArrowRight: [-90, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[ev.key]; if (!d) return;
     ev.preventDefault(); set({ px: clampPan(st.px + d[0], W), py: clampPan(st.py + d[1], H) });
   });
@@ -344,19 +376,18 @@ export async function spacePage(ctx) {
     const view = (az, elr) => { const c = Math.cos(az), s2 = Math.sin(az), ce2 = Math.cos(elr), se2 = Math.sin(elr);
       return (x, y, z) => { const X = x * c - y * s2, Y = x * s2 + y * c, vy = Y + D * ce2, vz = z - D * se2, dep = vy * ce2 - vz * se2; return [X / dep, (vy * se2 + vz * ce2) / dep, dep]; }; };
     const p = view(az, el);
-    if (!st.fit) {
-      // framed once, over every angle the camera can take, so rotating and tilting never change the scale.
+    if (!st.fit || (fitPts && !st.dragging && (st.fit.az !== st.az || st.fit.el !== st.el))) {
+      // framed for the angle the camera has now, so the scene fills the view; held while dragging, refitted after.
       // The frame is centred on the plane, not on what happens to be in view.
       let ext = 0, top = 0, bottom = 0;
-      for (let a = 0; a < 360; a += 15) for (let e = 18; e <= 70; e += 13) {
-        const q = view((a * Math.PI) / 180, (e * Math.PI) / 180), [ox, ou] = q(0, 0, 0);
-        for (const [x, y, z] of fitPts) { const [X, U] = q(x, y, z); ext = Math.max(ext, Math.abs(X - ox)); top = Math.max(top, U - ou); bottom = Math.max(bottom, ou - U); }
-      }
+      const [ox, ou] = p(0, 0, 0);
+      for (const [x, y, z] of fitPts) { const [X, U] = p(x, y, z); ext = Math.max(ext, Math.abs(X - ox)); top = Math.max(top, U - ou); bottom = Math.max(bottom, ou - U); }
       const F = Math.min((W - 40) / (2 * ext), (H - 130) / (top + bottom));
-      st.fit = { D, F, top, bottom };
+      st.fit = { D, F, top, bottom, az: st.az, el: st.el };
     }
     const F = st.fit.F * st.zoom, [ox, ou] = p(0, 0, 0);
     const CX = W / 2 - F * ox + st.px, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou + st.py;
+    st.cam = { CX, CY, F, ox, ou };
     return (x, y, z = 0) => { const [X, U, dep] = p(x, y, z); return [CX + F * X, CY - F * U, dep, F / dep]; };
   }
   const hourLabel = (b) => fmtClock(M.hourStart + b * 36e5);
@@ -380,14 +411,15 @@ export async function spacePage(ctx) {
     if (M.scanner) ent.set(CM_ID, { p3: [M.scanner.x, M.scanner.y, M.scanner.z], env: 'scanner' });
     if (M.view === 'account') { for (const t of M.towers) ent.set(t.id, { p3: [t.x, t.y, t.h], env: 'svc' }); for (const r of M.roles) ent.set(r.id, { p3: [r.x, r.y, r.z], env: r.cluster.env }); for (const n of M.fars) ent.set(`far:${n.id}`, { p3: [n.x, n.y, 8], env: n.env }); for (const g of M.gates) ent.set(g.id, { p3: [g.x, g.y, 4], env: 'outer' }); for (const d of M.doors) ent.set(d.id, { p3: [d.x, d.y, 4], env: d.env }); }
     const liftOf = (l, a, b) => (/^xcloud/.test(l.kind) ? 70 + 0.12 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
-    const fitPts = [...M.planes.flatMap((q) => [[q.x0, q.y0, 0], [q.x1, q.y0, 0], [q.x1, q.y1, 0], [q.x0, q.y1, 0], [0, q.y0 - 60, 0]]), ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0]]), ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
+    const fitPts = [...M.planes.flatMap((q) => [[q.x0, q.y0, 0], [q.x1, q.y0, 0], [q.x1, q.y1, 0], [q.x0, q.y1, 0], [0, q.y0 - 60, 0]]), ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0], [s.x + (s.x < 0 ? -90 : 90), s.y, s.z + 14]]),   // and some room for its name
+ ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
     if (M.view === 'estate') for (const q of M.planes) fitPts.push([-760 - (M.planes.length > 1 ? 120 : 0), (q.y0 + q.y1) / 2, 0], [760, (q.y0 + q.y1) / 2, 0]);
     if (M.scanner) fitPts.push([M.scanner.x, M.scanner.y, M.scanner.z + 20]);
     for (const l of M.links) { const a = ent.get(l.from), b = ent.get(l.to); if (a && b) fitPts.push(apex3(a.p3, b.p3, l.from < l.to ? 1 : -1, liftOf(l, a.p3, b.p3))); }
     const P = camera(fitPts), ref = (st.fit.F * st.zoom) / st.fit.D, sinEl = Math.sin((st.el * Math.PI) / 180);
     const path = (pts) => `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')}`;
     const ring3 = (cx, cy, r, a0, a1, n = 44) => path(Array.from({ length: n + 1 }, (_, i) => { const a = a0 + ((a1 - a0) * i) / n; return P(cx + Math.cos(a) * r, cy + Math.sin(a) * r, 0); }));
-    const pick = (id) => (ev) => { ev.stopPropagation(); set({ sel: sel === id ? null : id }); };
+    const pick = (id) => (ev) => { ev.stopPropagation(); lastPick = { id, at: Date.now() }; set({ sel: sel === id ? null : id }); };
     const out = { floor: [], halo: [], rings: [], towers: [], stems: [], stars: [], arcs: [], paths: [], parts: [], sparks: [], sats: [], marks: [], hits: [], labels: [] };
     const tops = new Map(), blocks = [[0, 0, 400, 76], [W - 330, 0, W, 58]];
     const fits = (r) => r[0] >= 4 && r[2] <= W - 4 && r[1] >= 4 && r[3] <= H - 4 && !blocks.some((o) => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
@@ -601,12 +633,16 @@ export async function spacePage(ctx) {
         break;
       }
     }
+    // names: the picked one and anything flagged this hour always; otherwise only the busiest few, so a large estate
+    // is not covered in labels (every ring still names itself on hover)
+    let named = 0; const NAMES = M.view === 'estate' ? 12 : 20;
     for (const c of cands.sort((a, x) => x.pr - a.pr)) {
+      if (named >= NAMES && c.pr < 900) continue;
       const bw = Math.round((c.text.length * 6.5 + 16) * FZ), bh = 10 * FZ;
       for (const [dx, dy] of [[0, -24 * FZ], [bw / 2 + 14, -14 * FZ], [-bw / 2 - 14, -14 * FZ], [0, -46 * FZ], [0, c.below * FZ]]) {
         const cx = c.x + dx, cy = c.y + dy, r = [cx - bw / 2, cy - bh, cx + bw / 2, cy + bh];
         if (!fits(r)) continue;
-        blocks.push(r);
+        blocks.push(r); named++;
         out.labels.push(svg('g', { class: 'sp-hit', onClick: c.pick }, svg('line', { x1: f(c.x), y1: f(c.y), x2: f(cx), y2: f(dy < 0 ? r[3] : r[1]), stroke: c.color, 'stroke-width': 0.8, opacity: 0.7 }),
           svg('rect', { x: f(r[0]), y: f(r[1]), width: bw, height: f(2 * bh), rx: 3, fill: '#03100b', 'fill-opacity': 0.88, stroke: c.color }), svg('text', { x: f(cx), y: f(cy + 3.6 * FZ), 'text-anchor': 'middle', fill: '#e3efe8', class: 'sp-pill' }, c.text)));
         if (c.faded && rel) out.labels[out.labels.length - 1].setAttribute('opacity', FADE + 0.15);
@@ -1136,7 +1172,8 @@ export async function spacePage(ctx) {
         ['↑', 'Move the view up', () => set({ py: clampPan(st.py + 80, H) })], ['↓', 'Move the view down', () => set({ py: clampPan(st.py - 80, H) })]].map(btn)),
       h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Turn'), ...[['⟲', 'Rotate left', () => set({ az: st.az - 20 })], ['⟳', 'Rotate right', () => set({ az: st.az + 20 })],
         ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })]].map(btn)),
-      h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Zoom'), ...[['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })]].map(btn),
+      h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Zoom'), ...[['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })],
+          ['⌖', 'Go to what is picked (or press F, or double-click it)', () => { if (st.sel) flyTo(st.sel); }]].map(btn),
         h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
   }
 
