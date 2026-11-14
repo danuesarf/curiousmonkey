@@ -571,9 +571,11 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 
 // ---- radar v3 ----
 const whoOf = (req) => (['roles', 'users'].includes(req.query.who) ? req.query.who : 'all');
-data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await estate(req.user, whoOf(req)))));
+// Radar, like Space, is worked out at most every few seconds per viewer scope and kept warm while someone looks
+data.get('/radar/estate', requirePerm('view'), wrap(async (req, res) => res.json(await cachedWarm(`radar:${scopeKey(req.user)}:${whoOf(req)}`, () => estate(req.user, whoOf(req))))));
 data.get('/radar/account/:id', requirePerm('view'), wrap(async (req, res) => {
-  const r = await accountRadar(req.user, uuid.parse(req.params.id), whoOf(req)); if (!r) throw NotFound(); res.json(r);
+  const id = uuid.parse(req.params.id);
+  const r = await cachedWarm(`radar:${id}:${scopeKey(req.user)}:${whoOf(req)}`, () => accountRadar(req.user, id, whoOf(req))); if (!r) throw NotFound(); res.json(r);
 }));
 // ---------- event history: the calls kept per role session ----------
 const EventsQ = z.object({

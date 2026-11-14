@@ -10,7 +10,8 @@ const share = (unused, granted) => (num(granted) ? num(unused) / num(granted) : 
 async function pastShares(daysAgo, accountIds) {
   if (!accountIds.length) return new Map();
   const rows = (await query(
-    `WITH d AS (SELECT account_id, max(day) AS day FROM role_snapshots WHERE day <= current_date - $1::int AND account_id = ANY($2) GROUP BY account_id)
+    `WITH d AS (SELECT x.account_id, (SELECT max(day) FROM role_snapshots s WHERE s.account_id = x.account_id AND s.day <= current_date - $1::int) AS day
+                 FROM unnest($2::uuid[]) AS x(account_id))
      SELECT s.account_id, sum(s.granted) AS g, sum(s.used) AS u, sum(s.unused) AS un FROM role_snapshots s JOIN d USING (account_id, day) GROUP BY s.account_id`,
     [daysAgo, accountIds])).rows;
   return new Map(rows.map((r) => [r.account_id, { never: share(r.un, r.g), excess: num(r.g) - num(r.u) }]));
@@ -72,10 +73,12 @@ export async function accountRadar(user, accountId, who = 'all') {
             s30.granted AS g30, s30.unused AS u30, s7.granted AS g7, s7.unused AS u7, fs.first AS first_snapshot,
             EXISTS (SELECT 1 FROM flags f WHERE f.role_id=r.id AND f.category='unmapped-event' AND f.status='open') AS unidentified
        FROM roles r
-       LEFT JOIN (SELECT role_id, sum(count) calls, sum(error_count) denied, sum(count) FILTER (WHERE day >= current_date - 1) c24 FROM activity_daily GROUP BY role_id) t ON t.role_id=r.id
+       -- grouped over this account's roles only: grouping whole tables would read the estate's history for one account
+       LEFT JOIN (SELECT role_id, sum(count) calls, sum(error_count) denied, sum(count) FILTER (WHERE day >= current_date - 1) c24
+                    FROM activity_daily WHERE role_id IN (SELECT id FROM roles WHERE account_id=$1) GROUP BY role_id) t ON t.role_id=r.id
        LEFT JOIN LATERAL (SELECT granted, unused FROM role_snapshots s WHERE s.role_id=r.id AND s.day <= current_date - 30 ORDER BY day DESC LIMIT 1) s30 ON true
        LEFT JOIN LATERAL (SELECT granted, unused FROM role_snapshots s WHERE s.role_id=r.id AND s.day <= current_date - 7 ORDER BY day DESC LIMIT 1) s7 ON true
-       LEFT JOIN (SELECT role_id, min(day) AS first FROM role_snapshots GROUP BY role_id) fs ON fs.role_id=r.id
+       LEFT JOIN (SELECT role_id, min(day) AS first FROM role_snapshots WHERE account_id=$1 GROUP BY role_id) fs ON fs.role_id=r.id
       WHERE r.account_id=$1 AND r.deleted_at IS NULL AND ${whoSql(who)}`, [accountId])).rows;
   const firstDay = (await query('SELECT min(day) AS d FROM role_snapshots WHERE account_id=$1', [accountId])).rows[0].d;
   const pings = (await query(`SELECT role_id, kind, severity FROM changes WHERE account_id=$1 AND role_id IS NOT NULL AND at > now() - interval '7 days' ORDER BY at DESC`, [accountId])).rows;
