@@ -1,4 +1,4 @@
-import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR, loadEnvironments, envName, envs, paint } from '../lib.js';
+import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog, modal, ApiError, freshness, TONE_COLOR, loadEnvironments, envName, envs, paint, menu, searchBox } from '../lib.js';
 import { session, go } from '../main.js';
 import { gcpSection, cloudTabs } from './gcp.js';
 
@@ -272,7 +272,7 @@ export async function accountsPage(ctx) {
     tabs && cloudTabs('aws', '#/accounts'),
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS · AWS'), h('h1', null, 'AWS accounts'), h('p', { class: 'muted' }, 'Each account is read with a read-only identity that can see IAM and CloudTrail, and is explicitly denied your data.')),
       can('accounts') && h('div', { class: 'row' }, h('button', { class: 'btn', onClick: () => planDialog(ctx) }, 'Add planned account'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an AWS account'))),
-    live.length ? live.map((a) => accountCard(a, ctx, can)) : h('div', { class: 'card empty' }, 'No accounts connected yet.'),
+    live.length ? accountsTable(live, ctx, can) : h('div', { class: 'card empty' }, 'No accounts connected yet.'),
     planned.length > 0 && plannedCard(planned, ctx, can));
 }
 
@@ -337,7 +337,74 @@ function planDialog(ctx) {
   bg.querySelector('input, textarea')?.focus();
 }
 
-function accountCard(a, ctx, can) {
+/**
+ * One row per account: what it is, whether it is reachable, how much history is read, and when it was last scanned.
+ * Scan and Edit are on the row; everything else is in its More menu. Clicking a row opens its details underneath.
+ * The open row is kept in the address (?open=<id>), so a link can point at one account.
+ */
+function accountsTable(accounts, ctx, can) {
+  const open = new Set((ctx.params.get('open') || '').split(',').filter((id) => accounts.some((a) => a.id === id)));
+  const f = { q: '', status: '' };
+  const tbody = h('tbody');
+  const count = h('span', { class: 'count' });
+  const remember = () => { const p = new URLSearchParams(location.hash.split('?')[1] || ''); open.size ? p.set('open', [...open].join(',')) : p.delete('open'); const q = p.toString(); history.replaceState(null, '', `#/accounts${q ? `?${q}` : ''}`); };
+  const scan = async (a) => { try { await post(`/accounts/${a.id}/scan`); toast(`Scan queued for ${a.name}`); go('#/operations/scans'); } catch (x) { toast(x.message, true); } };
+  const verify = async (a) => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/operations/scans'); } catch (x) { toast(x.message, true); } };
+  const remove = async (a) => {
+    if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) {
+      try { await api('DELETE', `/accounts/${a.id}`); toast(`${a.name} removed`); ctx.reload(); } catch (x) { toast(x.message, true); }
+    }
+  };
+  const historyCell = (hist) => {
+    if (!hist?.regions?.length) return h('span', { class: 'small muted' }, 'not read yet');
+    const i = h('i', { class: hist.complete ? 'done' : null }); i.style.width = `${Math.max(2, hist.progress)}%`;
+    return h('span', { class: 'nowrap small' }, h('span', { class: 'mini-track', role: 'img', 'aria-label': `${hist.progress}% of history read` }, i), hist.complete ? 'complete' : `${hist.progress}%`);
+  };
+  const draw = () => {
+    const needle = f.q.toLowerCase();
+    const shown = accounts.filter((a) => (!needle || `${a.name} ${a.account_id} ${envName(a.environment)}`.toLowerCase().includes(needle)) && (!f.status || a.status === f.status));
+    count.textContent = `${shown.length} of ${accounts.length} account${accounts.length === 1 ? '' : 's'}`;
+    tbody.replaceChildren(...shown.flatMap((a) => {
+      const isOpen = open.has(a.id);
+      const toggle = () => { isOpen ? open.delete(a.id) : open.add(a.id); remember(); draw(); };
+      const stop = (e) => e.stopPropagation();
+      const row = h('tr', { class: 'acct-row', tabindex: '0', 'aria-expanded': String(isOpen), onClick: toggle, onKeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === row) { e.preventDefault(); toggle(); } } },
+        h('td', null, h('span', { class: 'caret', 'aria-hidden': 'true' }, '▸'), ' ', h('span', { class: 'name' }, a.name), h('div', { class: 'tiny muted mono' }, a.account_id)),
+        h('td', null, envName(a.environment)),
+        h('td', null, h('span', { class: `badge ${STATUS[a.status]}`, title: a.status === 'error' ? a.status_detail?.message || '' : '' }, a.status)),
+        h('td', null, historyCell(a.history)),
+        h('td', null, num(a.roles)),
+        h('td', { class: 'nowrap small', title: a.last_scan_at ? fmtDate(a.last_scan_at) : '' }, a.last_scan_at ? ago(a.last_scan_at) : h('span', { class: 'muted' }, 'never')),
+        h('td', { class: 'actions-cell', onClick: stop, onKeydown: stop },
+          a.status === 'connected' ? can('scan') && h('button', { class: 'btn sm', onClick: () => scan(a) }, 'Scan now')
+            : can('accounts') && h('button', { class: 'btn sm primary', onClick: () => verify(a) }, 'Verify connection'),
+          can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
+          menu('More', [
+            ['Radar', `#/?view=account&account=${a.id}`], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}`],
+            ['Event history', `#/events?account=${a.id}`], ['Unidentified calls', `#/unidentified?account=${a.id}`], ['Identities', `#/identities?accounts=${a.id}`],
+            a.status === 'connected' && can('accounts') && ['Verify connection', () => verify(a)],
+            can('accounts') && ['Remove account', () => remove(a), { danger: true }],
+          ], { title: `More for ${a.name}` })));
+      return isOpen ? [row, h('tr', { class: 'acct-detail' }, h('td', { colspan: 7 }, accountDetail(a)))] : [row];
+    }));
+    if (!shown.length) tbody.replaceChildren(h('tr', null, h('td', { colspan: 7, class: 'empty' }, 'No account matches.')));
+  };
+  const search = searchBox({ placeholder: 'Find an account by name or ID', label: 'Find an account', onSearch: (v) => { f.q = v.trim(); draw(); } });
+  ctx.onLeave(search.cancel);
+  const statuses = [...new Set(accounts.map((a) => a.status))];
+  const statusSel = statuses.length > 1 && (() => { const s = h('select', { 'aria-label': 'Status' }, h('option', { value: '' }, 'Any status'), statuses.map((x) => h('option', { value: x }, `${x} (${accounts.filter((a) => a.status === x).length})`))); s.addEventListener('change', () => { f.status = s.value; draw(); }); return s; })();
+  draw();
+  const errors = accounts.filter((a) => a.status === 'error');
+  return h('section', { class: 'card' },
+    errors.length > 0 && h('div', { class: 'card-b' }, h('div', { class: 'alert bad' }, `${errors.length} account${errors.length === 1 ? ' cannot' : 's cannot'} be reached: ${errors.map((a) => a.name).join(', ')}. Open ${errors.length === 1 ? 'it' : 'one'} to see why.`)),
+    accounts.length > 6 && h('div', { class: 'filters' }, search, statusSel, count),
+    h('div', { class: 'scroll' }, h('table', { class: 'acct-table' },
+      h('thead', null, h('tr', null, h('th', null, 'Account'), h('th', null, 'Environment'), h('th', null, 'Status'), h('th', null, 'History read'), h('th', null, 'Roles'), h('th', null, 'Last scan'), h('th', null, ''))),
+      tbody)));
+}
+
+/** What a row opens to: why it cannot be reached, how far history is read, how it is read, and data event sources. */
+function accountDetail(a) {
   const dataBox = h('div', { class: 'card-b' });
   const loadData = async () => {
     const r = await get(`/accounts/${a.id}/data-events`);
@@ -348,30 +415,20 @@ function accountCard(a, ctx, can) {
   };
   const det = h('details', null, h('summary', { class: 'btn sm' }, 'Buckets and resources with data events'), dataBox);
   det.addEventListener('toggle', () => { if (det.open) loadData(); });
-  return h('section', { class: 'card' },
-    h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, a.name), h('span', { class: `badge ${STATUS[a.status]}` }, a.status), h('span', { class: 'small muted mono' }, `${a.account_id} · ${envName(a.environment)}`)),
-      h('div', { class: 'row' }, can('scan') && h('button', { class: 'btn sm', onClick: async () => { try { await post(`/accounts/${a.id}/scan`); toast('Scan queued'); go('#/operations/scans'); } catch (x) { toast(x.message, true); } } }, 'Scan now'),
-        can('accounts') && a.status !== 'connected' && h('button', { class: 'btn sm primary', onClick: async () => { try { await post(`/accounts/${a.id}/verify`); toast('Checking the connection. Progress is on Scan activity.'); go('#/operations/scans'); } catch (x) { toast(x.message, true); } } }, 'Verify connection'),
-        h('a', { class: 'btn sm', href: `#/?view=account&account=${a.id}` }, 'Radar'),
-        h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`account:${a.account_id}`)}` }, 'Trust map'),
-        h('a', { class: 'btn sm', href: `#/events?account=${a.id}` }, 'Event history'),
-        h('a', { class: 'btn sm', href: `#/unidentified?account=${a.id}` }, 'Unidentified calls'),
-        can('accounts') && h('a', { class: 'btn sm', href: `#/accounts/${a.id}/edit` }, 'Edit'),
-        can('accounts') && h('button', { class: 'btn sm danger', onClick: async () => { if (await confirmDialog({ title: `Remove ${a.name}?`, message: 'This deletes the account from Curious Monkey together with its stored scan history, findings and drafts. Nothing changes in AWS.', confirmLabel: 'Remove account', danger: true })) { await api('DELETE', `/accounts/${a.id}`); ctx.reload(); } } }, 'Remove'))),
-    a.status === 'error' && h('div', { class: 'card-b' }, h('div', { class: 'alert bad' }, a.status_detail?.message || 'The account could not be reached.')),
-    h('div', { class: 'card-b stack' },
-      a.history && historyBars(a.history),
-      h('dl', { class: 'kv' },
-        h('dt', null, 'Reads from'), h('dd', null, SOURCE_LABEL[a.event_source], a.event_source === 's3' && h('span', { class: 'mono small' }, ` s3://${a.s3_bucket}${a.s3_prefix ? `/${a.s3_prefix}` : ''}`), h('span', { class: 'muted' }, ` · ${a.lookback_days} days`)),
-        h('dt', null, 'Access'), h('dd', null, MODE_LABEL[a.auth_mode], a.auth_mode === 'assume_role' && h('span', { class: 'mono small' }, ` ${a.role_arn}`),
-          h('span', { class: 'muted' }, a.auth_mode === 'access_key' ? ` · key ${a.credentials_hint || 'missing'}` : a.base_identity === 'stored' ? ` · from stored key ${a.credentials_hint || 'missing'}` : ' · from the worker’s credentials')),
-        h('dt', null, 'Regions'), h('dd', null, a.regions.join(', ')),
-        h('dt', null, 'Roles found'), h('dd', null, num(a.roles)), h('dt', null, 'Last scan'), h('dd', null, a.last_scan_at ? `${fmtDate(a.last_scan_at)} (${ago(a.last_scan_at)})` : 'never')),
-      a.checkpoints.length > 0 && h('div', null, h('h3', null, 'Stored history'), h('p', { class: 'small muted' }, 'Each daily scan continues from the newest stored event. It never re-reads history that is already saved.'),
-        h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Region'), h('th', null, 'History starts'), h('th', null, 'Stored up to'), h('th', null, 'Events read'), h('th', null, 'Gap'))),
-          h('tbody', null, a.checkpoints.map((c) => h('tr', null, h('td', { class: 'mono small' }, c.region), h('td', { class: 'small' }, fmtDate(c.first)), h('td', { class: 'small' }, fmtDate(c.last)), h('td', null, num(c.events)),
-            h('td', null, c.gap ? h('span', { class: 'badge b-medium', title: 'The worker was down longer than the history lasts, so some days were never read.' }, 'gap') : 'none'))))))),
-      det));
+  return h('div', { class: 'stack' },
+    a.status === 'error' && h('div', { class: 'alert bad' }, a.status_detail?.message || 'The account could not be reached.'),
+    a.history && historyBars(a.history),
+    h('dl', { class: 'kv' },
+      h('dt', null, 'Reads from'), h('dd', null, SOURCE_LABEL[a.event_source], a.event_source === 's3' && h('span', { class: 'mono small' }, ` s3://${a.s3_bucket}${a.s3_prefix ? `/${a.s3_prefix}` : ''}`), h('span', { class: 'muted' }, ` · ${a.lookback_days} days`)),
+      h('dt', null, 'Access'), h('dd', null, MODE_LABEL[a.auth_mode], a.auth_mode === 'assume_role' && h('span', { class: 'mono small' }, ` ${a.role_arn}`),
+        h('span', { class: 'muted' }, a.auth_mode === 'access_key' ? ` · key ${a.credentials_hint || 'missing'}` : a.base_identity === 'stored' ? ` · from stored key ${a.credentials_hint || 'missing'}` : ' · from the worker’s credentials')),
+      h('dt', null, 'Regions'), h('dd', null, a.regions.join(', ')),
+      h('dt', null, 'Roles found'), h('dd', null, num(a.roles)), h('dt', null, 'Last scan'), h('dd', null, a.last_scan_at ? `${fmtDate(a.last_scan_at)} (${ago(a.last_scan_at)})` : 'never')),
+    a.checkpoints.length > 0 && h('div', null, h('h3', null, 'Stored history'), h('p', { class: 'small muted' }, 'Each daily scan continues from the newest stored event. It never re-reads history that is already saved.'),
+      h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Region'), h('th', null, 'History starts'), h('th', null, 'Stored up to'), h('th', null, 'Events read'), h('th', null, 'Gap'))),
+        h('tbody', null, a.checkpoints.map((c) => h('tr', null, h('td', { class: 'mono small' }, c.region), h('td', { class: 'small' }, fmtDate(c.first)), h('td', { class: 'small' }, fmtDate(c.last)), h('td', null, num(c.events)),
+          h('td', null, c.gap ? h('span', { class: 'badge b-medium', title: 'The worker was down longer than the history lasts, so some days were never read.' }, 'gap') : 'none'))))))),
+    det);
 }
 
 /** How far back each region has been read, and whether it has reached the present. */

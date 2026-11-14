@@ -272,3 +272,45 @@ export function accountPicker({ accounts, selected, onChange, multi = true }) {
     destroy() { document.removeEventListener('click', outside); document.removeEventListener('keydown', esc); },
   };
 }
+
+/**
+ * A "More" menu: a button that opens a short list of actions. items: [label, href | onClick, { danger, disabled }].
+ * Arrow keys move, Escape or a click outside closes, focus returns to the button.
+ */
+export function menu(label, items, { title } = {}) {
+  const list = h('div', { class: 'menu-list', role: 'menu', hidden: true });
+  const btn = h('button', { class: 'btn sm menu-btn', type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: title || label }, label);
+  const wrap = h('div', { class: 'menu' }, btn, list);
+  const close = (focus = false) => { list.hidden = true; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', outside, true); window.removeEventListener('scroll', onMove, true); window.removeEventListener('resize', onMove); if (focus) btn.focus(); };
+  const onMove = () => close();
+  // placed against the window, so a scrolling table or card around the button cannot clip it; opens upward near the bottom
+  const place = () => {
+    const r = btn.getBoundingClientRect(), w = list.offsetWidth, ht = list.offsetHeight;
+    list.style.left = `${Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8))}px`;
+    list.style.top = `${r.bottom + 4 + ht > window.innerHeight - 8 ? Math.max(8, r.top - 4 - ht) : r.bottom + 4}px`;
+  };
+  const outside = (e) => { if (!wrap.contains(e.target)) close(); };
+  const entries = items.filter(Boolean).map(([l, act, o = {}]) => {
+    const el = typeof act === 'string' ? h('a', { href: act, role: 'menuitem', class: o.danger ? 'danger' : '' }, l)
+      : h('button', { type: 'button', role: 'menuitem', class: o.danger ? 'danger' : '', disabled: !!o.disabled }, l);
+    el.addEventListener('click', (e) => { e.stopPropagation(); close(); if (typeof act === 'function') act(e); });
+    return el;
+  });
+  list.append(...entries);
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!list.hidden) return close();
+    list.hidden = false; btn.setAttribute('aria-expanded', 'true'); place();
+    document.addEventListener('click', outside, true); window.addEventListener('scroll', onMove, true); window.addEventListener('resize', onMove);
+    entries.find((x) => !x.disabled)?.focus();
+  });
+  list.addEventListener('keydown', (e) => {
+    const live = entries.filter((x) => !x.disabled), i = live.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(true); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); live[(i + 1) % live.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); live[(i - 1 + live.length) % live.length]?.focus(); }
+    else if (e.key === 'Tab') close();
+  });
+  wrap.addEventListener('click', (e) => e.stopPropagation());
+  return wrap;
+}

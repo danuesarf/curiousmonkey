@@ -771,3 +771,23 @@ pre.diff .fold{color:var(--faint);font-style:italic}
   .print-report section{break-before:auto}
   @page{size:A4 landscape;margin:12mm}
 }
+
+/* ---- "More" menu ---- */
+.menu{position:relative;display:inline-block}
+.menu-list{position:fixed;z-index:60;min-width:190px;display:flex;flex-direction:column;padding:4px 0;background:var(--panel);border:1px solid var(--edge);box-shadow:0 10px 30px rgba(0,0,0,.35)}
+.menu-list[hidden]{display:none}
+.menu-list>a,.menu-list>button{display:block;text-align:left;padding:8px 14px;font:inherit;font-size:13px;color:var(--ink);background:none;border:0;text-decoration:none;cursor:pointer;white-space:nowrap}
+.menu-list>a:hover,.menu-list>button:hover,.menu-list>a:focus-visible,.menu-list>button:focus-visible{background:var(--raise);outline:0}
+.menu-list>.danger{color:var(--red-ink);border-top:1px solid var(--line);margin-top:4px}
+.menu-list>button:disabled{color:var(--faint);cursor:default}
+
+/* ---- Accounts table ---- */
+.acct-table td{vertical-align:middle}
+.acct-table tr.acct-row{cursor:pointer}
+.acct-table tr.acct-row[aria-expanded=true] td{background:var(--raise)}
+.acct-table .caret{display:inline-block;width:12px;color:var(--faint);transition:transform .15s}
+.acct-table tr[aria-expanded=true] .caret{transform:rotate(90deg)}
+.acct-table tr.acct-detail>td{background:var(--raise);padding:4px 16px 18px;border-top:0}
+.acct-table .mini-track{display:inline-block;width:70px;height:6px;background:var(--surface);border:1px solid var(--line);vertical-align:middle;margin-right:6px}
+.acct-table .mini-track i{display:block;height:100%;background:var(--amber)}
+.acct-table .mini-track i.done{background:#5fd3a2}
