@@ -39,7 +39,7 @@ export function lightRgb(rgb) {
   // grounds and ink: the night-sky ground (L ≈ 0.15) becomes a pale mint paper (≈ 0.975), the pale ink (≈ 0.93) a deep green-black (≈ 0.24)
   const flip = clamp(1.12 - 0.94 * L, 0.16, 0.985);
   // accents: keep them coloured, but never brighter than reads on paper; dark accent grounds become pale tints
-  const accent = L > 0.5 ? clamp(0.3 + 0.36 * L, 0.42, 0.64) : flip;
+  const accent = L > 0.5 ? clamp(0.3 + 0.36 * L, 0.42, 0.55) : flip;
   const w = smooth(C, 0.05, 0.13);
   const L2 = flip + (accent - flip) * w;
   // pale tints lose some colour so the page stays calm; accents keep theirs

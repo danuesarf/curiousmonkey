@@ -20,6 +20,9 @@ const drift = (now, past) => (now == null || past == null ? null : now - past);
 const headColor = (d) => (d == null ? '#7e978a' : d > 0.04 ? '#f0b45a' : d < -0.04 ? '#6fe3b0' : '#7e978a');
 const headText = (d) => (d == null ? '· no trail yet' : Math.abs(d) < 0.01 ? '· flat' : `${d > 0 ? '▲' : '▼'} ${Math.abs(d * 100).toFixed(1)} pts`);
 const short = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
+const pl = (n, w) => `${num(n)} ${w}${n === 1 ? '' : 's'}`;
+// a trend too small to show reads as flat, never as -0.0%
+const pct = (t, sign = false) => (Math.abs(t) < 0.0005 ? 'flat' : `${sign ? (t > 0 ? '+' : '−') : (t > 0 ? '▲ ' : '▼ ')}${Math.abs(t * 100).toFixed(1)}%`);
 const riskClass = (r) => ({ High: 'b-high', Medium: 'b-medium', Low: 'b-low' })[r] || 'b-neutral';
 
 export async function radarPage(ctx) {
@@ -62,6 +65,7 @@ function sectors(groups, total, gap) {
   return groups.map((g) => { const w = (span * g.weight) / Math.max(total, 1); const s = { ...g, a0: a0 + gap / 2, a1: a0 + gap / 2 + w }; a0 += w + gap; return s; });
 }
 function drawSectors(kids, secs, sub, onClick) {
+  const boxes = [];
   for (const s of secs) {
     const [ex0, ey0] = P(s.a0 - 2, 56), [ex1, ey1] = P(s.a0 - 2, 324), [ax0, ay0] = P(s.a0, 324), [ax1, ay1] = P(s.a1, 324);
     if (secs.length > 1) kids.push(svg('path', { d: `M${ex0} ${ey0} L${ex1} ${ey1}`, stroke: '#2a5c45', 'stroke-width': 1.2 }));
@@ -70,10 +74,13 @@ function drawSectors(kids, secs, sub, onClick) {
     const mid = (s.a0 + s.a1) / 2; const [lx, lyr] = P(mid, 344); const ly = r1(lyr + (lyr < CY ? -8 : 6));
     const anchor = Math.abs(lx - CX) < 40 ? 'middle' : lx > CX ? 'start' : 'end';
     const t2 = sub(s); const fit = (w) => (anchor === 'start' ? Math.min(lx, 906 - w) : anchor === 'end' ? Math.max(lx, -106 + w) : lx);
+    const bw = Math.max(s.name.length * 7.3, t2.length * 5.6), bx = fit(bw), x0 = anchor === 'start' ? bx : anchor === 'end' ? bx - bw : bx - bw / 2;
+    boxes.push([x0, ly - 12, x0 + bw, ly + 18]);
     kids.push(svg('g', onClick ? { style: 'cursor:pointer', onClick: (e) => { e.stopPropagation(); onClick(s); } } : null,
       svg('text', { x: r1(fit(s.name.length * 7.3)), y: ly, 'text-anchor': anchor, fill: '#e3efe8', 'font-family': 'Geist Mono, monospace', 'font-size': 12 }, s.name),
       svg('text', { x: r1(fit(t2.length * 5.6)), y: ly + 14, 'text-anchor': anchor, fill: '#7e978a', 'font-size': 11 }, t2)));
   }
+  return boxes;
 }
 function contact(kids, c) {
   // c: { d, x, y, fill, stroke, base, act, ang, title, sel, isNew, onClick }
@@ -178,7 +185,7 @@ async function estateView(ctx, shell) {
       list.forEach((a, i) => { a.ang = s.a0 + 1.5 + ((i + 0.5) / list.length) * (s.a1 - s.a0 - 3); a.rad = RAD(a.never); [a.x, a.y] = P(a.ang, a.rad); a.s = r1(3 + Math.sqrt(Math.max(0, a.excess) / maxEx) * 13); });
     }
     const kids = []; const top = base(kids, ZONE_RINGS, ZONE_LABELS);
-    drawSectors(kids, secs, (s) => `${s.list.length} accts · ${num(s.list.reduce((t, x) => t + x.roles, 0))} roles`);
+    const secBoxes = drawSectors(kids, secs, (s) => `${pl(s.list.length, 'acct')} · ${pl(s.list.reduce((t, x) => t + x.roles, 0), 'role')}`);
     top();
     for (const a of accounts) if (!cf || cf(a)) trail(kids, a.ang, a.never30, a.never7, a.never, a.d30 ?? 0);
     for (const a of accounts) {
@@ -193,9 +200,9 @@ async function estateView(ctx, shell) {
     if (sel) cands.push({ ...sel, text: sel.name, color: '#f6e016' });
     for (const a of accounts.filter((x) => x.pings && (!cf || cf(x))).sort((x, y) => ['high', 'warn', 'info', 'good'].indexOf(x.pingSeverity) - ['high', 'warn', 'info', 'good'].indexOf(y.pingSeverity))) cands.push({ ...a, text: a.name, color: SEV[a.pingSeverity] });
     for (const a of accounts.filter((x) => (x.d30 ?? 0) > 0.04 && (!cf || cf(x))).sort((x, y) => y.d30 - x.d30).slice(0, 5)) cands.push({ ...a, text: `${a.name} ${headText(a.d30).replace(' pts', '')}`, color: '#f0b45a' });
-    const seen = new Set(); tags(kids, cands.filter((c) => (seen.has(c.id) ? false : seen.add(c.id))), 12);
+    const seen = new Set(); tags(kids, cands.filter((c) => (seen.has(c.id) ? false : seen.add(c.id))), 12, secBoxes);
     const T = E.totals; const trend = T.excess30 ? (T.excessNowComparable - T.excess30) / T.excess30 : null;
-    dial(kids, 'ESTATE EXCESS', kfmt(T.excess), '#f6e016', trend == null ? 'trend after 30 d' : `${trend > 0 ? '▲' : '▼'} ${Math.abs(trend * 100).toFixed(1)}% · 30 D`, trend == null ? '#7e978a' : trend > 0 ? '#f0b45a' : '#6fe3b0');
+    dial(kids, 'ESTATE EXCESS', kfmt(T.excess), '#f6e016', trend == null ? 'trend after 30 d' : `${pct(trend)} · 30 D`, trend == null || Math.abs(trend) < 0.0005 ? '#7e978a' : trend > 0 ? '#f0b45a' : '#6fe3b0');
     svgEl.replaceChildren(...kids);
 
     // left
@@ -209,7 +216,7 @@ async function estateView(ctx, shell) {
       h('div', { class: 'row', style: 'justify-content:space-between' }, h('span', { class: 'eyebrow' }, ui.chip === 'worse' ? 'ACCOUNTS · WORST HEADING FIRST' : ui.chip === 'better' ? 'ACCOUNTS · MOST IMPROVED FIRST' : 'ACCOUNTS · MOST EXCESS FIRST'),
         h('span', { class: 'mono tiny muted' }, String(accounts.filter((a) => !cf || cf(a)).length))));
     const listed = accounts.filter((a) => !cf || cf(a)).sort((x, y) => (ui.chip === 'better' ? (x.d30 ?? 0) - (y.d30 ?? 0) : ui.chip === 'worse' ? (y.d30 ?? 0) - (x.d30 ?? 0) : y.excess - x.excess));
-    listEl.replaceChildren(...listed.map((a) => h('button', { class: 'rank-row', 'aria-pressed': String(sel === a), onClick: () => { sel = a; draw(); card(); } },
+    listEl.replaceChildren(...listed.map((a) => h('button', { class: 'rank-row', 'aria-pressed': String(sel === a), onClick: () => { sel = sel === a ? null : a; draw(); card(); } },
       h('span', { class: 'rbody' },
         h('span', { class: 'rname' }, h('span', { class: 'n' }, a.name), a.pings > 0 && pill(`${a.pings} PING${a.pings > 1 ? 'S' : ''}`, SEV[a.pingSeverity])),
         h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${envName(a.environment)} · ${num(a.roles)} roles · ${Math.round((a.never ?? 0) * 100)}% never called${a.complete ? '' : ` · ${a.progress}% read`}`))),
@@ -228,7 +235,7 @@ async function estateView(ctx, shell) {
         : h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'ESTATE'), h('h2', null, `${num(T.accounts)} accounts · ${num(T.roles)} roles`),
           h('div', { class: 'tiny muted' }, 'Distance = share of permissions never called · size = excess permissions · trail = where it was 30 days ago')),
       statGrid(a ? [['roles', num(a.roles), '#e3efe8'], ['excess permissions', kfmt(a.excess), '#f0b45a'], ['never-called share', `${Math.round((a.never ?? 0) * 100)}%`, '#8fb5a1'], ['high-risk roles', num(a.high), '#ff8a7a']]
-        : [['excess permissions', kfmt(T.excess), '#f0b45a'], ['change in 30 days', trend == null ? '—' : `${trend > 0 ? '+' : ''}${(trend * 100).toFixed(1)}%`, trend == null ? '#7e978a' : trend > 0 ? '#f0b45a' : '#6fe3b0'],
+        : [['excess permissions', kfmt(T.excess), '#f0b45a'], ['change in 30 days', trend == null ? '—' : pct(trend, true), trend == null || Math.abs(trend) < 0.0005 ? '#7e978a' : trend > 0 ? '#f0b45a' : '#6fe3b0'],
           ['accounts getting worse', String(worse), '#f0b45a'], ['accounts improving', String(better), '#6fe3b0']]),
       a && h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'eyebrow' }, 'HEADING · NEVER-CALLED SHARE, 30 DAYS'),
         spark([a.never30, a.never7, a.never], headColor(a.d30)) || h('p', { class: 'tiny muted' }, 'A trail appears once daily snapshots go back 7 days.'),
@@ -239,11 +246,16 @@ async function estateView(ctx, shell) {
       feedSection(a ? `CHANGES IN ${a.name.toUpperCase()}` : 'CHANGES', { ...F, items }, (f) => { sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); }));
   }
 
+  // back to the estate summary: click empty dish, press Esc, or click the picked row again
+  const unpick = () => { if (sel) { sel = null; draw(); card(); } };
+  svgEl.addEventListener('click', unpick);
+  const onKey = (ev) => { if (ev.key === 'Escape' && !ev.defaultPrevented && !document.querySelector('.win, .palette, dialog[open]')) unpick(); };
+  document.addEventListener('keydown', onKey); ctx.onLeave?.(() => document.removeEventListener('keydown', onKey));
   const T = E.totals;
   shell.left.append(controls, listEl);
   shell.scene.append(svgEl,
     hudEl(`RADAR · ESTATE · ${num(T.accounts)} ACCOUNTS · ${num(T.roles)} ROLES`,
-      `${accounts.filter((a) => (a.d30 ?? 0) > 0.04).length} DRIFTING OUT · ${accounts.filter((a) => (a.d30 ?? 0) < -0.04).length} MOVING IN · ${F.items.length} CHANGES IN 7 DAYS`,
+      `${accounts.filter((a) => (a.d30 ?? 0) > 0.04).length} DRIFTING OUT · ${accounts.filter((a) => (a.d30 ?? 0) < -0.04).length} MOVING IN · ${num(F.total ?? F.items.length)} CHANGES · ${RANGE[F.days].toUpperCase()}`,
       'CONTACT = ACCOUNT · DISTANCE = NEVER CALLED · SIZE = EXCESS · BRIGHTER = BUSIER IN 24 H'),
     legend([['width:10px;height:10px;border-radius:50%;background:#6fe3b0', 'Account (size = excess)'], ['width:10px;height:10px;border-radius:50%;background:#ff8a7a', '8+ high-risk roles'],
       ['width:16px;border-top:2px solid #f0b45a', 'Drifting out (30 d)'], ['width:16px;border-top:2px solid #6fe3b0', 'Moving in'],
@@ -282,7 +294,7 @@ async function accountView(ctx, shell) {
 
   function draw() {
     const kids = []; const top = base(kids, ZONE_RINGS, ZONE_LABELS);
-    drawSectors(kids, secs, (s) => `${s.list.length} roles`);
+    drawSectors(kids, secs, (s) => pl(s.list.length, s.id === 'iam-user' ? 'user' : 'role'));
     top();
     for (const r of roles) if (!r.dead && (r.never30 != null || r.never7 != null)) trail(kids, r.ang, r.never30 ?? r.never7, r.never7, r.never, Math.abs(r.d30 ?? 0) > 0.06 ? r.d30 : 0);
     for (const r of roles) {
@@ -302,13 +314,15 @@ async function accountView(ctx, shell) {
     svgEl.replaceChildren(...kids);
   }
   function list() {
-    const q = search.value.toLowerCase();
-    listEl.replaceChildren(...ranked.filter((r) => !q || r.name.toLowerCase().includes(q)).slice(0, 400).map((r) => h('button', { class: 'rank-row', 'aria-pressed': String(r === sel), onClick: () => { sel = r; draw(); list(); card(); } },
+    const q = search.value.toLowerCase(), hits = ranked.filter((r) => !q || r.name.toLowerCase().includes(q));
+    if (!hits.length) { listEl.replaceChildren(h('p', { class: 'tiny muted', style: 'padding:8px' }, q ? `No role matches “${search.value}”.` : 'No roles.')); return; }
+    listEl.replaceChildren(...hits.slice(0, 400).map((r) => h('button', { class: 'rank-row', 'aria-pressed': String(r === sel), onClick: () => { sel = r; draw(); list(); card(); } },
       h('span', { class: 'rbody' },
         h('span', { class: 'rname' }, h('span', { class: 'n' }, r.name), r.ping && pill(CHANGE_KIND[r.ping.kind], SEV[r.ping.severity]), !r.ping && r.isNew && pill('NEW', '#8ec5ff'), r.unidentified && h('span', { class: 'unk-tag' }, 'UNK')),
         h('span', { class: 'rmeta' }, h('span', { class: 'm' }, `${KIND_LABEL[r.kind]} · ${num(r.granted)} granted${r.dead ? ' · no calls' : ''}`))),
       h('span', { class: 'rval' }, h('span', { class: 'mono tiny', style: `color:${r.dead ? '#ff8a7a' : r.never > 0.75 ? '#ffd89a' : '#9fe8c4'}` }, `${Math.round(r.never * 100)}%`),
-        h('span', { class: 'mono tiny', style: `color:${headColor(r.d30)}` }, headText(r.d30))))));
+        h('span', { class: 'mono tiny', style: `color:${headColor(r.d30)}` }, headText(r.d30))))),
+      ...(hits.length > 400 ? [h('p', { class: 'tiny muted', style: 'padding:8px' }, `Showing 400 of ${num(hits.length)}. Type to narrow the list.`)] : []));
   }
   async function card() {
     const r = sel;

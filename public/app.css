@@ -800,3 +800,6 @@ pre.diff .fold{color:var(--faint);font-style:italic}
 .bell-foot{display:flex;gap:8px;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--line)}
 .sp-full{margin-top:6px;margin-right:6px}
 .field label.acct-opt{flex-direction:row;font-weight:400}.field .acct-picker{align-self:flex-start}
+.space-hud{max-width:calc(100% - 270px)}
+.sp-bar-head .sp-when{white-space:nowrap;flex:none}
+.rail{overflow-y:auto;overflow-x:hidden;scrollbar-width:none}.rail::-webkit-scrollbar{display:none}

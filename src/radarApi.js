@@ -111,10 +111,10 @@ export async function changeFeed(user, { accountId = null, days = 7, limit = 60 
   const unread = unseenSql(user, p);
   p.push(Math.min(200, limit));
   const rows = (await query(
-    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, ${unread} AS unread
+    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, ${unread} AS unread, count(*) OVER ()::int AS total
        FROM changes c JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
       WHERE ${where.join(' AND ')} ORDER BY c.at DESC, c.id DESC LIMIT $${p.length}`, p)).rows;
-  return { items: rows, days: d, seenAt: user.radar_seen_at || null };
+  return { items: rows.map(({ total, ...x }) => x), total: rows[0]?.total ?? 0, days: d, seenAt: user.radar_seen_at || null };
 }
 
 /** What this person has not seen yet, for the bell: how many, the worst severity, and the newest few. */

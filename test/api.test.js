@@ -956,6 +956,8 @@ test('change feed: the bell counts what is new by when it was recorded, Radar sh
     const u = (await owner.get('/api/changes/unread')).json;
     assert.equal(u.count, 1); assert.equal(u.worst, 'warn'); assert.equal(u.items[0].title, 'feed test late');
     const week = (await owner.get('/api/changes?days=7')).json;
+    assert.equal(week.total, week.items.length, 'the feed says how many there are in all');
+    assert.ok(!('total' in week.items[0]), 'and not on each row');
     assert.equal(week.days, 7); assert.ok(week.items.find((x) => x.title === 'feed test late').unread);
     assert.equal(week.items.find((x) => x.title === 'feed test recent').unread, false);
     assert.ok(!(await owner.get('/api/changes?days=1')).json.items.some((x) => x.title === 'feed test late'), 'outside the range');

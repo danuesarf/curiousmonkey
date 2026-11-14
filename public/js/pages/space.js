@@ -7,7 +7,7 @@
 //   One account  — services the account calls stand as towers at the centre; roles cluster around the service they
 //                  call most; neighbouring accounts sit just past the edge; cold roles ring the floor.
 // The bar under the scene picks the hour (the last 24, in the shown time zone); play steps through them.
-import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL } from '../lib.js';
+import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, paint } from '../lib.js';
 import { go, windowIcon } from '../main.js';
 import { related, dirFilter, FADE } from './spaceRelated.js';
 
@@ -270,7 +270,10 @@ export async function spacePage(ctx) {
   // everything not connected to it fades so what belongs to what is plain
   const set = (patch) => { if ('sel' in patch && patch.sel !== st.sel) { st.filter = ''; st.showAll = false; if (M.view === 'estate' && M.by.has(patch.sel) && !M.by.get(patch.sel).planned && !isGcp(patch.sel)) getCached(`/space/account/${patch.sel}${wq}`).catch(() => {}); } if ('sel' in patch) st.lit = !!patch.sel; Object.assign(st, patch); render(); };
   const stop = () => { if (st.timer) { clearInterval(st.timer); st.timer = null; } };
-  ctx.onLeave(() => stop());
+  // Esc closes the selection (not while a window, the palette or a field has the keyboard)
+  const onKey = (ev) => { if (ev.key !== 'Escape' || ev.defaultPrevented || !st.sel || document.querySelector('.win, .palette, dialog[open]') || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName)) return; set({ sel: null }); };
+  document.addEventListener('keydown', onKey);
+  ctx.onLeave(() => { stop(); document.removeEventListener('keydown', onKey); });
 
   // ---------- sessions (Track): a role's sessions in the sidebar, replayed over the scene without leaving Space ----------
   const sessions = new Map();          // role id -> sessions, or 'loading'
@@ -325,6 +328,9 @@ export async function spacePage(ctx) {
     set({ zoom: Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015))) }); }, { passive: false });
   stage.setAttribute('tabindex', '0');
   stage.addEventListener('keydown', (ev) => {
+    const z = { '+': 1.25, '=': 1.25, '-': 0.8, _: 0.8 }[ev.key];
+    if (z) { ev.preventDefault(); set({ zoom: Math.max(0.6, Math.min(3, st.zoom * z)) }); return; }
+    if (ev.key === '0') { ev.preventDefault(); set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }); return; }
     const d = { ArrowLeft: [90, 0], ArrowRight: [-90, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[ev.key]; if (!d) return;
     ev.preventDefault(); set({ px: clampPan(st.px + d[0], W), py: clampPan(st.py + d[1], H) });
   });
@@ -701,7 +707,7 @@ export async function spacePage(ctx) {
       return { eyebrow: l.kind === 'new' ? 'ACCOUNT TO ACCOUNT · FIRST SEEN TODAY' : 'ACCOUNT TO ACCOUNT', title: `${a} → ${b}`, sub: `${num(l.sessions)} sessions in 90 days · last ${ago(l.lastSeen)}`, swatch: l.kind === 'new' ? '#fff' : ENV[M.by.get(l.from).env].base, round: true,
         tags: l.kind === 'new' ? [{ t: 'NEW PATH', c: '#fff' }] : [],
         lists: [{ title: 'Who entered what', items: l.roles.map((r) => ({ label: `${pretty(r.caller).label} → ${pretty(r.role).label}`, meta: `last ${ago(r.lastSeen)}`, value: `${num(r.sessions)}`, href: `#/identities/${r.roleId}` })) }],
-        rows: [...who, row('Today', l.today ? `${num(l.today)} session${l.today === 1 ? '' : 's'} at ${l.hours.map((x) => hourLabel(x)).join(', ')} WIB` : 'nothing today')],
+        rows: [...who, row('Today', l.today ? `${num(l.today)} session${l.today === 1 ? '' : 's'} at ${l.hours.map((x) => hourLabel(x)).join(', ')} ${TZ_LABEL}` : 'nothing today')],
         actions: [...(top ? [['Its calls', `#/events?role=${top.roleId}&q=${encodeURIComponent(`user:${top.caller.replace(/^user\//, '')}`)}&range=7d`, true]] : []), [`Open ${b}`, `#/space?view=account&account=${l.to}`], ['Track sessions', () => openTrack(top ? { role: top.roleId } : { account: l.to }, top ? `${top.role} in ${b}` : b)], ...(top ? [['Role', `#/identities/${top.roleId}`]] : [])] };
     }
     if (l.kind === 'denied') return { eyebrow: 'REFUSED CALLS', title: `${a} → ${b}`, sub: '7 days', swatch: RED, round: true, tags: [{ t: `⚠ ${num(l.denied)} DENIED`, c: RED }],
@@ -1060,24 +1066,40 @@ export async function spacePage(ctx) {
     right.replaceChildren(panelEl(b), key);
     right.dataset.for = String(st.sel); right.scrollTop = same ? top : 0;
   }
+  // The timeline is built once, then updated in place: rebuilding it would end a drag on the slider and drop focus.
+  let tl = null;
   function renderBar() {
-    const hour = st.hour, perHour = Array.from({ length: 24 }, (_, i) => M.groups.reduce((s, g) => s + g.prof[i], 0)), max = Math.max(1, ...perHour);
-    const nowEv = M.events.filter((e) => e.hour === hour);
-    const play = h('button', { class: 'sp-play', 'aria-label': st.playing ? 'Pause the day' : 'Play the day, one hour at a time', 'aria-pressed': String(st.playing),
-      onClick: () => { if (st.playing) { stop(); set({ playing: false }); } else { st.playing = true; st.timer = setInterval(() => { if (!page.isConnected) return stop(); set({ hour: (st.hour + 1) % 24 }); }, 1400); render(); } } },
-      svg('svg', { width: 14, height: 14, viewBox: '0 0 14 14', 'aria-hidden': 'true' }, st.playing ? svg('path', { d: 'M3 2v10M11 2v10', stroke: 'currentColor', 'stroke-width': 2.4 }) : svg('path', { d: 'M3 1.5 L12 7 L3 12.5 Z', fill: 'currentColor' })));
-    const input = h('input', { type: 'range', min: 0, max: 23, step: 1, value: hour, 'aria-label': 'Hour of the last 24 to show (calls made in that hour)', 'aria-valuetext': `${hourLabel(hour)} WIB`,
-      onInput: (ev) => { stop(); set({ hour: Number(ev.target.value), playing: false }); } });
-    const focused = document.activeElement?.classList?.contains('sp-range');
-    input.classList.add('sp-range');
-    bar.replaceChildren(play, h('div', { class: 'sp-bar-body' },
-      h('div', { class: 'sp-bar-head' }, h('span', null, `${hourLabel(hour)}–${hourLabel(hour + 1)} ${TZ_LABEL}${hour === 23 ? ' · NOW' : ''} · ${kfmt(perHour[hour])} CALLS`),
-        h('span', { style: `color:${nowEv.length ? TONE[nowEv[0].tone] || '#fff' : 'var(--faint)'}` }, nowEv.length ? nowEv.map((e) => `${e.kind}: ${e.text}`).join(' · ') : 'nothing flagged this hour')),
-      h('div', { class: 'sp-scrub' }, ...perHour.map((v, i) => { const ev = M.events.find((e) => e.hour === i);
-        return h('span', { class: 'sp-col' }, h('span', { class: `sp-fill${i === hour ? ' on' : ''}`, style: `height:${Math.max(3, Math.round((v / max) * 28))}px` }), ev ? h('span', { class: 'sp-mark', style: `background:${TONE[ev.tone] || '#fff'}` }) : null); }), input),
-      h('div', { class: 'sp-ticks' }, ...[0, 6, 12, 18, 23].map((i) => h('span', null, i === 23 ? 'now' : hourLabel(i))))));
-    if (focused) input.focus();
-    hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} WIB`),
+    const hour = st.hour;
+    if (!tl) {
+      const perHour = Array.from({ length: 24 }, (_, i) => M.groups.reduce((s, g) => s + g.prof[i], 0)), max = Math.max(1, ...perHour);
+      const play = h('button', { class: 'sp-play', onClick: () => { if (st.playing) { stop(); set({ playing: false }); } else { st.playing = true; st.timer = setInterval(() => { if (!page.isConnected) return stop(); set({ hour: (st.hour + 1) % 24 }); }, 1400); render(); } } });
+      const input = h('input', { type: 'range', class: 'sp-range', min: 0, max: 23, step: 1, value: hour, 'aria-label': 'Hour of the last 24 to show (calls made in that hour)',
+        onInput: (ev) => { stop(); set({ hour: Number(ev.target.value), playing: false }); } });
+      const when = h('span', { class: 'sp-when' }), what = h('span');
+      const fills = perHour.map((v) => h('span', { class: 'sp-fill', style: `height:${Math.max(3, Math.round((v / max) * 28))}px` }));
+      bar.replaceChildren(play, h('div', { class: 'sp-bar-body' }, h('div', { class: 'sp-bar-head' }, when, what),
+        h('div', { class: 'sp-scrub' }, ...fills.map((fl, i) => { const ev = M.events.find((e) => e.hour === i); return h('span', { class: 'sp-col' }, fl, ev ? h('span', { class: 'sp-mark', style: `background:${TONE[ev.tone] || '#fff'}` }) : null); }), input),
+        h('div', { class: 'sp-ticks' }, ...[0, 6, 12, 18, 23].map((i) => h('span', null, i === 23 ? 'now' : hourLabel(i))))));
+      tl = { play, input, when, what, fills, perHour, shown: null, playing: null };
+    }
+    if (tl.playing !== st.playing) {
+      tl.playing = st.playing;
+      tl.play.setAttribute('aria-label', st.playing ? 'Pause the day' : 'Play the day, one hour at a time'); tl.play.setAttribute('aria-pressed', String(st.playing));
+      tl.play.replaceChildren(svg('svg', { width: 14, height: 14, viewBox: '0 0 14 14', 'aria-hidden': 'true' }, st.playing ? svg('path', { d: 'M3 2v10M11 2v10', stroke: 'currentColor', 'stroke-width': 2.4 }) : svg('path', { d: 'M3 1.5 L12 7 L3 12.5 Z', fill: 'currentColor' })));
+    }
+    if (tl.shown !== hour) {
+      tl.shown = hour;
+      const nowEv = M.events.filter((e) => e.hour === hour);
+      if (Number(tl.input.value) !== hour) tl.input.value = hour;
+      tl.input.setAttribute('aria-valuetext', `${hourLabel(hour)} ${TZ_LABEL}`);
+      tl.fills.forEach((fl, i) => fl.classList.toggle('on', i === hour));
+      tl.when.textContent = `${hourLabel(hour)}–${hourLabel(hour + 1)} ${TZ_LABEL}${hour === 23 ? ' · NOW' : ''} · ${kfmt(tl.perHour[hour])} CALLS`;
+      // each event's own text already says what kind it is
+      tl.what.textContent = nowEv.length ? nowEv.map((e) => e.text).join(' · ') : 'nothing flagged this hour';
+      tl.what.style.color = nowEv.length ? paint(TONE[nowEv[0].tone] || '#fff') : 'var(--faint)';
+      tl.what.title = tl.what.textContent;
+    }
+    hud.replaceChildren(h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} ${TZ_LABEL}`),
       h('div', null, M.view === 'estate' ? `${awsGroups().length} ACCOUNTS · ${num(awsGroups().reduce((s, g) => s + g.roles, 0))} ${noun.toUpperCase()} · ${M.sources.filter((x) => !x.gcp).length + M.hidden} OUTSIDE${M.gcp ? ` · GOOGLE CLOUD ${M.gcp.projects.length} PROJECTS · ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} CROSS-CLOUD` : ''}` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
       h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM'));
     const btn = ([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon);
