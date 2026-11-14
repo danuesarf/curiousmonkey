@@ -999,3 +999,60 @@ test('change feed: the bell counts what is new by when it was recorded, Radar sh
     assert.equal((await owner.get('/api/space/flags')).status, 404, 'the old bell endpoint is gone');
   } finally { await db.query(`DELETE FROM changes WHERE dedupe LIKE 'feedtest:%'`); }
 });
+
+test('trust map: names for sources (known vendors too), groups, third-party report, saved views, expected trust, search', async () => {
+  const ins = (name, trust) => db.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count, trust_policy) VALUES ($1,$2,$3,'custom',$4,$5) RETURNING id`,
+    [accA, `arn:aws:iam::111111111111:role/${name}`, name, name.includes('admin') ? 20000 : 10, JSON.stringify(trust)]);
+  // 454464851268 is CloudHealth in fwd:cloudsec's list of known AWS accounts
+  const vendor = { Statement: [{ Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::454464851268:root' }, Action: 'sts:AssumeRole', Condition: { StringEquals: { 'sts:ExternalId': 'x' } } }] };
+  const stranger = { Statement: [{ Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::777777777777:root' }, Action: 'sts:AssumeRole' }] };
+  const ids = [(await ins('tp-vendor-read', vendor)).rows[0].id, (await ins('tp-stranger-admin', stranger)).rows[0].id];
+  try {
+    let m = (await owner.get('/api/trust')).json;
+    const cloudhealth = m.map.sources.find((s) => s.aws === '454464851268');
+    assert.equal(cloudhealth.label, 'Cloudhealth'); assert.equal(cloudhealth.named.vendor, 'Cloudhealth');
+    const stra = m.map.sources.find((s) => s.aws === '777777777777');
+    assert.equal(stra.label, '777777777777'); assert.equal(stra.adminAccounts, 1);
+
+    // the workspace names one
+    assert.equal((await owner.post('/api/trust/names', { source: 'src:acct:777777777777', name: 'Acme backups', owner: 'platform', purpose: 'nightly backups' })).status, 200);
+    m = (await owner.get('/api/trust')).json;
+    assert.equal(m.map.sources.find((s) => s.aws === '777777777777').label, 'Acme backups');
+    assert.equal((await owner.get('/api/trust/ways?q=from:acme')).json.total, 1, 'from: finds it by its name');
+    const s = (await owner.get('/api/search?q=acme')).json;
+    assert.equal(s.trust[0].name, 'Acme backups');
+
+    // third-party report: outside sources only, with name, owner and reach
+    const csv = (await owner.get('/api/trust/third-parties.csv')).text;
+    const line = csv.split('\n').find((l) => l.includes('777777777777'));
+    assert.match(line, /^Acme backups,777777777777,Outside AWS account,,platform,nightly backups,/);
+    assert.ok(!csv.includes('Its own account'), 'nothing from inside the estate');
+
+    // the same trust grouped: one row per role name, source and findings
+    const g = (await owner.get(`/api/trust/groups?q=${encodeURIComponent('role:tp-')}`)).json;
+    assert.equal(g.total, 2); assert.equal(g.ways, 2);
+    assert.equal(g.groups.find((x) => x.role === 'tp-stranger-admin').admin, 1);
+    assert.equal((await owner.get(`/api/trust/ways?q=${encodeURIComponent('has:admin role:tp-')}`)).json.total, 1);
+
+    // saved views: mine, then shared; someone else sees only the shared one
+    const v1 = (await owner.post('/api/views', { page: 'trust', name: 'Strangers', query: 'q=source%3Aexternal' })).json.id;
+    const v2 = (await owner.post('/api/views', { page: 'trust', name: 'Team: vendors', query: 'q=has%3Aname', shared: true })).json.id;
+    assert.deepEqual((await owner.get('/api/views?page=trust')).json.items.map((v) => v.name), ['Strangers', 'Team: vendors']);
+    assert.deepEqual((await reviewerClient.get('/api/views?page=trust')).json.items.map((v) => v.name), ['Team: vendors']);
+    assert.equal((await reviewerClient.call('DELETE', `/api/views/${v1}`)).status, 404, 'not someone else\'s');
+    assert.equal((await owner.get('/api/search?q=strangers')).json.views[0].name, 'Strangers');
+    for (const id of [v1, v2]) assert.equal((await owner.call('DELETE', `/api/views/${id}`)).status, 200);
+
+    // expected trust, through the API, audited
+    const r = await owner.post('/api/trust/expected', { source: 'src:acct:777777777777', sourceLabel: 'Acme backups', roles: 'tp-*', findings: ['account-root', 'external-no-externalid'], note: 'Backups vendor, contract 42' });
+    assert.equal(r.status, 200);
+    const w = (await owner.get(`/api/trust/ways?q=${encodeURIComponent('role:tp-stranger-admin')}`)).json.rows[0];
+    assert.equal(w.expected.note, 'Backups vendor, contract 42'); assert.equal(w.attention, false);
+    assert.equal((await owner.get('/api/trust/expected')).json.items[0].covers, 1);
+    assert.equal((await owner.call('DELETE', `/api/trust/expected/${r.json.id}`)).status, 200);
+    assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='trust.expect'`)).rowCount >= 1);
+    assert.equal((await owner.call('DELETE', `/api/trust/names?source=${encodeURIComponent('src:acct:777777777777')}`)).status, 200);
+  } finally {
+    await db.query('DELETE FROM roles WHERE id = ANY($1)', [ids]);
+  }
+});

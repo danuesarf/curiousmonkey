@@ -3,6 +3,7 @@
 // such as GitHub Actions or Bitbucket Pipelines, SAML, Google, an AWS service, or anyone), the conditions on the way
 // in, what has actually been seen using it, and what is wrong with it. Edges can be filtered with a small query
 // language: `finding:account-root from:123456789012 provider:github -source:service text`.
+import fs from 'node:fs';
 import { query } from './db.js';
 import { normalizeStatements, arr } from './analyzer/policy.js';
 import { isIdentityCenter, instanceKey, instanceLabel, instanceOf, identityCenters } from './identityCenter.js';
@@ -193,7 +194,7 @@ export function edgesOf(role, ctx) {
       // what has been seen coming in through this edge
       const seen = ctx.seen.get(role.id) || [];
       const subs = e.type === 'oidc' ? conds.filter((c) => /:sub$/i.test(c.key)) : [];
-      e.seen = seen.filter((s) => matchesSeen(e, s, subs)).map((s) => ({ key: s.key, display: s.display, kind: s.kind, lastSeen: s.last_seen, sessions: s.sessions_count }));
+      e.seen = seen.filter((s) => matchesSeen(e, s, subs)).map((s) => ({ key: s.key, display: s.display, kind: s.kind, firstSeen: s.first_seen, lastSeen: s.last_seen, sessions: s.sessions_count }));
       // Usage is read from THIS account's CloudTrail: an AssumeRole into it is logged here whoever calls, so the caller's
       // account does not need to be onboarded to know a statement was used. Two cases can't be pinned to the statement:
       const fromElsewhere = e.principalAccount && e.principalAccount !== own;
@@ -235,6 +236,7 @@ export function edgesOf(role, ctx) {
       e.sessions = all.reduce((n, s) => n + Number(s.sessions || 0), 0);
       e.callerCount = all.length;
       e.lastSeen = all.map((s) => s.lastSeen).filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || null;
+      e.firstSeen = all.map((s) => s.firstSeen).filter(Boolean).sort((a, b) => new Date(a) - new Date(b))[0] || null;
       Object.defineProperty(e, 'callers', { value: all.map((s) => [s.key || s.display, Number(s.sessions || 0), s.lastSeen || null]), enumerable: false });
       e.seen = [...all].sort((a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0)).slice(0, 3);
       edges.push(e);
@@ -298,7 +300,7 @@ const yes = (v) => !['no', 'false', '0'].includes(v);
 function valueMatches(e, key, v) {
   switch (key) {
     case 'account': return lc(e.account).includes(v) || e.awsAccountId === v || e.accountId === v;
-    case 'from': return e.principalAccount === v || lc(e.principalAccountName).includes(v) || lc(e.source).includes(v);
+    case 'from': return e.principalAccount === v || lc(e.principalAccountName).includes(v) || lc(e.source).includes(v) || lc(e.named?.name).includes(v);
     case 'source': return PROVIDER_KINDS.includes(v) ? e.pkind === v
       : lc(e.group).startsWith(v) || (v === 'aws' && /account/.test(e.group)) || (v === 'external' && e.group === 'external-account') || (v === 'connected' && e.group === 'connected-account') || (v === 'same' && e.group === 'same-account');
     case 'type': return lc(e.type).replace(/^aws-/, '') === v.replace(/^aws-/, '') || lc(e.type) === v;
@@ -309,8 +311,10 @@ function valueMatches(e, key, v) {
     case 'roleid': return String(e.roleId) === v; // one role exactly, for links from its page
     case 'cond': return e.conditions.some((c) => lc(c).includes(v));
     case 'env': return lc(e.environment).startsWith(v);
-    case 'has': return v === 'findings' ? e.findings.some((f) => f.severity !== 'info') : v === 'conditions' ? e.conditions.length > 0 : v === 'seen' ? e.seen.length > 0 : false;
-    case 'no': return v === 'conditions' ? e.conditions.length === 0 : v === 'findings' ? !e.findings.some((f) => f.severity !== 'info') : v === 'seen' ? e.seen.length === 0 : false;
+    case 'has': if (v === 'admin') return !!e.admin; if (v === 'name') return !!e.named;
+      return v === 'findings' ? e.findings.some((f) => f.severity !== 'info') : v === 'conditions' ? e.conditions.length > 0 : v === 'seen' ? e.seen.length > 0 : false;
+    case 'no': if (v === 'admin') return !e.admin; if (v === 'name') return !e.named;
+      return v === 'conditions' ? e.conditions.length === 0 : v === 'findings' ? !e.findings.some((f) => f.severity !== 'info') : v === 'seen' ? e.seen.length === 0 : false;
     // yes: a sign-in came through it · iam: none did, but IAM says the role is used · no: neither
     case 'used': return v === 'yes' || v === 'true' ? e.seen.length > 0 : v === 'iam' ? !e.seen.length && !!e.lastUsed : !e.seen.length && !e.lastUsed;
     // review state: needs attention (an open high or medium finding), expected, every finding decided
@@ -324,7 +328,7 @@ function valueMatches(e, key, v) {
       const days = /^\d+$/.test(v) ? Number(v) : 7;
       return Date.now() - new Date(e.change.at) <= days * 864e5;
     }
-    default: return [e.role, e.account, e.principal, e.source, ...e.conditions, ...e.findings.map((f) => f.title)].some((s) => lc(s).includes(v));
+    default: return [e.role, e.account, e.principal, e.source, e.named?.name, e.named?.owner, ...e.conditions, ...e.findings.map((f) => f.title)].some((s) => lc(s).includes(v));
   }
 }
 const termMatches = (e, t) => (t.values?.length ? t.values : [t.value]).some((v) => valueMatches(e, t.key, v));
@@ -401,7 +405,20 @@ export function coveredBy(rule, e, key, today = new Date()) {
   return due ? 'due' : 'yes';
 }
 
+// known vendors' AWS account IDs (fwdcloudsec/known_aws_accounts, Apache-2.0; see THIRD_PARTY_NOTICES.md)
+let vendors = null;
+export function knownVendor(accountId) {
+  if (!vendors) {
+    try { vendors = JSON.parse(fs.readFileSync(new URL('./data/known-aws-accounts.json', import.meta.url), 'utf8')).accounts || {}; } catch { vendors = {}; }
+  }
+  return vendors[accountId] || null;
+}
+/** A role that can do this many things is treated as an administrator, as Radar does. */
+export const ADMIN_AT = 15000;
+
 async function annotate(edges, roles, byAws) {
+  // names the workspace gave to where trust comes from, and known vendors
+  const names = new Map((await query(`SELECT s.*, u.name AS updated_by_name FROM trust_sources s LEFT JOIN users u ON u.id = s.updated_by`).catch(() => ({ rows: [] }))).rows.map((x) => [x.source, x]));
   const DAY = 864e5, now = Date.now();
   // what changed in the last 30 days: from the trust policy before and after each change, and roles created since
   const changes = new Map();                              // roleId -> principal -> { kind, at, guards }
@@ -426,6 +443,9 @@ async function annotate(edges, roles, byAws) {
     if (c) e.change = c;
     const key = sourceKeyOf(e, byAws);
     e.sourceKey = key;
+    const n = names.get(key), vendor = e.group === 'external-account' ? knownVendor(e.principalAccount) : null;
+    if (n || vendor) e.named = { name: n?.name || vendor, owner: n?.owner || null, purpose: n?.purpose || null, reviewBy: n?.review_by || null, vendor, by: n?.updated_by_name || null };
+    e.admin = Number(e.granted || 0) >= ADMIN_AT;
     for (const r of rules) {
       const hit = coveredBy(r, e, key);
       if (!hit) continue;
@@ -461,6 +481,7 @@ const SIGNATURE = `SELECT concat_ws('|',
     (SELECT count(*) || ':' || coalesce(max(decided_at)::text, '') FROM review_decisions),
     (SELECT count(*) || ':' || coalesce(sum(hashtext(id::text || roles || array_to_string(accounts, ',') || array_to_string(findings, ',') || note || coalesce(review_by::text, '')))::bigint, 0) FROM trust_expected),
     (SELECT coalesce(max(id), 0) FROM identity_events),
+    (SELECT count(*) || ':' || coalesce(max(updated_at)::text, '') FROM trust_sources),
     to_char(now(), 'YYYY-MM-DD HH24')) AS sig`;
 let index = null, pending = null;
 
@@ -470,7 +491,7 @@ async function buildIndex(sig) {
        FROM roles r JOIN cloud_accounts a ON a.id=r.account_id WHERE r.deleted_at IS NULL AND r.kind <> 'iam-user'`)).rows;
   const accounts = (await query('SELECT * FROM cloud_accounts')).rows;
   const seenRows = roles.length ? (await query(
-    `SELECT role_id, key, kind, display, last_seen, sessions_count FROM principals WHERE role_id = ANY($1) AND kind <> 'session'`, [roles.map((r) => r.id)])).rows : [];
+    `SELECT role_id, key, kind, display, first_seen, last_seen, sessions_count FROM principals WHERE role_id = ANY($1) AND kind <> 'session'`, [roles.map((r) => r.id)])).rows : [];
   const seen = new Map(); for (const s of seenRows) { if (!seen.has(s.role_id)) seen.set(s.role_id, []); seen.get(s.role_id).push(s); }
   const { historyFor } = await import('./history.js');
   const hist = await historyFor(accounts.filter((a) => roles.some((r) => r.account_id === a.id)));
@@ -569,7 +590,11 @@ const SORTS = {
   used: (a, b) => new Date(b.lastSeen || b.lastUsed?.at || 0) - new Date(a.lastSeen || a.lastUsed?.at || 0),
   sessions: (a, b) => b.sessions - a.sessions,
   risk: (a, b) => (RISK[a.risk] ?? 3) - (RISK[b.risk] ?? 3),
+  // how loose the trust is and what it reaches, together: a medium finding into an administrator before a high one into read-only
+  reach: (a, b) => reachScore(b) - reachScore(a),
 };
+const SEV_WEIGHT = { high: 9, medium: 4, low: 1, info: 0, none: 0 };
+const reachScore = (e) => (SEV_WEIGHT[e.attention || e.worst === 'low' ? e.worst : 'none'] || 0) * (e.admin ? 3 : e.risk === 'High' ? 2 : 1) + (e.admin ? 0.5 : 0);
 
 async function select(user, q, { mentions = null, sel = null } = {}) {
   const ix = await trustIndex();
@@ -600,6 +625,55 @@ export async function trustWays(user, q = '', { sel = null, sort = 'worst', dir 
   return { total: rows.length, page: p, size: n, rows: sorted.slice(p * n, p * n + n), builtAt: ix.at };
 }
 
+/**
+ * The same trust, grouped: one row per role name, where it comes from, and its findings, with the accounts it is in.
+ * A vendor's role in 100 accounts is one row; open it for the accounts. Decisions apply to the whole group.
+ */
+export async function trustGroups(user, q = '', { sel = null, page = 0, size = 50 } = {}) {
+  const { rows, ix } = await select(user, q, { sel });
+  const by = new Map();
+  for (const e of rows) {
+    const nf = e.findings.filter((f) => f.severity !== 'info').map((f) => f.id).sort();
+    const key = `${e.role}|${e.sourceKey}|${nf.join(',')}`;
+    let g = by.get(key);
+    if (!g) by.set(key, g = { key, role: e.role, source: e.named?.name || e.source, sourceKey: e.sourceKey, group: e.group, pkind: e.pkind || null, named: e.named || null,
+      principal: e.principal, conditions: e.conditions, findings: e.findings.filter((f) => f.severity !== 'info'), worst: e.worst,
+      ways: 0, accounts: new Set(), attention: 0, expected: 0, accepted: 0, admin: 0, sessions: 0, lastSeen: null, undecided: [], members: [] });
+    g.ways++; g.accounts.add(e.accountId);
+    if (e.attention) g.attention++;
+    if (e.expected) g.expected++;
+    if (e.accepted) g.accepted++;
+    if (e.admin) g.admin++;
+    g.sessions += e.sessions;
+    if (e.lastSeen && (!g.lastSeen || e.lastSeen > g.lastSeen)) g.lastSeen = e.lastSeen;
+    for (const f of e.flags || []) if (f.id && !f.decision && f.status === 'open') g.undecided.push(f.id);
+    if (g.members.length < 200) g.members.push({ roleId: e.roleId, account: e.account, awsAccountId: e.awsAccountId, env: e.environment, statement: e.statement, sid: e.sid,
+      worst: e.worst, attention: !!e.attention, expected: !!e.expected, accepted: !!e.accepted, sessions: e.sessions, lastSeen: e.lastSeen, admin: !!e.admin, risk: e.risk });
+  }
+  const groups = [...by.values()].map((g) => ({ ...g, accounts: g.accounts.size, undecided: g.undecided.slice(0, 500) }))
+    .sort((a, b) => (b.attention > 0) - (a.attention > 0) || (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || b.accounts - a.accounts || a.role.localeCompare(b.role));
+  const n = Math.min(Math.max(1, size), 200), p = Math.max(0, page);
+  return { total: groups.length, ways: rows.length, page: p, size: n, groups: groups.slice(p * n, p * n + n), builtAt: ix.at };
+}
+
+/** Third-party access: one row per source outside your estate (outside accounts, anyone, CI and identity providers). */
+const OUTSIDE = new Set(['external-account', 'public', 'oidc', 'saml', 'unknown']);
+export async function thirdParties(user, q = '') {
+  const m = await trustMap(user, q, { limit: 0 });
+  return m.summary.filter((g) => OUTSIDE.has(g.group)).flatMap((g) => g.sources.map((s) => ({ ...s, group: g.group })));
+}
+export function thirdPartyCsv(rows) {
+  const KIND = { 'external-account': 'Outside AWS account', public: 'Anyone', oidc: 'CI or web identity', saml: 'SAML / Identity Center', unknown: 'Deleted identity' };
+  const day = (v) => (v ? String(v instanceof Date ? v.toISOString() : v).slice(0, 10) : '');
+  return toCsvRows([
+    ['name', (s) => s.named?.name || (s.group === 'external-account' ? '' : s.label)], ['aws_account', (s) => s.aws || ''], ['kind', (s) => KIND[s.group] || s.group],
+    ['known_vendor', (s) => s.named?.vendor || ''], ['owner', (s) => s.named?.owner || ''], ['purpose', (s) => s.named?.purpose || ''], ['review_by', (s) => day(s.named?.reviewBy)],
+    ['accounts', (s) => s.accounts], ['roles', (s) => s.roles], ['ways_in', (s) => s.edges], ['high_risk_roles', (s) => s.highRiskRoles], ['admin_accounts', (s) => s.adminAccounts],
+    ['externalid_on', (s) => (s.group === 'external-account' ? `${s.guarded} of ${s.edges}` : '')], ['worst_finding', (s) => s.worst], ['needs_attention', (s) => s.attention],
+    ['expected', (s) => s.expected], ['sessions', (s) => s.sessions], ['first_seen', (s) => day(s.firstSeen)], ['last_seen', (s) => day(s.lastSeen)],
+  ], rows);
+}
+
 /** The whole map for one viewer: counts, sources, map, and the first ways in. */
 const answers = new Map();                          // the last few answers, for the index they were worked out from
 export async function trustMap(user, q = '', { limit = 500, mentions = null, sel = null } = {}) {
@@ -624,17 +698,25 @@ async function workOut(user, q, { limit, mentions, sel }) {
     const SAME = { 'aws-root': 'Its own account · whole account (:root)', 'aws-role': 'Roles in its own account', 'aws-user': 'IAM users in its own account', 'aws-assumed': 'Role sessions in its own account' };
     const sk = same ? e.type : /account/.test(e.group) ? (e.principalAccount || e.source) : e.source;
     const g = groups.get(gk);
-    if (!g.has(sk)) g.set(sk, { key: sk, label: same ? SAME[e.type] || 'Its own account' : e.group.endsWith('account') ? `${e.principalAccount}${e.principalAccountName ? ` · ${e.principalAccountName}` : ''}` : e.source,
-      pkind: e.pkind || null, node: fromOf(e, byAws), roles: new Set(), accounts: new Set(), edges: 0, findings: 0, worst: 'none', query: queryFor(e), sessions: 0, lastSeen: null, byRole: new Map(), highRisk: new Set() });
+    if (!g.has(sk)) g.set(sk, { key: sk, label: same ? SAME[e.type] || 'Its own account' : e.group.endsWith('account') ? `${e.principalAccount}${e.principalAccountName ? ` · ${e.principalAccountName}` : e.named ? ` · ${e.named.name}` : ''}` : e.named?.name || e.source,
+      sourceKey: e.sourceKey, named: e.named || null, aws: e.group.endsWith('account') ? e.principalAccount : null,
+      pkind: e.pkind || null, node: fromOf(e, byAws), roles: new Set(), accounts: new Set(), edges: 0, findings: 0, worst: 'none', open: 'none', attention: 0, expected: 0, guarded: 0,
+      query: queryFor(e), sessions: 0, lastSeen: null, firstSeen: null, byRole: new Map(), highRisk: new Set(), adminAccounts: new Set() });
     const s = g.get(sk); s.roles.add(e.roleId); s.accounts.add(e.accountId); s.edges++;
     s.findings += e.findings.filter((f) => f.severity !== 'info').length;
     if ((SEV_ORDER[e.worst] ?? 9) < (SEV_ORDER[s.worst] ?? 9)) s.worst = e.worst;
+    if (!e.expected && !e.accepted) s.open = worse(s.open, e.worst);
+    if (e.attention) s.attention++;
+    if (e.expected) s.expected++;
+    if (e.conditions.some((c) => /^sts:ExternalId /i.test(c))) s.guarded++;
     if (e.risk === 'High') s.highRisk.add(e.roleId);
+    if (e.admin) s.adminAccounts.add(e.accountId);
+    if (e.firstSeen && (!s.firstSeen || e.firstSeen < s.firstSeen)) s.firstSeen = e.firstSeen;
     addSeen(s, e);
   }
   const GROUP_ORDER = ['public', 'external-account', 'oidc', 'saml', 'connected-account', 'same-account', 'service', 'unknown'];
   const summary = GROUP_ORDER.filter((g) => groups.has(g)).map((g) => ({ group: g, sources: [...groups.get(g).values()]
-    .map(({ byRole, highRisk, ...s }) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size, highRiskRoles: highRisk.size }))
+    .map(({ byRole, highRisk, adminAccounts, ...s }) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size, highRiskRoles: highRisk.size, adminAccounts: adminAccounts.size }))
     .sort((a, b) => (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || b.roles - a.roles) }));
   const findingCounts = {};
   for (const e of matched) for (const f of e.findings) findingCounts[f.id] = (findingCounts[f.id] || 0) + 1;
@@ -706,8 +788,9 @@ export function mapOf(rows, scoped, allAccts) {
     if (!from.startsWith('src:')) node(byAws.get(e.principalAccount), false);
     else {
       if (!sources.has(from)) sources.set(from, { id: from, group: e.group, pkind: e.pkind || null,
-        label: e.group === 'external-account' ? e.principalAccount : e.group === 'unknown' ? 'Deleted identities' : e.source,
-        query: queryFor(e), roles: new Set(), accounts: new Set(), worst: 'none', open: 'none', attention: 0, expected: 0, findings: 0, vendor: true, sessions: 0, lastSeen: null, byRole: new Map(), highRisk: new Set() });
+        label: e.named?.name || (e.group === 'external-account' ? e.principalAccount : e.group === 'unknown' ? 'Deleted identities' : e.source),
+        aws: e.group === 'external-account' ? e.principalAccount : null, named: e.named || null,
+        query: queryFor(e), roles: new Set(), accounts: new Set(), worst: 'none', open: 'none', attention: 0, expected: 0, findings: 0, vendor: true, sessions: 0, lastSeen: null, firstSeen: null, byRole: new Map(), highRisk: new Set(), adminAccounts: new Set() });
       const s = sources.get(from);
       s.roles.add(e.roleId); s.accounts.add(e.accountId); s.worst = worse(s.worst, e.worst); s.findings += nf.length;
       if (!e.expected && !e.accepted) s.open = worse(s.open, e.worst);
@@ -715,17 +798,20 @@ export function mapOf(rows, scoped, allAccts) {
       if (e.expected) s.expected++;
       if (e.group === 'external-account' && !e.conditions.some((c) => /^sts:ExternalId /i.test(c))) s.vendor = false;
       if (e.risk === 'High') s.highRisk.add(e.roleId);
+      if (e.admin) s.adminAccounts.add(e.accountId);
+      if (e.firstSeen && (!s.firstSeen || e.firstSeen < s.firstSeen)) s.firstSeen = e.firstSeen;
       addSeen(s, e);
     }
     const id = `${from}>${e.accountId}`;
     if (!links.has(id)) links.set(id, { id, from, to: e.accountId, kind: from.startsWith('src:') ? 'outside' : 'account', worst: 'none', open: 'none', attention: 0, expected: 0, changed: null, ways: 0, findings: 0, sessions: 0, lastSeen: null,
-      roles: new Set(), highRisk: new Set(), iamUsed: false, byRole: new Map(), query: `${from.startsWith('src:') ? queryFor(e) : `from:${e.principalAccount}`} account:${e.awsAccountId}` });
+      roles: new Set(), highRisk: new Set(), admin: 0, iamUsed: false, byRole: new Map(), query: `${from.startsWith('src:') ? queryFor(e) : `from:${e.principalAccount}`} account:${e.awsAccountId}` });
     const l = links.get(id);
     l.ways++; l.worst = worse(l.worst, e.worst); l.findings += nf.length; l.roles.add(e.roleId);
     // the colour that counts: the worst finding nobody has accepted or marked as expected
     if (!e.expected && !e.accepted) l.open = worse(l.open, e.worst);
     if (e.attention) l.attention++;
     if (e.expected) l.expected++;
+    if (e.admin) l.admin++;
     if (e.change && (!l.changed || new Date(e.change.at) > new Date(l.changed))) l.changed = e.change.at;
     if (e.risk === 'High') l.highRisk.add(e.roleId);
     if (e.lastUsed && !e.sessions) l.iamUsed = true;
@@ -734,7 +820,7 @@ export function mapOf(rows, scoped, allAccts) {
   const ORDER = ['public', 'external-account', 'oidc', 'saml', 'unknown'];
   return {
     accounts: [...accounts.values()].map((a) => ({ ...a, inbound: { ...a.inbound, roles: a.inbound.roles.size }, own: a.own.size, services: a.services.size, clusters: a.clusters.size, clusterSources: a.clusterSources.size })),
-    sources: [...sources.values()].map(({ byRole, highRisk, ...s }) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size, highRiskRoles: highRisk.size, vendor: s.group === 'external-account' && s.vendor }))
+    sources: [...sources.values()].map(({ byRole, highRisk, adminAccounts, ...s }) => ({ ...s, roles: s.roles.size, accounts: s.accounts.size, highRiskRoles: highRisk.size, adminAccounts: adminAccounts.size, vendor: s.group === 'external-account' && s.vendor }))
       .sort((a, b) => ORDER.indexOf(a.group) - ORDER.indexOf(b.group) || (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || b.roles - a.roles),
     links: [...links.values()].map(({ byRole, highRisk, ...l }) => ({ ...l, roles: l.roles.size, highRiskRoles: highRisk.size })),
   };

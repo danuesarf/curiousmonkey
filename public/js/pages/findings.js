@@ -44,6 +44,7 @@ export function findingCard(f, { onDecided, onIdentify, head } = {}) {
       f.resources.length > 0 && h('p', { class: 'small mono muted' }, `Granted on: ${f.resources.slice(0, 4).join(', ')}${resourceCount > 4 ? '…' : ''}`),
       f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
       f.category === 'unmapped-event' && onIdentify && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => onIdentify(null) }, 'Identify these event names')),
+      (f.category === 'trust' || f.category === 'trust-wildcard') && f.role_id && h('div', { class: 'row' }, h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`roleid:${f.role_id}`)}&tab=ways` }, 'Show on the Trust map')),
       canDecide() && h('div', { class: 'stack' }, isAct && res, note,
         h('div', { class: 'row' }, opts.map(([v, l], i) => { const b = h('button', { class: `btn sm${f.decision === v ? ' primary' : ''}`, title: `Key ${i + 1}` }, l); b.addEventListener('click', () => choose(v, b)); return b; }),
           f.decision && h('button', { class: 'btn sm', onClick: clearIt }, 'Clear decision'))));

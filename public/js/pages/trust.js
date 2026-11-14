@@ -60,6 +60,7 @@ export async function trustPage(ctx) {
     opened: params.has('open'),
     sort: params.get('sort') || 'worst', dir: params.get('dir') === 'desc' ? 'desc' : 'asc', page: Math.max(0, Number(params.get('page')) || 0),
     srcSort: 'worst', expanded: new Set(),
+    group: params.get('group') === '1',                    // ways in: the same trust grouped across accounts
   };
   const q = () => write(S.terms);
   // the map is coloured by what still needs a look: expected and accepted ways in keep their findings but not the colour
@@ -80,6 +81,7 @@ export async function trustPage(ctx) {
     if (S.opened) p.set('open', [...S.open].join(','));
     if (S.sort !== 'worst') p.set('sort', S.sort);
     if (S.dir === 'desc') p.set('dir', 'desc');
+    if (S.group) p.set('group', '1');
     if (S.page) p.set('page', String(S.page));
     const url = `#/trust${p.toString() ? `?${p}` : ''}`;
     if (url !== location.hash) history[push ? 'pushState' : 'replaceState'](null, '', url);
@@ -103,7 +105,30 @@ export async function trustPage(ctx) {
   // ---------------------------------------------------------------- header
   const exportMenu = () => menu('Export ▾', [
     ['Ways in (CSV)', `/api/trust.csv?q=${encodeURIComponent(q())}${S.sel ? `&sel=${encodeURIComponent(S.sel)}` : ''}`],
-    ['Sources (CSV)', `/api/trust/sources.csv?q=${encodeURIComponent(q())}`]], { btnClass: 'btn' });
+    ['Sources (CSV)', `/api/trust/sources.csv?q=${encodeURIComponent(q())}`],
+    ['Third-party access (CSV)', `/api/trust/third-parties.csv?q=${encodeURIComponent(q())}`],
+    ['The map as a picture (PNG)', () => savePng()]], { btnClass: 'btn' });
+  // the map as drawn, with its colours, as a PNG at twice the size on screen
+  async function savePng() {
+    if (S.tab !== 'map') { S.tab = 'map'; address(); drawTabs(); drawView(); await new Promise((r) => requestAnimationFrame(() => r())); }
+    const src = mapBox.querySelector('svg.tm2-svg');
+    if (!src) { toast('Nothing on the map to save.', true); return; }
+    const copy = src.cloneNode(true), all = [src, ...src.querySelectorAll('*')], out = [copy, ...copy.querySelectorAll('*')];
+    // presentation attributes, not style attributes: the app's Content-Security-Policy allows no inline styles
+    const PROPS = ['fill', 'stroke', 'stroke-width', 'stroke-dasharray', 'opacity', 'fill-opacity', 'stroke-opacity', 'font-family', 'font-size', 'font-weight', 'letter-spacing', 'text-anchor', 'dominant-baseline'];
+    all.forEach((el, i) => { const cs = getComputedStyle(el); for (const p of PROPS) { const v = cs.getPropertyValue(p); if (v) out[i].setAttribute(p, v); } out[i].removeAttribute('class'); });
+    const W = Number(src.getAttribute('width')), H = Number(src.getAttribute('height'));
+    const bg = getComputedStyle(document.body).backgroundColor || '#fff';
+    copy.insertBefore(svg('rect', { x: 0, y: 0, width: W, height: H, fill: bg }), copy.firstChild);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas'); c.width = W * 2; c.height = H * 2;
+      const g = c.getContext('2d'); g.scale(2, 2); g.drawImage(img, 0, 0);
+      c.toBlob((b) => { const a = h('a', { href: URL.createObjectURL(b), download: `trust-map-${new Date().toISOString().slice(0, 10)}.png` }); document.body.append(a); a.click(); a.remove(); toast('Picture saved'); }, 'image/png');
+    };
+    img.onerror = () => toast('Could not draw the picture.', true);
+    img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(copy))}`;
+  }
   const headActions = h('div', { class: 'row', style: 'gap:8px;align-items:center' });
   const asOf = h('span', { class: 'small muted' });
   const header = h('header', { class: 'head' },
@@ -154,7 +179,7 @@ export async function trustPage(ctx) {
       menu(label('From', fromVals), FROM.map((x) => (x ? [x[0], toggle('source', x[1]), { checked: fromVals.includes(x[1]) }] : ['Identity providers', null])), { align: 'start', btnClass: 'btn' }),
       menu(label('Finding', findVals), findingItems.length ? findingItems : [['No findings here', null]], { align: 'start', btnClass: 'btn' }),
       menu(label('Used', usedVals), USED.map(([l, v]) => [l, toggle('used', v), { checked: usedVals.includes(v) }]), { align: 'start', btnClass: 'btn' }),
-      help);
+      viewsMenu(), help);
     datalist.replaceChildren(...[...KEYS.map((k) => `${k}:`), ...Object.keys(m.findings).map((id) => `finding:${id}`), ...Object.keys(FROM_NAME).map((v) => `source:${v}`)].map((v) => h('option', { value: v })));
     // one pill per filter, in words
     const nameOf = (key, v) => {
@@ -183,6 +208,39 @@ export async function trustPage(ctx) {
     };
     warn.replaceChildren(...(m.warnings || []).map((w) => h('div', null, w, fix(w))));
   }
+  // ---------------------------------------------------------------- saved views: a named filter, yours or shared
+  let views = [];
+  const loadViews = () => get('/views?page=trust').then((r) => { views = r.items; drawFilter(); }).catch(() => {});
+  const here = () => { const p = new URLSearchParams(location.hash.split('?')[1] || ''); p.delete('page'); return p.toString(); };
+  function viewsMenu() {
+    const cur = here();
+    return menu(`Views${views.length ? ` · ${views.length}` : ''} ▾`, [
+      ...(views.length ? [['Saved', null], ...views.map((v) => [`${v.name}${v.shared ? ` · shared${v.mine ? '' : ` by ${v.owner || 'someone'}`}` : ''}`, `#/trust?${v.query}`, { checked: v.query === cur }])] : [['No saved views yet', null]]),
+      ['Save this view…', () => saveView(), { disabled: !cur }],
+      ...(views.some((v) => v.mine || (v.shared && session.user.permissions.includes('settings'))) ? [['Remove', null],
+        ...views.filter((v) => v.mine || (v.shared && session.user.permissions.includes('settings'))).map((v) => [`Remove “${v.name}”`, async () => {
+          try { await api('DELETE', `/views/${v.id}`); toast('View removed'); loadViews(); } catch (x) { toast(x.message, true); } }, { danger: true }])] : []),
+    ], { align: 'start', btnClass: 'btn' });
+  }
+  function saveView() {
+    const nameIn = h('input', { class: 'input', placeholder: 'Vendors without ExternalId', 'aria-label': 'Name of the view', maxlength: 80 });
+    const shareIn = h('input', { type: 'checkbox' });
+    const err = h('p', { class: 'small tm-bad', hidden: true });
+    const save = h('button', { class: 'btn primary', onClick: async () => {
+      if (!nameIn.value.trim()) { err.hidden = false; err.textContent = 'Give it a name.'; return; }
+      save.disabled = true;
+      try { await post('/views', { page: 'trust', name: nameIn.value.trim(), query: here(), shared: shareIn.checked }); bg.remove(); toast('View saved'); loadViews(); }
+      catch (x) { save.disabled = false; err.hidden = false; err.textContent = x.message; }
+    } }, 'Save');
+    nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') save.click(); });
+    const bg = modal('Save this view', h('div', { class: 'stack' },
+      h('p', { class: 'small muted', style: 'margin:0' }, 'The filter, the pick and the tab, under a name. It is offered under Views and in the search (Ctrl K).'),
+      h('label', { class: 'field' }, h('span', null, 'Name'), nameIn),
+      h('label', { class: 'tm2-check' }, shareIn, h('span', null, 'Share it with everyone in the workspace')), err),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel'), save));
+    nameIn.focus();
+  }
+
   const filterBar = h('section', { class: 'card tm2-filter' }, h('div', { class: 'card-b stack', style: 'gap:10px' },
     h('div', { class: 'tm2-filter-row' }, search, datalist, menus), pills, warn));
 
@@ -458,19 +516,22 @@ export async function trustPage(ctx) {
   function drawSources() {
     const rows = m.summary.flatMap((g) => g.sources.map((s) => ({ ...s, group: g.group })));
     const by = { worst: (a, b) => SEV_ORDER[a.worst] - SEV_ORDER[b.worst] || b.roles - a.roles, source: (a, b) => a.label.localeCompare(b.label), roles: (a, b) => b.roles - a.roles,
-      accounts: (a, b) => b.accounts - a.accounts, sessions: (a, b) => b.sessions - a.sessions, used: (a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0), high: (a, b) => b.highRiskRoles - a.highRiskRoles };
+      accounts: (a, b) => b.accounts - a.accounts, sessions: (a, b) => b.sessions - a.sessions, used: (a, b) => new Date(b.lastSeen || 0) - new Date(a.lastSeen || 0), high: (a, b) => b.highRiskRoles - a.highRiskRoles,
+      admin: (a, b) => b.adminAccounts - a.adminAccounts, first: (a, b) => new Date(a.firstSeen || 8.64e15) - new Date(b.firstSeen || 8.64e15) };
     rows.sort(by[S.srcSort] || by.worst);
     const th = (k, l) => h('th', { 'aria-sort': S.srcSort === k ? 'descending' : null }, by[k] ? h('button', { type: 'button', class: 'th-sort', onClick: () => { S.srcSort = k; drawView(); } }, l) : l);
     const open = (s) => { if (s.node && known(s.node)) pick(s.node); else changeTerms([...S.terms, ...parse(s.query)]); };
     view.replaceChildren(h('section', { class: 'card' },
       h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Where it comes from'), h('p', { class: 'small muted', style: 'margin:2px 0 0' }, 'Every source, inside your accounts too. Pick one for its details; one with no box on the map filters to it.'))),
       rows.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'tbl tm2-src' },
-        h('thead', null, h('tr', null, th('source', 'Source'), th('worst', 'Worst'), th('roles', 'Roles'), th('accounts', 'Accounts'), th('high', 'High-risk roles'), h('th', null, 'Findings'), th('sessions', 'Sessions'), th('used', 'Last sign-in'))),
+        h('thead', null, h('tr', null, th('source', 'Source'), th('worst', 'Worst'), th('roles', 'Roles'), th('accounts', 'Accounts'), th('high', 'High-risk roles'), th('admin', 'Administers'), h('th', null, 'Findings'), th('sessions', 'Sessions'), th('first', 'First seen'), th('used', 'Last sign-in'))),
         h('tbody', null, rows.map((s) => h('tr', { class: S.sel && s.node === S.sel ? 'tm2-row-sel' : null },
-          h('td', null, h('button', { type: 'button', class: 'link-btn tm2-srcname', onClick: () => open(s) }, s.label), h('span', { class: `src-tag g-${s.group}`, style: 'margin-left:8px' }, s.pkind === 'eks' ? 'EKS' : SHORT[s.group] || s.group)),
+          h('td', null, h('button', { type: 'button', class: 'link-btn tm2-srcname', onClick: () => open(s) }, s.label), h('span', { class: `src-tag g-${s.group}`, style: 'margin-left:8px' }, s.pkind === 'eks' ? 'EKS' : SHORT[s.group] || s.group),
+            s.named?.owner && h('div', { class: 'tiny muted' }, `owner: ${s.named.owner}`), s.named?.vendor && !s.named.owner && h('div', { class: 'tiny muted' }, 'known vendor')),
           h('td', null, sevBadge(s.worst) || h('span', { class: 'muted small' }, '—')), h('td', { class: 'num' }, num(s.roles)), h('td', { class: 'num' }, num(s.accounts)),
-          h('td', { class: 'num' }, s.highRiskRoles ? h('b', null, num(s.highRiskRoles)) : '—'), h('td', { class: 'num' }, s.findings ? num(s.findings) : '—'),
-          h('td', { class: 'num' }, s.sessions ? num(s.sessions) : '—'), h('td', { class: 'small' }, s.lastSeen ? ago(s.lastSeen) : s.group === 'service' ? '—' : h('span', { class: 'muted' }, 'none seen')))))))
+          h('td', { class: 'num' }, s.highRiskRoles ? h('b', null, num(s.highRiskRoles)) : '—'), h('td', { class: 'num', title: 'Accounts where it reaches an administrator role' }, s.adminAccounts ? h('b', null, plural(s.adminAccounts, 'account')) : '—'),
+          h('td', { class: 'num' }, s.findings ? num(s.findings) : '—'),
+          h('td', { class: 'num' }, s.sessions ? num(s.sessions) : '—'), h('td', { class: 'small' }, s.firstSeen ? ago(s.firstSeen) : '—'), h('td', { class: 'small' }, s.lastSeen ? ago(s.lastSeen) : s.group === 'service' ? '—' : h('span', { class: 'muted' }, 'none seen')))))))
         : h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, 'Nothing matches this filter.'))));
   }
 
@@ -490,12 +551,14 @@ export async function trustPage(ctx) {
     return tags;
   };
   async function loadWays() {
-    const key = JSON.stringify([q(), S.sel, S.sort, S.dir, S.page]);
+    const key = JSON.stringify([q(), S.sel, S.sort, S.dir, S.page, S.group]);
     if (key === waysKey && ways) return drawWays();
     waysKey = key;
     view.classList.add('tm2-busy');
     try {
-      const r = await get(`/trust/ways?q=${encodeURIComponent(q())}${S.sel ? `&sel=${encodeURIComponent(S.sel)}` : ''}&sort=${S.sort}&dir=${S.dir}&page=${S.page}&size=${PAGE}`);
+      const sel = S.sel ? `&sel=${encodeURIComponent(S.sel)}` : '';
+      const r = S.group ? await get(`/trust/groups?q=${encodeURIComponent(q())}${sel}&page=${S.page}&size=${PAGE}`)
+        : await get(`/trust/ways?q=${encodeURIComponent(q())}${sel}&sort=${S.sort}&dir=${S.dir}&page=${S.page}&size=${PAGE}`);
       if (key !== waysKey) return;
       ways = r; drawWays();
     } finally { view.classList.remove('tm2-busy'); }
@@ -566,13 +629,89 @@ export async function trustPage(ctx) {
     h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel'), save));
     noteIn.focus();
   }
+  // names for where trust comes from: shown to everyone, so set by reviewers who see every account
+  const canName = () => canDecide() && !session.user.scope_accounts;
+  const nameBtn = (s) => canName() && s.id.startsWith('src:') && h('button', { type: 'button', class: 'btn sm', onClick: () => nameDialog(s) }, s.named && s.named.name !== s.named.vendor ? 'Edit the name…' : 'Name it…');
+  function nameDialog(s) {
+    const own = s.named && s.named.name !== s.named.vendor ? s.named : null;
+    const nameIn = h('input', { class: 'input', value: own?.name || s.named?.vendor || '', placeholder: 'Vendor or team name', maxlength: 120, 'aria-label': 'Name' });
+    const ownerIn = h('input', { class: 'input', value: own?.owner || s.named?.owner || '', placeholder: 'Who looks after it here', maxlength: 120, 'aria-label': 'Owner' });
+    const purposeIn = h('textarea', { class: 'input', rows: 2, placeholder: 'What it is for: monitoring, backups, the deploy pipeline…', 'aria-label': 'What it is for' }, own?.purpose || s.named?.purpose || '');
+    const dateIn = h('input', { class: 'input', type: 'date', value: s.named?.reviewBy ? String(s.named.reviewBy).slice(0, 10) : '', 'aria-label': 'Review by' });
+    const err = h('p', { class: 'small tm-bad', hidden: true });
+    const save = h('button', { class: 'btn primary', onClick: async () => {
+      if (!nameIn.value.trim()) { err.hidden = false; err.textContent = 'Give it a name.'; return; }
+      save.disabled = true;
+      try { await post('/trust/names', { source: s.id, name: nameIn.value.trim(), owner: ownerIn.value.trim() || null, purpose: purposeIn.value.trim() || null, reviewBy: dateIn.value || null }); bg.remove(); afterReview('Named'); }
+      catch (x) { save.disabled = false; err.hidden = false; err.textContent = x.message; }
+    } }, 'Save');
+    const bg = modal(`Name ${s.aws || s.label}`, h('div', { class: 'stack' },
+      h('p', { class: 'small muted', style: 'margin:0' }, 'Everyone sees this name on the Trust map, in its exports and in the search.', s.named?.vendor ? ` The public list of known AWS accounts calls it ${s.named.vendor}.` : ''),
+      h('label', { class: 'field' }, h('span', null, 'Name'), nameIn), h('label', { class: 'field' }, h('span', null, 'Owner'), ownerIn),
+      h('label', { class: 'field' }, h('span', null, 'What it is for'), purposeIn), h('label', { class: 'field' }, h('span', null, 'Review by'), dateIn), err),
+    h('div', { class: 'actions' }, own && h('button', { class: 'btn danger', onClick: async () => {
+      try { await api('DELETE', `/trust/names?source=${encodeURIComponent(s.id)}`); bg.remove(); afterReview('Name removed'); } catch (x) { toast(x.message, true); } } }, 'Remove the name'),
+    h('span', { class: 'grow' }), h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel'), save));
+    nameIn.focus();
+  }
   async function unexpect(id) {
     try { await api('DELETE', `/trust/expected/${id}`); afterReview('No longer expected'); } catch (err) { toast(err.message, true); }
   }
   const expectBtn = (opts) => canDecide() && h('button', { type: 'button', class: 'btn sm', onClick: () => expectDialog(opts).catch((x) => toast(x.message, true)) }, 'Mark as expected…');
 
+  const groupSwitch = () => h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'How ways in are listed' },
+    ...[[false, 'Each way in'], [true, 'Group the same trust']].map(([v, l]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(S.group === v),
+      onClick: () => { if (S.group === v) return; S.group = v; S.page = 0; S.expanded.clear(); ways = null; address(); drawView(); } }, l)));
+  async function decideGroup(g, decision) {
+    try {
+      for (let i = 0; i < g.undecided.length; i += 200) await post('/findings/decisions', { ids: g.undecided.slice(i, i + 200), decision, note: `Same trust in ${g.accounts} accounts, decided together on the Trust map` });
+      afterReview(`${DECISION[decision]}: ${plural(g.undecided.length, 'finding')} in ${plural(g.accounts, 'account')}`);
+    } catch (err) { toast(err.message, true); }
+  }
+  function drawGroups() {
+    const total = ways.total;
+    const row = (g) => {
+      const id = `g|${g.key}`, open = S.expanded.has(id), gs = guards(g.conditions);
+      return h('div', { class: `tm2-way tm2-grp${open ? ' open' : ''}`, role: 'row' },
+        h('button', { type: 'button', class: 'tm2-way-main', 'aria-expanded': String(open), onClick: () => { open ? S.expanded.delete(id) : S.expanded.add(id); drawWays(); } },
+          h('span', { class: `tm2-dot tm2-dot-${g.attention ? g.worst : 'none'}`, title: g.worst }),
+          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, g.role, g.expected === g.ways ? h('span', { class: 'tm2-chip ok' }, 'EXPECTED') : g.accepted === g.ways ? h('span', { class: 'tm2-chip ok' }, 'ACCEPTED') : null),
+            h('span', { class: 'tiny muted' }, `in ${plural(g.accounts, 'account')}${g.ways > g.accounts ? ` · ${plural(g.ways, 'statement')}` : ''}`)),
+          h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${g.group}` }, g.pkind === 'eks' ? 'EKS' : SHORT[g.group] || g.group), h('span', { class: 'tm-ell' }, g.source)),
+            h('span', { class: 'mono tiny muted tm-ell' }, g.principal)),
+          h('span', { class: 'tm2-c-guard' }, g.conditions.length ? gs.map((t) => h('span', { class: 'tm2-guard' }, t)) : g.group === 'service' ? h('span', { class: 'tiny muted' }, '—') : h('span', { class: 'tiny tm2-none' }, 'no conditions')),
+          h('span', { class: 'tm2-c-find' }, g.findings.length ? g.findings.map((f) => h('span', { class: 'tm2-find' }, sevBadge(f.severity), h('span', null, f.title))) : h('span', { class: 'tiny muted' }, 'nothing to flag')),
+          h('span', { class: 'tm2-c-used tiny' }, g.sessions ? [h('b', null, num(g.sessions)), ` sessions · ${ago(g.lastSeen)}`] : h('span', { class: 'muted' }, g.group === 'service' ? '—' : 'never used')),
+          h('span', { class: 'tm2-c-risk tiny' }, g.attention ? h('b', { class: 'tm-bad' }, `${num(g.attention)} need attention`) : '', g.admin ? h('span', { class: 'tm2-chip bad', title: 'Ways in that reach an administrator role' }, `ADMIN ×${num(g.admin)}`) : null)),
+        open && h('div', { class: 'tm2-way-more tm2-grp-more' },
+          h('div', null, h('div', { class: 'tm2-cap' }, `ACCOUNTS${g.members.length < g.ways ? ` · THE FIRST ${g.members.length}` : ''}`),
+            h('div', { class: 'tm2-grp-list' }, g.members.map((x) => h('a', { class: 'tm2-grp-acct', href: `#/identities/${x.roleId}?tab=policies` },
+              h('span', { class: `tm2-dot tm2-dot-${x.attention ? x.worst : 'none'}` }), h('span', null, x.account), h('span', { class: 'tiny muted' }, `${envName(x.env) || ''}${x.sessions ? ` · ${num(x.sessions)} sessions` : ''}${x.expected ? ' · expected' : x.accepted ? ' · accepted' : ''}`))))),
+          h('div', null, h('div', { class: 'tm2-cap' }, 'CONDITIONS'), g.conditions.length ? g.conditions.map((c) => h('code', { class: 'cond-line' }, c)) : h('p', { class: 'small muted' }, 'None: the principal alone is enough.'),
+            h('div', { class: 'tm2-cap', style: 'margin-top:8px' }, 'REVIEW'),
+            g.undecided.length ? h('p', { class: 'small', style: 'margin:0 0 6px' }, `${plural(g.undecided.length, 'finding')} not decided yet, across the accounts.`) : h('p', { class: 'small muted', style: 'margin:0 0 6px' }, g.findings.length ? 'Every finding is decided or expected.' : 'Nothing to decide.'),
+            h('div', { class: 'row tm2-way-acts', style: 'gap:8px' },
+              canDecide() && g.undecided.length > 0 && h('button', { type: 'button', class: 'btn sm', onClick: () => decideGroup(g, 'accept') }, `Accept in all ${plural(g.accounts, 'account')}`),
+              canDecide() && g.undecided.length > 0 && h('button', { type: 'button', class: 'btn sm', onClick: () => decideGroup(g, 'investigate') }, 'Investigate'),
+              g.group !== 'service' && g.expected < g.ways && expectBtn({ source: g.sourceKey, sourceLabel: g.source, roles: g.role, ways: [{ findings: g.findings }] }),
+              h('button', { type: 'button', class: 'btn sm', onClick: () => changeTerms([...S.terms, ...parse(`role:${quote(g.role)}`)]) }, 'Filter to this role')))));
+    };
+    const pg = total > PAGE ? pager({ page: S.page + 1, total, size: PAGE, label: `${num(S.page * PAGE + 1)}–${num(Math.min(total, S.page * PAGE + PAGE))} of ${num(total)}`, onPage: (p) => { S.page = p - 1; address(); loadWays(); } }) : null;
+    view.replaceChildren(h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'The same trust, grouped'), h('p', { class: 'small muted', style: 'margin:2px 0 0' },
+        `${plural(ways.ways, 'way in', 'ways in')} as ${plural(total, 'pattern')}: one row per role name, where it comes from and its findings. Open one for its accounts; a decision applies to all of them.`)),
+      h('div', { class: 'row', style: 'gap:8px' }, groupSwitch(), pg)),
+      total ? h('div', { class: 'tm2-ways', role: 'table' },
+        h('div', { class: 'tm2-way-head', role: 'row' }, h('span'), h('div', { class: 'tm2-th' }, 'Role name'), h('div', { class: 'tm2-th' }, 'From'), h('div', { class: 'tm2-th' }, 'Guarded by'), h('div', { class: 'tm2-th' }, 'Findings'), h('div', { class: 'tm2-th' }, 'Used'), h('div', { class: 'tm2-th' }, 'Attention')),
+        ways.groups.map(row))
+        : h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, 'Nothing here.')),
+      pg && h('div', { class: 'card-b row', style: 'justify-content:flex-end' }, pg)));
+  }
+
   function drawWays() {
     if (S.tab !== 'ways' || !ways) return;
+    if (S.group) { if (ways.groups) drawGroups(); return; }
+    if (!ways.rows) return;
     const sortBy = (k) => () => { if (S.sort === k) S.dir = S.dir === 'asc' ? 'desc' : 'asc'; else { S.sort = k; S.dir = 'asc'; } S.page = 0; address(); loadWays(); };
     const th = (k, l) => h('div', { class: 'tm2-th', role: 'columnheader', 'aria-sort': S.sort === k ? (S.dir === 'asc' ? 'ascending' : 'descending') : null },
       h('button', { type: 'button', class: 'th-sort', onClick: sortBy(k) }, l, S.sort === k ? (S.dir === 'asc' ? ' ↑' : ' ↓') : ''));
@@ -584,17 +723,18 @@ export async function trustPage(ctx) {
         h('button', { type: 'button', class: 'tm2-way-main', 'aria-expanded': String(open), onClick: () => { open ? S.expanded.delete(id) : S.expanded.add(id); drawWays(); } },
           h('span', { class: `tm2-dot tm2-dot-${e.attention || e.worst === 'low' || e.worst === 'info' || e.worst === 'none' ? e.worst : 'none'}`, title: e.attention ? e.worst : `${e.worst}${e.expected ? ', expected' : e.accepted ? ', accepted' : ''}` }),
           h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, e.role, ...reviewChips(e)), h('span', { class: 'tiny muted' }, `${e.account} · ${e.awsAccountId} · ${e.sid || `statement ${e.statement + 1}`}`)),
-          h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${e.group}` }, e.pkind === 'eks' ? 'EKS' : SHORT[e.group] || e.group), h('span', { class: 'tm-ell' }, e.source)),
-            h('span', { class: 'mono tiny muted tm-ell' }, e.principal)),
+          h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${e.group}` }, e.pkind === 'eks' ? 'EKS' : SHORT[e.group] || e.group), h('span', { class: 'tm-ell' }, e.named?.name || e.source)),
+            h('span', { class: 'mono tiny muted tm-ell' }, e.named ? `${e.principalAccount || e.source} · ${e.principal}` : e.principal)),
           h('span', { class: 'tm2-c-guard' }, e.conditions.length ? [...g.map((t) => h('span', { class: 'tm2-guard' }, t)), g.length < e.conditions.length ? h('span', { class: 'tiny muted' }, `+${e.conditions.length - g.length}`) : null]
             : e.group === 'service' ? h('span', { class: 'tiny muted' }, '—') : h('span', { class: 'tiny tm2-none' }, 'no conditions')),
           h('span', { class: 'tm2-c-find' }, findings.length ? findings.map((f) => h('span', { class: 'tm2-find' }, sevBadge(f.severity), h('span', null, f.title))) : h('span', { class: 'tiny muted' }, 'nothing to flag')),
           h('span', { class: 'tm2-c-used tiny' }, e.sessions ? [h('b', null, num(e.sessions)), ` sessions · ${ago(e.lastSeen)}`] : e.lastUsed ? `IAM: used ${ago(e.lastUsed.at)}` : h('span', { class: 'muted' }, e.group === 'service' ? '—' : 'never used')),
-          h('span', { class: 'tm2-c-risk' }, e.risk ? h('span', { class: `badge b-${String(e.risk).toLowerCase()}`, title: 'Risk of the role it leads to' }, e.risk) : null)),
+          h('span', { class: 'tm2-c-risk' }, e.risk ? h('span', { class: `badge b-${String(e.risk).toLowerCase()}`, title: 'Risk of the role it leads to' }, e.risk) : null,
+            e.admin ? h('span', { class: 'tm2-chip bad', title: `The role can do ${num(e.granted)} things: an administrator` }, 'ADMIN') : null)),
         open && h('div', { class: 'tm2-way-more' },
           h('div', null, h('div', { class: 'tm2-cap' }, 'CONDITIONS'), e.conditions.length ? e.conditions.map((c) => h('code', { class: 'cond-line' }, c)) : h('p', { class: 'small muted' }, 'None: the principal alone is enough.')),
           h('div', null, h('div', { class: 'tm2-cap' }, 'FINDINGS'), e.findings.length ? e.findings.map((f) => h('div', { class: 'tm2-fdetail' }, sevBadge(f.severity), h('div', null, h('b', null, f.title), f.detail && h('div', { class: 'small muted' }, f.detail)))) : h('p', { class: 'small muted' }, 'Nothing to flag.')),
-          h('div', null, h('div', { class: 'tm2-cap' }, 'SEEN COMING IN'), e.callerCount ? [h('p', { class: 'small', style: 'margin:0 0 4px' }, `${plural(e.callerCount, 'caller')}, ${plural(e.sessions, 'session')}. The latest:`),
+          h('div', null, h('div', { class: 'tm2-cap' }, 'SEEN COMING IN'), e.callerCount ? [h('p', { class: 'small', style: 'margin:0 0 4px' }, `${plural(e.callerCount, 'caller')}, ${plural(e.sessions, 'session')}${e.firstSeen ? `, first ${ago(e.firstSeen)}` : ''}. The latest:`),
             ...e.seen.map((x) => h('div', { class: 'small' }, h('span', { class: 'mono' }, cut(x.display, 90)), h('span', { class: 'muted' }, ` · ${num(x.sessions)} · ${ago(x.lastSeen)}`)))]
             : h('p', { class: 'small muted' }, e.lastUsed ? `No sign-in tied to this statement; IAM last used ${ago(e.lastUsed.at)}.` : 'Nothing in the history read.'),
           h('div', { class: 'tm2-cap', style: 'margin-top:8px' }, 'ACTIONS'), h('code', { class: 'cond-line' }, e.actions.join(', ')),
@@ -612,9 +752,9 @@ export async function trustPage(ctx) {
     view.replaceChildren(h('section', { class: 'card' },
       h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Ways in'), h('p', { class: 'small muted', style: 'margin:2px 0 0' },
         S.sel ? ['Following the pick: ', h('b', null, nameOf(S.sel)), '. '] : 'Every statement that lets someone in. ', 'Open a row for its conditions, findings and callers.')),
-      h('div', { class: 'row', style: 'gap:8px' }, S.sel && h('button', { class: 'btn sm', onClick: () => pick(null) }, 'All ways in'), pg)),
+      h('div', { class: 'row', style: 'gap:8px' }, S.sel && h('button', { class: 'btn sm', onClick: () => pick(null) }, 'All ways in'), groupSwitch(), pg)),
       total ? h('div', { class: 'tm2-ways', role: 'table' },
-        h('div', { class: 'tm2-way-head', role: 'row' }, h('span'), th('role', 'Role'), th('source', 'From'), h('div', { class: 'tm2-th' }, 'Guarded by'), th('worst', 'Findings'), th('used', 'Used'), th('risk', 'Role risk')),
+        h('div', { class: 'tm2-way-head', role: 'row' }, h('span'), th('role', 'Role'), th('source', 'From'), h('div', { class: 'tm2-th' }, 'Guarded by'), th('worst', 'Findings'), th('used', 'Used'), th('reach', 'Reaches')),
         ways.rows.map(row))
         : h('div', { class: 'card-b' }, h('p', { class: 'muted small' }, 'Nothing here.')),
       pg && h('div', { class: 'card-b row', style: 'justify-content:flex-end' }, pg)));
@@ -647,6 +787,7 @@ export async function trustPage(ctx) {
         `${plural(l.roles, 'role')} · ${plural(l.ways, 'statement')}`, l.worst),
       facts([['Findings', l.findings ? plural(l.findings, 'finding') : 'nothing to flag', l.findings ? 'bad' : 'ok'],
         ['Leads to', l.highRiskRoles ? `${plural(l.highRiskRoles, 'high-risk role')} of ${l.roles}` : 'no high-risk role', l.highRiskRoles ? 'bad' : null],
+        l.admin ? ['Administrator', `${plural(l.admin, 'way in', 'ways in')} reach an administrator role`, 'bad'] : null,
         ['Used', usedText(l), l.sessions || l.iamUsed ? null : 'warn']]),
       rolesBox,
       h('div', { class: 'tm-actions' }, filterTo(l.query), waysBtn(), expectBtn({ source: l.from, sourceLabel: nameOf(l.from), accounts: [to?.aws].filter(Boolean), sel: l.id })));
@@ -659,11 +800,16 @@ export async function trustPage(ctx) {
     } else if (s) {
       const out = M.links.filter((x) => x.from === s.id);
       panel.replaceChildren(headOf((KIND_NAME[s.group] || s.group).toUpperCase(), s.label,
-        s.group === 'external-account' ? `AWS account not connected here · ${s.vendor ? 'every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : null, s.worst),
+        s.group === 'external-account' ? `${s.named ? `${s.aws} · ` : ''}AWS account not connected here · ${s.vendor ? 'every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : null, s.worst),
+      s.named && h('div', { class: 'tm-named' }, s.named.purpose && h('p', { class: 'small', style: 'margin:0' }, s.named.purpose),
+        h('p', { class: 'tiny muted', style: 'margin:2px 0 0' }, [s.named.owner && `owner: ${s.named.owner}`, s.named.reviewBy && `review by ${String(s.named.reviewBy).slice(0, 10)}`,
+          s.named.vendor && (s.named.name === s.named.vendor ? 'named from the public list of known AWS accounts (fwd:cloudsec)' : `known as ${s.named.vendor} in fwd:cloudsec's list`)].filter(Boolean).join(' · '))),
       facts([['Reaches', `${plural(s.roles, 'role')} in ${plural(s.accounts, 'account')}`], ['Leads to', s.highRiskRoles ? plural(s.highRiskRoles, 'high-risk role') : 'no high-risk role', s.highRiskRoles ? 'bad' : null],
-        ['Findings', s.findings ? plural(s.findings, 'finding') : 'nothing to flag', s.findings ? 'bad' : 'ok'], ['Used', usedText(s), s.sessions ? null : 'warn']]),
+        ['Administers', s.adminAccounts ? `an administrator role in ${plural(s.adminAccounts, 'account')}` : 'no administrator role', s.adminAccounts ? 'bad' : null],
+        ['Findings', s.findings ? plural(s.findings, 'finding') : 'nothing to flag', s.findings ? 'bad' : 'ok'], ['Used', usedText(s), s.sessions ? null : 'warn'],
+        s.firstSeen ? ['First seen', ago(s.firstSeen)] : null]),
       listOf('Accounts it can get into', out.sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst]).map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) }))),
-      h('div', { class: 'tm-actions' }, filterTo(s.query), waysBtn(), expectBtn({ source: s.id, sourceLabel: s.label, sel: s.id })));
+      h('div', { class: 'tm-actions' }, filterTo(s.query), waysBtn(), expectBtn({ source: s.id, sourceLabel: s.label, sel: s.id }), nameBtn(s)));
     } else if (a) {
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
       panel.replaceChildren(headOf(a.planned ? 'PLANNED · NOT ONBOARDED' : `${(envName(a.env) || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
@@ -752,6 +898,7 @@ export async function trustPage(ctx) {
   root.append(header, filterBar, tiles, h('div', { class: 'tm2-viewwrap' }, tabBar, body), live);
   address();
   drawAll();
+  loadViews();
   requestAnimationFrame(() => { if (S.tab === 'map') drawMap(); });   // once the box has its real width
   return root;
 }

@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { query, tx } from '../db.js';
 import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
-import { inScope, scopeSql } from '../auth/rbac.js';
+import { inScope, scopeSql, can } from '../auth/rbac.js';
 import { enqueueRun } from '../queue.js';
 import { scannerSnippets } from '../onboarding.js';
 import { sealCredentials } from '../aws/credentials.js';
@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
-import { trustMap, trustWays, toCsv, sourcesCsv, expectedRules, trustIndex } from '../trustmap.js';
+import { trustMap, trustWays, trustGroups, thirdParties, thirdPartyCsv, toCsv, sourcesCsv, expectedRules, trustIndex } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -577,6 +577,58 @@ data.get('/trust.csv', requirePerm('view'), wrap(async (req, res) => {
 data.get('/trust/sources.csv', requirePerm('view'), wrap(async (req, res) => {
   const m = await trustMap(req.user, trustQ(req), { limit: 0 });
   sendCsv(res, 'trust-map-sources', sourcesCsv(m.summary));
+}));
+
+// the same trust, grouped: one row per role name, source and findings
+data.get('/trust/groups', requirePerm('view'), wrap(async (req, res) => {
+  const int = (v, d) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d);
+  res.json(await trustGroups(req.user, trustQ(req), { sel: trustSel(req), page: int(req.query.page, 0), size: int(req.query.size, 50) }));
+}));
+// third-party access: one row per source from outside your estate, with its name, owner, reach, guards and use
+data.get('/trust/third-parties', requirePerm('view'), wrap(async (req, res) => { res.json({ items: await thirdParties(req.user, trustQ(req)) }); }));
+data.get('/trust/third-parties.csv', requirePerm('view'), wrap(async (req, res) => { sendCsv(res, 'third-party-access', thirdPartyCsv(await thirdParties(req.user, trustQ(req)))); }));
+// names for where trust comes from (an outside account, a provider): seen by everyone, so set by reviewers who see everything
+const sourceKey = z.string().min(3).max(300).regex(/^(src:|svc:)/);
+data.post('/trust/names', requirePerm('decide'), wrap(async (req, res) => {
+  if (req.user.scope_accounts) return res.status(403).json({ error: 'out_of_scope', message: 'Names are shown to everyone; ask a reviewer who sees every account.' });
+  const b = z.object({ source: sourceKey, name: z.string().trim().min(1).max(120), owner: z.string().trim().max(120).optional().nullable(),
+    purpose: z.string().trim().max(500).optional().nullable(), reviewBy: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional() }).parse(req.body);
+  await query(`INSERT INTO trust_sources(source, name, owner, purpose, review_by, updated_by, updated_at) VALUES ($1,$2,$3,$4,$5,$6, now())
+    ON CONFLICT (source) DO UPDATE SET name=EXCLUDED.name, owner=EXCLUDED.owner, purpose=EXCLUDED.purpose, review_by=EXCLUDED.review_by, updated_by=EXCLUDED.updated_by, updated_at=now()`,
+  [b.source, b.name, b.owner || null, b.purpose || null, b.reviewBy || null, req.user.id]);
+  await audit(req, 'trust.name', { type: 'trust_source', id: b.source }, { name: b.name, owner: b.owner || null });
+  res.json({ ok: true });
+}));
+data.delete('/trust/names', requirePerm('decide'), wrap(async (req, res) => {
+  if (req.user.scope_accounts) return res.status(403).json({ error: 'out_of_scope', message: 'Names are shown to everyone; ask a reviewer who sees every account.' });
+  const source = sourceKey.parse(req.query.source);
+  const r = await query('DELETE FROM trust_sources WHERE source=$1', [source]);
+  if (!r.rowCount) throw NotFound();
+  await audit(req, 'trust.unname', { type: 'trust_source', id: source });
+  res.json({ ok: true });
+}));
+
+// saved views: a named filter, yours or shared with the workspace
+data.get('/views', requirePerm('view'), wrap(async (req, res) => {
+  const page = z.enum(['trust']).parse(req.query.page);
+  const r = await query(`SELECT v.id, v.name, v.query, v.shared, v.user_id = $2 AS mine, u.name AS owner, v.created_at FROM saved_views v LEFT JOIN users u ON u.id = v.user_id
+    WHERE v.page = $1 AND (v.user_id = $2 OR v.shared) ORDER BY v.shared, lower(v.name)`, [page, req.user.id]);
+  res.json({ items: r.rows });
+}));
+data.post('/views', requirePerm('view'), wrap(async (req, res) => {
+  const b = z.object({ page: z.enum(['trust']), name: z.string().trim().min(1).max(80), query: z.string().max(1500), shared: z.boolean().default(false) }).parse(req.body);
+  const n = (await query('SELECT count(*)::int n FROM saved_views WHERE user_id=$1', [req.user.id])).rows[0].n;
+  if (n >= 100) return res.status(400).json({ error: 'too_many', message: 'You have 100 saved views; remove one first.' });
+  const r = (await query('INSERT INTO saved_views(user_id, page, name, query, shared) VALUES ($1,$2,$3,$4,$5) RETURNING id', [req.user.id, b.page, b.name, b.query, b.shared])).rows[0];
+  if (b.shared) await audit(req, 'view.share', { type: 'saved_view', id: r.id }, { name: b.name, page: b.page });
+  res.json({ ok: true, id: r.id });
+}));
+data.delete('/views/:id', requirePerm('view'), wrap(async (req, res) => {
+  const v = (await query('SELECT * FROM saved_views WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
+  // your own, or a shared one if you may change settings
+  if (!v || (v.user_id !== req.user.id && !(v.shared && can(req.user, 'settings')))) throw NotFound();
+  await query('DELETE FROM saved_views WHERE id=$1', [v.id]);
+  res.json({ ok: true });
 }));
 
 // expected trust: a way in a reviewer has looked at and accepts (left out of "needs attention" until it changes)

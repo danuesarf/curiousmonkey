@@ -321,7 +321,14 @@ export function menu(label, items, { title, align = 'end', btnClass = 'btn sm' }
   const btn = h('button', { class: `${btnClass} menu-btn`, type: 'button', 'aria-haspopup': 'menu', 'aria-expanded': 'false', title: title || (typeof label === 'string' ? label : '') }, label);
   const wrap = h('div', { class: 'menu' }, btn, list);
   const close = (focus = false) => { list.hidden = true; btn.setAttribute('aria-expanded', 'false'); document.removeEventListener('click', outside, true); window.removeEventListener('scroll', onMove, true); window.removeEventListener('resize', onMove); if (focus) btn.focus(); };
-  const onMove = () => close();
+  // a scroll elsewhere moves the button away from the list; focusing an item must not count (it can scroll an ancestor)
+  const onMove = (e) => {
+    if (e?.type === 'scroll' && (list.contains(e.target) || e.target === list)) return;
+    // the page scrolled (or is still settling from a scroll): follow the button while it is on screen, else close
+    const r = btn.getBoundingClientRect();
+    if (e?.type === 'scroll' && r.bottom > 0 && r.top < window.innerHeight) { place(); return; }
+    close();
+  };
   // placed against the window, so a scrolling table or card around the button cannot clip it; opens upward near the bottom
   const place = () => {
     const r = btn.getBoundingClientRect(), w = list.offsetWidth, ht = list.offsetHeight;
@@ -344,7 +351,7 @@ export function menu(label, items, { title, align = 'end', btnClass = 'btn sm' }
     if (!list.hidden) return close();
     list.hidden = false; btn.setAttribute('aria-expanded', 'true'); place();
     document.addEventListener('click', outside, true); window.addEventListener('scroll', onMove, true); window.addEventListener('resize', onMove);
-    entries.find((x) => !x.disabled)?.focus();
+    entries.find((x) => !x.disabled)?.focus({ preventScroll: true });
   });
   list.addEventListener('keydown', (e) => {
     const live = entries.filter((x) => !x.disabled), i = live.indexOf(document.activeElement);

@@ -207,6 +207,14 @@ A web identity sign-in counts for a statement only when the provider is the stat
 
 **What changed.** A way in added in the last 30 days (a new statement or principal, or a new role), or one that lost a guard (ExternalId, subject, audience, MFA, organisation…), is marked *New* or *Guard off*, from the trust policy's history. The worker sends the last two days' to the change feed (*New way in*, *Guard taken off*), so the bell and alert rules see them.
 
+**Names and reach.** An outside AWS account is named from the public list of known AWS accounts ([fwd:cloudsec](https://github.com/fwdcloudsec/known_aws_accounts), bundled; see `THIRD_PARTY_NOTICES.md`), and *Name it…* on any source sets the workspace's own name, owner, purpose and review date (shown to everyone, so set by reviewers who see every account; `POST/DELETE /api/trust/names`). Names are searched by the filter, `from:` and the search box (Ctrl K). Each way in, line and source says what it leads to: the role's risk, *Admin* when the role can do 15,000 things or more (as Radar counts it), and how many accounts a source can administer; *Reaches* sorts by how loose the trust is and what it reaches, together. Sources show when they were first and last seen.
+
+**The same trust, grouped.** *Group the same trust* in *Ways in* lists one row per role name, source and findings, with the accounts it is in (a vendor role in 100 accounts is one row). A decision (*Accept in all N accounts*, *Investigate*) or *Mark as expected…* applies to the whole group.
+
+**Third-party access.** *Export → Third-party access (CSV)*: one row per source outside your estate (outside accounts, anyone, CI and identity providers, deleted identities) with its name, known vendor, owner, purpose, review date, accounts, roles, high-risk roles, accounts it administers, ExternalId coverage, worst finding, what needs attention, what is expected, sessions, first and last seen.
+
+**Views and sharing.** *Views* saves the filter, pick and tab under a name, for you or shared with the workspace; saved views and sources are offered in the search box (Ctrl K). *Export → The map as a picture* saves the map as drawn as a PNG. A trust finding in the Findings inbox has *Show on the Trust map*.
+
 Everything is a query, so a view is a shareable link and a CSV export (*Export*: the ways in, or the sources):
 
 ```
@@ -219,7 +227,7 @@ source:external -cond:ExternalId          outside accounts with no ExternalId co
 role:deploy has:findings used:no          …
 ```
 
-Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `roleid` (one role exactly) `cond` `env` `has` `no` `used` `attention` (`yes`/`no`) `expected` (`yes`, `no`, `due`) `decided` (`yes`, `no`, `accepted`) `new` (days, e.g. `new:7`, or `new:weakened`); a comma inside a value means either; prefix `-` to exclude; anything else is free text. `source:` takes `public`, `external`, `connected`, `same`, `aws`, `oidc`, `saml`, `service`, `unknown` and the provider kinds `github`, `bitbucket`, `gitlab`, `eks`, `terraform`, `circleci`, `azure`, `buildkite`, `google`, `cognito`, `identity-center`. `used:` takes `yes` (a sign-in came through it), `iam` (no sign-in tied to it, but IAM says the role is used) or `no`.
+Keys: `account` `from` `source` `type` `provider` `finding` `severity` `role` `roleid` (one role exactly) `cond` `env` `has` `no` `used` `attention` (`yes`/`no`) `expected` (`yes`, `no`, `due`) `decided` (`yes`, `no`, `accepted`) `new` (days, e.g. `new:7`, or `new:weakened`); `has:`/`no:` also take `admin` and `name`; a comma inside a value means either; prefix `-` to exclude; anything else is free text. `source:` takes `public`, `external`, `connected`, `same`, `aws`, `oidc`, `saml`, `service`, `unknown` and the provider kinds `github`, `bitbucket`, `gitlab`, `eks`, `terraform`, `circleci`, `azure`, `buildkite`, `google`, `cognito`, `identity-center`. `used:` takes `yes` (a sign-in came through it), `iam` (no sign-in tied to it, but IAM says the role is used) or `no`.
 
 The ways in are worked out once and kept by the API process: a signature of what they are read from (roles and their trust policies, callers, accounts, SAML providers, Google service accounts, the history read) is checked on each request and, while the page is in use, every minute; only when it changes are they worked out again. `GET /api/trust` answers the counts, sources and map; `GET /api/trust/ways` the ways in, a page at a time (`sort`, `dir`, `page`, `size`, `sel`).
 

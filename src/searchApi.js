@@ -2,6 +2,7 @@
 // a few of each, only in the accounts the member can see.
 import { query } from './db.js';
 import { scopeSql } from './auth/rbac.js';
+import { thirdParties } from './trustmap.js';
 
 const PER_TYPE = 5;
 const like = (q) => `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -10,7 +11,7 @@ const rank = (col, n) => `(lower(${col}) = lower($${n})) DESC, (lower(${col}) LI
 
 export async function search(user, text) {
   const q = String(text || '').trim().slice(0, 100);
-  if (q.length < 2) return { q, roles: [], users: [], keys: [], accounts: [], gcp: [] };
+  if (q.length < 2) return { q, roles: [], users: [], keys: [], accounts: [], gcp: [], trust: [], views: [] };
   const identities = (isUser) => {
     const p = [like(q), q];
     return query(`SELECT r.id, r.name, r.kind, r.risk, a.name AS account_name, a.account_id AS aws_account_id
@@ -19,7 +20,8 @@ export async function search(user, text) {
                    ORDER BY ${rank('r.name', 2)}, r.risk_score DESC NULLS LAST, r.name LIMIT ${PER_TYPE}`, p);
   };
   const kp = [like(q)], ap = [like(q), q];
-  const [roles, users, keys, accounts, gcp] = await Promise.all([
+  const needle = q.toLowerCase();
+  const [roles, users, keys, accounts, gcp, trust, views] = await Promise.all([
     identities(false), identities(true),
     // a key ID is only worth matching once enough of it is typed (every one starts with AKIA)
     q.length >= 4 ? query(`SELECT k.key_id, k.status, k.deleted_at, r.id AS user_id, r.name AS user_name, r.risk, a.name AS account_name
@@ -31,6 +33,10 @@ export async function search(user, text) {
     // Google Cloud is not shown to members limited to some AWS accounts
     user.scope_accounts ? { rows: [] } : query(`SELECT id, kind, coalesce(email, display_name, member) AS name, project_id, risk FROM gcp_principals
             WHERE (email ILIKE $1 OR display_name ILIKE $1 OR member ILIKE $1 OR unique_id = $2) ORDER BY ${rank('coalesce(email, display_name, member)', 2)}, risk_score DESC, member LIMIT ${PER_TYPE}`, [like(q), q]),
+    // where trust comes from: an outside account by ID or name, a vendor, a provider (from the Trust map's kept index)
+    thirdParties(user, '').then((xs) => xs.filter((s) => [s.label, s.aws, s.named?.name, s.named?.vendor, s.named?.owner].some((v) => v && String(v).toLowerCase().includes(needle)))
+      .sort((a, b) => (String(b.named?.name || '').toLowerCase().startsWith(needle)) - (String(a.named?.name || '').toLowerCase().startsWith(needle)) || b.roles - a.roles).slice(0, PER_TYPE)).catch(() => []),
+    query(`SELECT id, page, name, query, shared FROM saved_views WHERE (user_id = $1 OR shared) AND name ILIKE $2 ORDER BY shared, name LIMIT ${PER_TYPE}`, [user.id, like(q)]).catch(() => ({ rows: [] })),
   ]);
   return {
     q,
@@ -39,5 +45,7 @@ export async function search(user, text) {
     keys: keys.rows.map((k) => ({ id: k.key_id, status: k.deleted_at ? 'Deleted' : k.status, userId: k.user_id, user: k.user_name, risk: k.risk, account: k.account_name })),
     accounts: accounts.rows.map((a) => ({ id: a.id, name: a.name, awsAccountId: a.aws_account_id, environment: a.environment, status: a.status })),
     gcp: gcp.rows.map((g) => ({ id: g.id, name: g.name, kind: g.kind, project: g.project_id, risk: g.risk })),
+    trust: trust.map((s) => ({ name: s.named?.name || s.label, aws: s.aws, group: s.group, node: s.node, roles: s.roles, accounts: s.accounts, worst: s.worst, query: s.query })),
+    views: views.rows.map((v) => ({ id: v.id, page: v.page, name: v.name, query: v.query, shared: v.shared })),
   };
 }

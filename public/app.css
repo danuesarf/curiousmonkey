@@ -906,3 +906,7 @@ body.wall .radar3 .radar-layout>.scene,body.wall .space-page .space-layout>.scen
 .tm2-way-acts{flex-wrap:wrap}
 .tm2-checks{display:flex;flex-direction:column;gap:6px}
 .tm2-check{display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer}
+.tm2-grp-list{display:flex;flex-direction:column;gap:2px;max-height:260px;overflow:auto}
+.tm2-grp-acct{display:flex;gap:8px;align-items:center;font-size:13px;text-decoration:none;color:var(--ink);padding:2px 0}
+.tm2-grp-acct:hover span:nth-child(2){text-decoration:underline}
+.tm-named{padding:0 0 8px}
