@@ -37,3 +37,6 @@ UPDATE flags SET control = CASE
   ELSE NULL END
  WHERE control IS NULL;
 CREATE INDEX IF NOT EXISTS flags_control ON flags (control) WHERE status = 'open';
+
+-- rules ask "which identities are allowed (or used) this action": answered from this index without reading the table
+CREATE INDEX IF NOT EXISTS role_actions_action ON role_actions (action, status, role_id);

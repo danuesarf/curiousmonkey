@@ -59,6 +59,26 @@ export async function read(text, params, { timeoutMs = 0 } = {}) {
   } finally { client.release(); }
 }
 
+/**
+ * A query that came from a rule someone typed (Manage policy). The rule's values are always parameters and its keys
+ * and operators come from fixed lists, so it cannot change what the statement is; this adds two more walls: the
+ * transaction is read-only, so nothing it says can write, and it is stopped after `ms`, so it cannot hold the database.
+ */
+export async function guardedRead(text, params = [], ms = 5000) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN TRANSACTION READ ONLY');
+    await client.query(`SET LOCAL statement_timeout = ${Math.max(100, Math.min(60000, Math.floor(ms)))}`);
+    const r = await client.query(text, params);
+    await client.query('COMMIT');
+    return r;
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (e.code === '57014') throw Object.assign(new Error('The rule took too long to run. Make it narrower: fewer wildcards, or add a term such as environment or kind.'), { rule: true, status: 400 });
+    throw e;
+  } finally { client.release(); }
+}
+
 export async function tx(fn) {
   const client = await pool.connect();
   try {

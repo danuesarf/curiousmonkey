@@ -16,6 +16,8 @@ const BY_LEVEL = 'By what the actions can do: high for write and permission mana
 
 // id, domain, name, what it checks, severity (null = it varies, said in `varies`), where it shows, how to fix
 const c = (id, domain, name, what, severity, where, fix, varies = null) => ({ id, domain, name, what, severity, varies, where, fix });
+// a built-in control that is a rule: what it applies to (identities or ways in), the rule, and whether it starts off
+const r = (id, domain, name, what, severity, where, fix, target, rule, { off = false } = {}) => ({ id, domain, name, what, severity, varies: null, where, fix, target, rule, off });
 export const BUILTIN = [
   c('perm.wildcard-all', 'permissions', 'Every action on every resource', 'A policy allows "*" (or "*:*") on Resource "*".', 'high', INBOX, 'Replace with the actions listed under Used.'),
   c('perm.wildcard-service', 'permissions', 'Wildcard actions on every resource', 'A policy allows a wildcard such as s3:* or iam:Get* on Resource "*".', 'medium', INBOX, 'Replace with the actions listed under Used.'),
@@ -64,6 +66,48 @@ export const BUILTIN = [
   c('gcp.external', 'gcp', 'Outside your domain', 'A user or group outside the organisation\'s domain holds a role.', 'medium', GCP, 'Confirm it is expected, or remove the binding.'),
   c('gcp.deleted', 'gcp', 'Bound to a deleted identity', 'The identity is gone but its bindings stay.', 'medium', GCP, 'Remove the bindings.'),
   c('gcp.disabled', 'gcp', 'Disabled but still granted roles', 'A disabled service account keeps its roles.', 'low', GCP, 'Remove the bindings or delete the service account.'),
+
+  // ---- built-in controls that are rules: written in the rule language, so they can be read, copied and adapted
+  r('rule.admin-unused', 'permissions', 'Administrator access not used in 90 days', 'A role that can do nearly everything and that nobody has used for three months.', 'high', INBOX, 'Delete it, or replace it with what its last users needed.',
+    'identity', 'kind = role AND kind != service-linked AND (policy = AdministratorAccess OR permissions >= 15000) AND idle > 90'),
+  r('rule.privesc-iam', 'permissions', 'Can give itself more permissions', 'Not an administrator, but allowed to attach or rewrite IAM policies or change who can assume a role.', 'high', INBOX, 'Remove the IAM write actions, or put a permissions boundary on what it can create.',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = iam:AttachRolePolicy,iam:PutRolePolicy,iam:AttachUserPolicy,iam:PutUserPolicy,iam:CreatePolicyVersion,iam:SetDefaultPolicyVersion,iam:UpdateAssumeRolePolicy'),
+  r('rule.privesc-passrole', 'permissions', 'Can pass a role to compute it launches', 'iam:PassRole together with launching compute: it can run code as another, stronger role.', 'medium', INBOX, 'Limit iam:PassRole to the roles the workload needs (Resource), with iam:PassedToService.',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = iam:PassRole AND grants = ec2:RunInstances,lambda:CreateFunction,ecs:RunTask,glue:CreateJob,cloudformation:CreateStack,sagemaker:CreateTrainingJob'),
+  r('rule.create-credentials', 'permissions', 'Can create credentials for other identities', 'Allowed to make access keys or console passwords for IAM users.', 'medium', INBOX, 'Remove the actions, or limit them to the identity itself (${aws:username}).',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = iam:CreateAccessKey,iam:CreateLoginProfile,iam:UpdateLoginProfile'),
+  r('rule.disable-logging', 'permissions', 'Can turn off logging or detection', 'Allowed to stop CloudTrail, AWS Config, GuardDuty or Security Hub, without being an administrator.', 'medium', INBOX, 'Remove the actions; deny them with a service control policy.',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = cloudtrail:StopLogging,cloudtrail:DeleteTrail,config:StopConfigurationRecorder,config:DeleteConfigurationRecorder,guardduty:DeleteDetector,securityhub:DisableSecurityHub'),
+  r('rule.kms-destroy', 'permissions', 'Can delete or take over encryption keys', 'Allowed to schedule KMS keys for deletion, disable them or rewrite their key policy.', 'medium', INBOX, 'Keep key administration to the roles that own the keys.',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = kms:ScheduleKeyDeletion,kms:DisableKey,kms:PutKeyPolicy'),
+  r('rule.create-role-no-boundary', 'permissions', 'Can create roles, with no permissions boundary', 'It can create roles and nothing limits what those roles may do.', 'low', INBOX, 'Require a permissions boundary on the roles it creates (iam:PermissionsBoundary).',
+    'identity', 'kind != service-linked AND permissions < 15000 AND grants = iam:CreateRole AND boundary = no'),
+  r('rule.mostly-unused', 'usage', 'Uses less than a tenth of what it is allowed', 'In use, but nine in ten of its permissions were never needed.', 'low', INBOX, 'Apply the least-privilege recommendation.',
+    'identity', 'kind != service-linked AND permissions >= 50 AND permissions < 15000 AND unusedpct >= 90 AND idle <= 90'),
+  r('rule.no-owner-tag', 'usage', 'No owner or team tag', 'Nobody is named as responsible for the role.', 'low', INBOX, 'Tag it with owner or team.',
+    'identity', 'kind = role AND kind != service-linked,identity-center AND tag != owner AND tag != team', { off: true }),
+  r('rule.user-admin', 'credentials', 'IAM user with administrator access', 'Long-lived credentials that can do nearly everything.', 'high', INBOX, 'Move it to a role people or workloads assume; delete the user.',
+    'identity', 'kind = user AND (policy = AdministratorAccess OR permissions >= 15000)'),
+  r('rule.key-over-a-year', 'credentials', 'Key older than a year', 'An active access key (AWS) or service account key (Google Cloud) made more than a year ago.', 'high', `${INBOX}; Google Cloud page`, 'Rotate it, or replace it with a role or workload identity federation.',
+    'identity', 'keyage > 365'),
+  r('rule.user-no-credentials', 'credentials', 'IAM user with no way to sign in', 'No active access key and no console password: a leftover.', 'low', INBOX, 'Delete the user.',
+    'identity', 'kind = user AND keys = 0 AND console = no'),
+  r('rule.user-in-production', 'credentials', 'IAM user in a production account', 'Long-lived credentials where roles should be used.', 'low', INBOX, 'Replace it with a role: Identity Center for people, workload identity for services.',
+    'identity', 'kind = user AND env = production'),
+  r('rule.gcp-key-on-powerful', 'gcp', 'Key on a service account that controls access', 'A downloadable key for a service account that is Owner or can change IAM policy.', 'high', 'Google Cloud page', 'Delete the key; use workload identity federation or impersonation.',
+    'identity', 'cloud = gcp AND keys > 0 AND finding = basic-owner,iam-admin'),
+  r('rule.gcp-person-many-projects', 'gcp', 'A person with roles across more than ten projects', 'One user account reaches many projects directly, not through a group.', 'low', 'Google Cloud page', 'Grant the roles to a group, at the folder that fits.',
+    'identity', 'cloud = gcp AND kind = user AND reach > 10'),
+  r('rule.outside-into-admin', 'trust', 'Outside account into an administrator role', 'An AWS account that is not yours can assume a role that can do nearly everything.', 'high', TRUST, 'Give the third party a role with only what it needs.',
+    'way-in', 'source = external AND has = admin'),
+  r('rule.lower-env-into-production', 'trust', 'A non-production account can get into production', 'A role in production trusts one of your accounts from another environment.', 'high', TRUST, 'Go through a deployment or hub account instead.',
+    'way-in', 'source = connected AND env = production AND fromenv != production'),
+  r('rule.ci-into-admin', 'trust', 'A CI pipeline into an administrator role', 'A CI provider (GitHub, Bitbucket, GitLab, CircleCI, Buildkite, Terraform Cloud) can assume a role that can do nearly everything.', 'medium', TRUST, 'Give the pipeline a deploy role with what it deploys.',
+    'way-in', 'source = github,bitbucket,gitlab,circleci,buildkite,terraform AND has = admin'),
+  r('rule.outside-never-used', 'trust', 'Outside account trusted, never used', 'An AWS account that is not yours is trusted and nothing came in through it in the history read.', 'medium', TRUST, 'Remove the statement.',
+    'way-in', 'source = external AND used = no'),
+  r('rule.new-outside-trust', 'trust', 'New trust from outside this week', 'An outside account or anyone was let in, or lost a guard, in the last seven days.', 'medium', TRUST, 'Confirm it was intended; mark it as expected once reviewed.',
+    'way-in', 'source = external,public AND new = 7'),
 ];
 export const BY_ID = new Map(BUILTIN.map((x) => [x.id, x]));
 export const isBuiltin = (id) => BY_ID.has(id);
@@ -80,7 +124,7 @@ export function controlOfFlag(category, key) {
 
 // ---------------------------------------------------------------- what applies now
 /** Nothing changed: every built-in control as shipped, no custom ones. */
-export const DEFAULT_POLICY = { over: new Map(), custom: [], sig: '' };
+export const DEFAULT_POLICY = { over: new Map(), rules: [], sig: '' };
 
 /**
  * The severity a finding of this control gets: null when the control is off, the workspace's severity when it set one,
@@ -88,7 +132,7 @@ export const DEFAULT_POLICY = { over: new Map(), custom: [], sig: '' };
  */
 export function severityOf(policy, id, builtIn) {
   const o = policy?.over.get(id);
-  if (!o) return builtIn;
+  if (!o) return BY_ID.get(id)?.off ? null : builtIn;
   if (!o.enabled) return null;
   return builtIn === 'info' || !o.severity ? builtIn : o.severity;
 }

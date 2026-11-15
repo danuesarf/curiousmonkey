@@ -1014,3 +1014,4 @@ a.home-tile:hover{border-color:var(--edge);background:var(--raise)}
 .ctl-table th:nth-child(2){width:250px}.ctl-table th:nth-child(3){width:70px}.ctl-table th:nth-child(4){width:120px}.ctl-table th:nth-child(5){width:230px}.ctl-table th:nth-child(6){width:150px}
 .modal.wide{max-height:92vh;overflow:auto}
 .modal .field>.seg{align-self:flex-start}
+.ctl-key sup{font-size:8px;margin-left:2px;opacity:.7;text-transform:uppercase}

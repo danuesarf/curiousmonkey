@@ -1,40 +1,63 @@
 // Manage policy, in the worker. Two jobs, one worker at a time (advisory lock):
-//  1. Custom controls about roles and IAM users: each is a query; what matches gets a finding in the Findings inbox
-//     (category 'custom'), what no longer matches is resolved. (Custom controls about ways in are the Trust map's.)
+//  1. Controls that are rules about identities, built-in and custom: what a rule matches gets a finding (AWS: the
+//     Findings inbox; Google Cloud: the principal's page); what no longer matches is closed. (Rules about ways in are
+//     the Trust map's.)
 //  2. After a built-in control is turned off, on, or given another severity: every account is analysed again from what
 //     is stored (no AWS calls), so findings and risk scores follow. The API already moved the open findings it could.
 import { query, pool } from './db.js';
-import { loadPolicy, matchIdentityRule } from './controls.js';
+import { loadPolicy } from './controls.js';
+import { matchIdentityRule, loadGcpPrincipals } from './identityRules.js';
 import { analyzeAccount } from './scanner/analyzeJob.js';
 
 const LOCK = 727013;
 const APPLIED = 'policy.applied';                             // app_settings: the built-in overrides the last full analysis used
-const overSig = (policy) => [...policy.over].map(([id, o]) => `${id}:${o.severity}:${o.enabled}`).sort().join('|');
+// (rules are filed by syncRules, not by the analysis, so a change to one needs no analysis)
+const overSig = (policy) => [...policy.over].filter(([id]) => !id.startsWith('rule.')).map(([id, o]) => `${id}:${o.severity}:${o.enabled}`).sort().join('|');
 
-/** File the findings of every custom control about identities. Returns what changed. */
-export async function syncCustom(policy = null) {
+/**
+ * File the findings of every control that is a rule about identities, built-in and custom. In AWS a match is a finding
+ * in the Findings inbox; in Google Cloud it is added to what the principal's page lists. What no longer matches is closed.
+ */
+export async function syncRules(policy = null) {
   policy = policy || await loadPolicy();
-  const mine = policy.custom.filter((x) => x.target === 'identity');
+  const mine = policy.rules.filter((x) => x.target === 'identity');
+  const gcp = mine.length ? await loadGcpPrincipals() : [];
+  const reasons = new Map();                                  // Google Cloud principal -> what the rules say about it
   let opened = 0, updated = 0, resolved = 0;
+  const done = [];
   for (const cc of mine) {
-    const control = `custom.${cc.id}`;
-    const { ids, errors } = await matchIdentityRule(cc.rule);
-    if (errors.length) continue;                              // a rule this version cannot read: leave its findings as they are
+    const m = await matchIdentityRule(cc.rule, gcp);
+    if (m.errors.length) continue;                            // a rule this version cannot read: leave its findings as they are
+    done.push(cc.id);
     const up = await query(
       `INSERT INTO flags(role_id, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, control, status, updated_at)
-       SELECT r, 'custom', $2, $3, '{}', '{}', $4, $5, $6, '{}', $7, $8, 'open', now() FROM unnest($1::uuid[]) AS x(r)
+       SELECT r, $2, $3, $4, '{}', '{}', $5, $6, $7, '{}', $8, $3, 'open', now() FROM unnest($1::uuid[]) AS x(r)
        ON CONFLICT (role_id, category, key) DO UPDATE SET title=EXCLUDED.title, reason=EXCLUDED.reason, evidence=EXCLUDED.evidence, suggestion=EXCLUDED.suggestion,
          severity=EXCLUDED.severity, control=EXCLUDED.control, status='open', updated_at=now()
          WHERE (flags.title, flags.reason, flags.evidence, coalesce(flags.suggestion, ''), flags.severity, flags.status)
             IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.reason, EXCLUDED.evidence, coalesce(EXCLUDED.suggestion, ''), EXCLUDED.severity, 'open')
        RETURNING (xmax = 0) AS inserted`,
-      [ids, cc.id, cc.name, cc.description || 'Matches a custom control of this workspace.', `Rule: ${cc.rule}`.slice(0, 2000), cc.remediation || null, cc.severity, control]);
+      [m.aws, cc.source === 'custom' ? 'custom' : 'rule', cc.id, cc.name, cc.description || 'Matches a rule of this workspace\'s policy.', `Rule: ${cc.rule}`.slice(0, 2000), cc.remediation || null, cc.severity]);
     opened += up.rows.filter((r) => r.inserted).length; updated += up.rows.filter((r) => !r.inserted).length;
-    resolved += (await query(`UPDATE flags SET status='resolved', updated_at=now() WHERE category='custom' AND key=$1 AND status='open' AND NOT (role_id = ANY($2::uuid[]))`, [cc.id, ids])).rowCount;
+    resolved += (await query(`UPDATE flags SET status='resolved', updated_at=now() WHERE category IN ('custom', 'rule') AND key=$1 AND status='open' AND NOT (role_id = ANY($2::uuid[]))`, [cc.id, m.aws])).rowCount;
+    for (const id of m.gcp) {
+      if (!reasons.has(id)) reasons.set(id, []);
+      reasons.get(id).push({ id: cc.id, severity: cc.severity, title: cc.name, detail: cc.description || `Matches the rule: ${cc.rule}`, rule: true });
+    }
   }
-  // controls removed, turned off, or no longer about identities
-  resolved += (await query(`UPDATE flags SET status='resolved', updated_at=now() WHERE category='custom' AND status='open' AND NOT (key = ANY($1::text[]))`, [mine.map((x) => x.id)])).rowCount;
-  return { opened, updated, resolved, controls: mine.length };
+  // rules removed, turned off, or no longer about identities (those that could not be read keep theirs)
+  const unread = mine.filter((x) => !done.includes(x.id)).map((x) => x.id);
+  resolved += (await query(`UPDATE flags SET status='resolved', updated_at=now() WHERE category IN ('custom', 'rule') AND status='open' AND NOT (key = ANY($1::text[]))`, [[...done, ...unread]])).rowCount;
+  // Google Cloud: only the principals whose rule matches changed are written
+  let gcpChanged = 0;
+  for (const p of gcp) {
+    const had = p.reasons.filter((r) => r.rule), want = reasons.get(p.id) || [];
+    const same = (xs) => xs.map((x) => `${x.id}|${x.severity}|${x.title}|${x.detail}`).sort().join('\n');    // jsonb reorders keys
+    if (same(had) === same(want)) continue;
+    await query('UPDATE gcp_principals SET risk_reasons = $2 WHERE id = $1', [p.id, JSON.stringify([...p.reasons.filter((r) => !r.rule), ...want])]);
+    gcpChanged++;
+  }
+  return { opened, updated, resolved, gcpChanged, rules: mine.length };
 }
 
 let lastKey = null, lastAt = 0;
@@ -60,11 +83,12 @@ export async function policyTick({ log = () => {}, force = false, alive = () => 
         log('info', 'policy applied: accounts analysed again', { accounts: out.reanalysed });
       }
       // custom controls: when they or the analysis changed, and every ten minutes anyway
-      const key = `${policy.sig}|${(await query('SELECT max(analyzed_at) AS t, count(*) AS n FROM roles WHERE deleted_at IS NULL')).rows.map((r) => `${r.t?.getTime?.() ?? ''}:${r.n}`)[0]}`;
+      const key = `${policy.sig}|${(await query(`SELECT (SELECT max(analyzed_at) FROM roles WHERE deleted_at IS NULL) AS t, (SELECT count(*) FROM roles WHERE deleted_at IS NULL) AS n,
+        (SELECT max(analyzed_at) FROM gcp_principals) AS g`)).rows.map((r) => `${r.t?.getTime?.() ?? ''}:${r.n}:${r.g?.getTime?.() ?? ''}`)[0]}`;
       if (force || key !== lastKey || Date.now() - lastAt > 600_000) {
-        Object.assign(out, await syncCustom(policy));
+        Object.assign(out, await syncRules(policy));
         lastKey = key; lastAt = Date.now();
-        if (out.opened || out.resolved) log('info', 'custom controls filed', out);
+        if (out.opened || out.resolved || out.gcpChanged) log('info', 'policy rules filed', out);
       }
       return out;
     } finally { await client.query('SELECT pg_advisory_unlock($1)', [LOCK]); }

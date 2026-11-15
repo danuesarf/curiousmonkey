@@ -53,7 +53,7 @@ async function fileFindings(ix) {
       if (f.severity !== 'high' && f.severity !== 'medium') continue;   // low ones stay on the map, out of the inbox
       rows.push({ role: e.roleId, key: flagKey(e, f.id), title: f.title, severity: f.severity, reason: f.detail || f.title,
         evidence: `${e.source} → ${e.role} (${e.account}), statement ${e.sid || e.statement + 1}: ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`.slice(0, 2000),
-        suggestion: f.fix || SUGGEST[f.id] || null, control: f.custom ? f.id : `trust.${f.id}` });
+        suggestion: f.fix || SUGGEST[f.id] || null, control: f.rule ? f.id : `trust.${f.id}` });
     }
   }
   const cols = (k) => rows.map((r) => r[k]);

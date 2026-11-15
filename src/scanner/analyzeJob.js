@@ -70,8 +70,8 @@ export async function persistAnalysis(roleId, r, { recordRisk = false } = {}) {
         [roleId, f.category, f.key, f.title, f.actions, f.resources, f.reason, f.evidence, f.suggestion, f.suggestedResources, f.severity, f.control || null])).rows[0];
       keep.push(row.id);
     }
-    // trust findings are filed by trustSync.js and custom controls by policySync.js, not by this analysis: leave them
-    await c.query(`UPDATE flags SET status='resolved', updated_at=now() WHERE role_id=$1 AND status='open' AND category NOT IN ('trust', 'custom') AND NOT (id = ANY($2))`, [roleId, keep]);
+    // trust findings are filed by trustSync.js and controls that are rules by policySync.js, not by this analysis: leave them
+    await c.query(`UPDATE flags SET status='resolved', updated_at=now() WHERE role_id=$1 AND status='open' AND category NOT IN ('trust', 'custom', 'rule') AND NOT (id = ANY($2))`, [roleId, keep]);
     await c.query(
       `UPDATE roles SET granted_count=$2, used_count=$3, unused_count=$4, unconfirmed_count=$5, risk=$6, risk_score=$7, risk_reasons=$8,
               reviewer_team=$9, requires_both=$10, analysis_hash=$11, analyzed_at=now(),

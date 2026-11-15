@@ -18,6 +18,7 @@ import { trackPage } from './pages/track.js';
 import { unidentifiedPage } from './pages/unidentified.js';
 import { findingsPage } from './pages/findings.js';
 import { reviewsPage, reviewPage } from './pages/reviews.js';
+import { controlsPage } from './pages/controls.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -32,6 +33,8 @@ const routes = [
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
   [/^#\/findings$/, () => findingsPage, 'findings'],
+  [/^#\/policy$/, () => controlsPage, 'policy'],
+  [/^#\/admin\/policy$/, () => () => { location.replace(`#/policy${location.hash.includes('?') ? `?${location.hash.split('?')[1]}` : ''}`); return document.createElement('div'); }, 'policy'],
   [/^#\/reviews$/, () => reviewsPage, 'reviews'],
   [/^#\/reviews\/([\w-]+)$/, (m) => (c) => reviewPage(c, m[1]), 'reviews'],
   [/^#\/identities$/, () => identitiesPage, 'identities'],
@@ -45,7 +48,7 @@ const routes = [
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
   [/^#\/operations(?:\/(scans|workers|database))?$/, (m) => (c) => operationsPage(c, m[1]), 'operations'],
-  [/^#\/admin(?:\/(members|audit|alerts|policy|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
+  [/^#\/admin(?:\/(members|audit|alerts|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
 ];
 
 // Addresses that moved. They still open: the old one is swapped for the new one in the address bar (no extra history entry).
@@ -91,6 +94,7 @@ const ICON = {
   identities: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
   findings: 'M5 4h14v16H5zM8 9l2 2 4-4M8 15h8',
   reviews: 'M7 3h7l5 5v13H7zM14 3v5h5M10 13l2 2 4-4M10 18h6',
+  policy: 'M12 3l8 3v6c0 5-3.4 8-8 9-4.6-1-8-4-8-9V6zM8.5 12l2.5 2.5 4.5-5',
   admin: 'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M16 4v4M10 10v4M16 16v4',
 };
 const mark = (size = 40) => svg('svg', { width: size, height: size, viewBox: '0 0 40 40', 'aria-hidden': 'true' },
@@ -275,7 +279,7 @@ const group = (label, ...items) => { const shown = items.filter(Boolean); return
 function shell(active, content, full) {
   const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
-  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', reviews: 'Access reviews', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', reviews: 'Access reviews', policy: 'Policy', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
@@ -284,7 +288,7 @@ function shell(active, content, full) {
       item('home', '#/', 'Home', 'view'),
       group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
-      group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view')),
+      group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view'), item('policy', '#/policy', 'Policy', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
       h('div', { class: 'me' },
         // the avatar opens this person's menu: who they are, and which clock times are shown in (kept in this browser)

@@ -4,6 +4,7 @@
 // in, what has actually been seen using it, and what is wrong with it. Edges can be filtered with a small query
 // language: `finding:account-root from:123456789012 provider:github -source:service text`.
 import { loadPolicy, severityOf } from './controls.js';
+import { parseRule, leaves, evaluate } from './ruleLang.js';
 import fs from 'node:fs';
 import { query } from './db.js';
 import { normalizeStatements, arr } from './analyzer/policy.js';
@@ -282,7 +283,7 @@ function matchesSeen(e, s, subs = []) {
 // ---------------------------------------------------------------- query language
 // key:value terms, all of which must match; a comma inside a value means either (finding:public,account-root), a
 // leading - excludes, quotes keep spaces, anything else is free text
-export const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new'];
+export const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv'];
 // source: also takes the kind of identity provider
 export const PROVIDER_KINDS = ['github', 'bitbucket', 'gitlab', 'eks', 'terraform', 'circleci', 'azure', 'buildkite', 'google', 'cognito', 'facebook', 'amazon', 'identity-center'];
 export function parseQuery(q) {
@@ -312,6 +313,8 @@ function valueMatches(e, key, v) {
     case 'roleid': return String(e.roleId) === v; // one role exactly, for links from its page
     case 'cond': return e.conditions.some((c) => lc(c).includes(v));
     case 'env': return lc(e.environment).startsWith(v);
+    // the environment of the account it comes from, when that is one of yours
+    case 'fromenv': return !!e.fromEnv && lc(e.fromEnv).startsWith(v);
     case 'has': if (v === 'admin') return !!e.admin; if (v === 'name') return !!e.named; if (v === 'org') return !!e.inOrg;
       return v === 'findings' ? e.findings.some((f) => f.severity !== 'info') : v === 'conditions' ? e.conditions.length > 0 : v === 'seen' ? e.seen.length > 0 : false;
     case 'no': if (v === 'admin') return !e.admin; if (v === 'name') return !e.named;
@@ -332,6 +335,33 @@ function valueMatches(e, key, v) {
     default: return [e.role, e.account, e.principal, e.source, e.named?.name, e.named?.owner, ...e.conditions, ...e.findings.map((f) => f.title)].some((s) => lc(s).includes(v));
   }
 }
+// ---------------------------------------------------------------- rules about ways in (Manage policy)
+// keys that describe the review, not the trust: a control may not use them
+export const WAYIN_REVIEW_KEYS = ['attention', 'expected', 'decided', 'severity', 'finding', 'roleid'];
+const WAYIN_ALIAS = { environment: 'env' };
+/**
+ * A rule about ways in: the keys of the Trust map's filter, joined with AND, OR, NOT and brackets, with = and !=.
+ * Returns { errors, test }: test(e) says whether a way in matches.
+ */
+export function compileWayIn(rule) {
+  const { ast, errors } = parseRule(rule);
+  if (errors.length) return { errors, test: () => false };
+  if (!ast) return { errors: ['Write at least one term: an empty rule would match every way in.'], test: () => false };
+  const terms = [];
+  for (const l of leaves(ast)) {
+    if (l.t === 'text') { l.values = [l.value.toLowerCase()]; l.k = 'text'; continue; }
+    l.k = WAYIN_ALIAS[l.key] || l.key;
+    if (WAYIN_REVIEW_KEYS.includes(l.k)) { errors.push(`${l.key} describes the review, not the trust, so a control cannot use it.`); continue; }
+    if (!KEYS.includes(l.k)) { errors.push(`No key called "${l.key}" for ways in. The keys: ${KEYS.filter((k) => !WAYIN_REVIEW_KEYS.includes(k)).join(', ')}.`); continue; }
+    if (l.op !== '=' && l.op !== '!=') { errors.push(`${l.key} takes = or !=, not ${l.op}.`); continue; }
+    l.values = l.values.map((v) => v.toLowerCase());
+    terms.push({ key: l.k, value: l.values[0], values: l.values, neg: false });
+  }
+  errors.push(...queryWarnings(terms));
+  if (errors.length) return { errors: [...new Set(errors)], test: () => false };
+  return { errors: [], test: (e) => evaluate(ast, (l) => l.values.some((v) => valueMatches(e, l.k, v)) !== (l.op === '!=')) };
+}
+
 const termMatches = (e, t) => (t.values?.length ? t.values : [t.value]).some((v) => valueMatches(e, t.key, v));
 export const matchesQuery = (e, terms) => terms.every((t) => termMatches(e, t) !== t.neg);
 
@@ -352,7 +382,7 @@ export function queryWarnings(terms) {
       out.push(near ? `No filter called "${m[1]}", so it was searched as text. Did you mean ${near}:${m[2]}?` : `No filter called "${m[1]}", so "${t.value}" was searched as text.`);
     }
     if (t.key === 'finding') for (const v of t.values) {
-      if (v.startsWith('custom')) continue;                    // a custom control, by its id
+      if (v.startsWith('custom') || v.startsWith('rule.')) continue;   // a control that is a rule, by its id
       if (Object.keys(FINDINGS).some((id) => id === v || id.startsWith(v))) continue;
       const near = closest(v, Object.keys(FINDINGS));
       out.push(near ? `No finding called "${v}". Did you mean ${near}?` : `No finding called "${v}".`);
@@ -471,9 +501,10 @@ async function annotate(edges, roles, byAws, custom = []) {
       if (who) e.idc = { permissionSet: ps, count: who.length, who: who.slice(0, 12) };
     }
     e.admin = Number(e.granted || 0) >= ADMIN_AT;
+    e.fromEnv = byAws.get(e.principalAccount)?.environment || null;
     for (const cc of custom) {
-      if (e.group === 'service' || !matchesQuery(e, cc.terms)) continue;
-      e.findings.push({ id: `custom.${cc.id}`, severity: cc.severity, title: cc.name, detail: cc.description || `Matches the custom control: ${cc.rule}`, fix: cc.remediation || null, custom: true });
+      if (e.group === 'service' || !cc.test(e)) continue;
+      e.findings.push({ id: cc.id, severity: cc.severity, title: cc.name, detail: cc.description || `Matches the rule: ${cc.rule}`, fix: cc.remediation || null, rule: true });
     }
     if (custom.length) e.worst = worstOf(e.findings);
     for (const r of rules) {
@@ -547,10 +578,10 @@ async function buildIndex(sig) {
   }
   const byAws = new Map(accounts.map((a) => [a.account_id, a]));
   // custom controls about ways in: the Trust map's own query language, each match a finding
-  const custom = policy.custom.filter((x) => x.target === 'way-in').map((x) => ({ ...x, terms: parseQuery(x.rule) }));
+  const custom = policy.rules.filter((x) => x.target === 'way-in').map((x) => ({ ...x, ...compileWayIn(x.rule) })).filter((x) => !x.errors.length);
   await annotate(edges, roles, byAws, custom);
   edges.sort((a, b) => (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || a.account.localeCompare(b.account) || a.role.localeCompare(b.role));
-  return { sig, at: new Date(), edges, customTitles: Object.fromEntries(custom.map((x) => [`custom.${x.id}`, x.name])), accounts: accounts.map((a) => ({ id: a.id, name: a.name, account_id: a.account_id, environment: a.environment, status: a.status })) };
+  return { sig, at: new Date(), edges, customTitles: Object.fromEntries(custom.map((x) => [x.id, x.name])), accounts: accounts.map((a) => ({ id: a.id, name: a.name, account_id: a.account_id, environment: a.environment, status: a.status })) };
 }
 
 // while the Trust map is in use, look for changes every minute, so a rebuild rarely waits for a request
@@ -598,7 +629,7 @@ export async function expectedRules(user) {
 }
 
 // Google Cloud is shown to unscoped members only: for the others a trusted service account keeps its ID, not its name
-function forViewer(e, user) {
+export function forViewer(e, user) {
   if (!user?.scope_accounts || !e.gcp) return e;
   const out = { ...e, source: `Google · service account ${e.gcp.uniqueId}` };
   delete out.gcp;
