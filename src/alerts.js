@@ -230,7 +230,7 @@ const SOURCES = {
          AND NOT EXISTS (SELECT 1 FROM alert_hits h WHERE h.rule_id = $3 AND h.dedupe = 'job:' || j.id)
        ORDER BY 5 LIMIT 500`, [r.since, r.environments, r.id, r.accounts || []])).rows;
     return rows.map((x) => ({ dedupe: `job:${x.id}`, item: { title: `${x.kind}${x.region && x.region !== '*' ? ` ${x.region}` : ''} job failed`, subject: (x.last_error || 'no error recorded').split('\n')[0].slice(0, 200),
-      account: x.account_name, environment: x.environment, severity: 'high', url: link('#/operations/scans'), at: x.at } }));
+      account: x.account_name, environment: x.environment, severity: 'medium', url: link('#/operations/scans'), at: x.at } }));
   },
 };
 const STATE = new Set(['key-age', 'console-no-mfa']);
