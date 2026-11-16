@@ -304,6 +304,41 @@ A webhook receives `{ source, kind, title, rule, count, items: [{ title, subject
 
 Keys: `j` / `k` move, `x` selects, `1`–`3` decide the selected findings (or the open one), `Esc` unselects, `/` searches.
 
+## Policy
+
+`#/policy` (Review → Policy). Every rule the tool checks is a **control**, in one catalogue: permissions, use of the role, what cannot be verified, trust, credentials, Google Cloud, and your own. Each row says what it checks, the severity its findings get, whether it is on, how many findings are open (a link to the Findings inbox filtered to that control) and where it shows. Everyone can read and export it; changing it needs the *settings* permission, and every change is in the audit log.
+
+- **Severity.** Set a built-in control to high, medium or low. Some built-in severities vary with the case (a trusted account is high when it is outside your estate, low with ExternalId); the row says how, and *Varies* keeps that. A fact that is not a finding stays a fact.
+- **On or off.** A control turned off makes no findings and adds nothing to a risk score; its open findings are closed. A few controls ship off (marked *optional*) because they depend on how you work, such as *No owner or team tag*.
+- **When it applies.** Open findings change at once. After a change to a control that the analysis makes (permissions, use, evidence), the worker analyses every account again from what is stored (no AWS calls; about 15 seconds for 5,900 identities on the test estate) so risk scores follow. The Trust map follows on its next read, Google Cloud's own findings on the next Google Cloud scan. IAM user credential checks weigh on the user's risk score: high 30 points, medium 15, low 5, when you set one.
+- **Rules.** Twenty of the built-in controls are rules written in the same language you use: read them, change their severity, or *Copy* one into a custom control and adapt it. They cover, among others: administrator access unused for 90 days, identities that can give themselves more permissions, pass a role to compute they launch, create credentials for others, turn off logging or delete encryption keys; IAM users with administrator access, in production, or with no way to sign in; keys older than a year (AWS and Google Cloud); an outside account or a CI pipeline into an administrator role; a non-production account that can get into production; trust from outside that was never used or is new this week.
+- **Custom controls.** *Add custom control*: a name, what it applies to, a rule, a severity, and what to tell the reviewer. The rule is tested as you type (*Matches 778 of 5,947 identities now · 5 ms*, with the first 25). What it matches gets a finding that reviewers accept or investigate like any other, alerts included; it closes when it no longer matches. Rules do not change risk scores.
+
+### The rule language
+
+```
+(environment = production OR environment = staging) AND kind = role AND kind != service-linked AND idle > 90
+grants = iam:PassRole AND (grants = ec2:RunInstances OR grants = lambda:CreateFunction)
+```
+
+Terms are `key operator value`, joined with `AND`, `OR` and `NOT` and grouped with brackets; `AND` binds tighter than `OR`, and terms side by side mean `AND`. Operators: `=`, `!=`, `>`, `>=`, `<`, `<=`. A key can be used any number of times. `*` is a wildcard; a comma list means any of them (`env = production,staging`), with `!=` none of them. Quote a value that has spaces. The older `key:value` and leading `-` still read.
+
+- **Identities** are roles and IAM users in AWS and principals in Google Cloud (users, groups, service accounts, federated identities); another cloud is another entry in `src/identityRules.js`. A rule covers a cloud when every key it uses exists there: `keyage > 365` covers both, `policy = AdministratorAccess` AWS only; `cloud = aws` or `cloud = gcp` narrows it. In AWS a match is a finding in the Findings inbox; in Google Cloud it is listed on the principal's page.
+  - Both clouds: `cloud` `name` `kind` `account` (an AWS account or a Google Cloud project) `risk` `score` `permissions` `finding` `keys` `keyage`.
+  - AWS: `arn` `path` `env` (or `environment`) `team` `grants` `uses` `unused` `unverified` (an action or a wildcard: `grants = s3:Get*`) `policy` `boundary` `tag` (`tag = team=platform`) `caller` `callers` `unusedcount` `unusedpct` `idle` (days; `idle = never`) `age` `mfa` `console` `keyidle`.
+  - Google Cloud: `reach` (projects it reaches) `disabled`.
+- **Ways in (trust)** use the Trust map's keys: `source` `from` `type` `provider` `account` `role` `env` `fromenv` (the environment of the account it comes from) `cond` `has` `no` `used` `new`. Matches show on the Trust map as a finding of that way in (so *Needs attention*, expected trust and decisions work on them) and, when high or medium, in the Findings inbox.
+
+**Speed.** An AWS rule is one SQL query; actions are answered from an index (`role_actions (action, status, role_id)`), a wildcard as the action names it stands for in the IAM catalogue, each set worked out once per query. On the test estate (5,900 identities, 2.8 million allowed actions) a preview takes 5 to 70 ms, and filing all fifteen built-in identity rules about 0.2 seconds. Ways in and Google Cloud are tested in memory.
+
+**Safety.** A rule is user input that reaches the database, so: every value is a bound parameter, never SQL text; keys and operators come from fixed lists; the query runs in a read-only transaction with a time limit (5 s for a preview); a rule is at most 2,000 characters, 60 terms, 12 brackets deep, 6 wildcards a value; a preview only sees the accounts the person may see.
+
+**Import and export.** *Export → The policy (JSON)* downloads what this workspace changed and added: built-in controls with another severity or on/off, and the custom controls. *Import…* reads such a file, shows what it would do (add, update by name, skip what cannot be read) and applies it when you confirm; *Replace* also removes custom controls and resets built-in changes the file does not hold. Keep the file in Git to review policy changes like code.
+
+**API.** `GET /api/controls?q=` (words and `domain:` `severity:` `source:builtin|custom` `state:on|off|changed` `target:rule|identity|way-in` `cloud:aws|gcp` `findings:yes|no`), `GET /api/controls.csv`, `PUT /api/controls/:id`, `POST /api/controls`, `DELETE /api/controls/:id`, `POST /api/controls/test` (`{ target, rule }`), `GET /api/controls/export`, `POST /api/controls/import` (`{ policy, dryRun, replace }`). Each finding carries its control; `GET /api/findings?control=` filters by it.
+
+Not part of the policy: how the risk score weighs what it finds, and the informational facts the Trust map and Google Cloud show.
+
 ## Unidentified calls
 
 Each account has an **Unidentified calls** page. It accounts for every CloudTrail event read: role sessions, role calls, and events outside scope (IAM users, root, services, roles the account doesn't have). It also covers three cases that need care:

@@ -7,6 +7,7 @@ import { unloggableReason, dataEventResource } from './unloggable.js';
 import { trustFindings } from './trust.js';
 import { normalizeStatements } from './policy.js';
 import { isMatchAll } from './wildcard.js';
+import { controlOfFlag, severityOf, DEFAULT_POLICY } from '../controlCatalog.js';
 
 const WIDE = (resources) => !resources.length || resources.some(isMatchAll);
 
@@ -68,7 +69,7 @@ const REASONS = {
   'unmapped-event': (s) => `This role made ${s} calls whose CloudTrail event names are not IAM action names, so any of these could be the permission they needed. Map the event names on the account's Event coverage page, then re-analyze.`,
 };
 
-export function analyze({ role, policies, boundaryDoc = null, activity, advisor = [], windowStart, now = new Date() }) {
+export function analyze({ role, policies, boundaryDoc = null, activity, advisor = [], windowStart, now = new Date(), policy = DEFAULT_POLICY }) {
   const grants = computeGrants(policies, { permissionsBoundary: boundaryDoc });
   const observed = activity.actions;                       // Map(action -> {count, lastSeen})
   const passed = activity.passroles || [];
@@ -103,7 +104,7 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     }
   }
 
-  const flags = [];
+  let flags = [];
   for (const [k, list] of unconfirmed) {
     const [cat, svc] = k.split('|');
     const key = cat === 'authorization-only' ? list.map((x) => x.action).sort()[0] : svc;
@@ -154,13 +155,19 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
   // idle: not used in the window. A role created in the last 14 days has not had the time to be used.
   const young = role.created_in_aws && now - new Date(role.created_in_aws) < 14 * 864e5;
   const idle = !young && (!role.last_used_at || new Date(role.last_used_at) < windowStart);
-  // what an unused role is worth to whoever finds a way in: admin or identity-plane rights high, any write medium, read-only low
-  const idleSev = role.kind === 'service-linked' ? 'low'
-    : flags.some((f) => f.category === 'wildcard' && f.severity === 'high') || trust.some((f) => f.severity === 'high') || rows.some((r) => r.action !== 'iam:PassRole' && privilegeTier(r.action, r.level) === 'identity') ? 'high'
-      : rows.some((r) => r.level === 'Write' || r.level === 'Permissions') ? 'medium' : 'low';
+  // what an unused role is worth to whoever finds a way in: any write medium, read-only low. The high case (an unused
+  // administrator role) is the rule control "Administrator access not used in 90 days", so it is not raised twice.
+  const idleSev = role.kind === 'service-linked' ? 'low' : rows.some((r) => r.level === 'Write' || r.level === 'Permissions') ? 'medium' : 'low';
   if (idle) flags.push({ category: 'role-idle', key: 'idle', title: 'Role not used in the window', actions: [], resources: [],
     reason: `No successful use in the last ${Math.round((now - windowStart) / 864e5)} days.`, evidence: role.last_used_at ? `Last used ${new Date(role.last_used_at).toISOString().slice(0, 10)}.` : 'IAM has never recorded a use.',
     suggestion: role.kind === 'service-linked' ? 'Delete it from its service if the service is no longer used.' : 'Delete the role if nothing depends on it.', suggestedResources: [], severity: idleSev, decisionKind: 'other' });
+
+  // the workspace's policy: each finding names its control; one turned off is not made, one given a severity gets it
+  flags = flags.flatMap((f) => {
+    const control = controlOfFlag(f.category, f.key);
+    const severity = control ? severityOf(policy, control, f.severity) : f.severity;
+    return severity ? [{ ...f, control, severity }] : [];
+  });
 
   const counts = { granted: rows.length, used: 0, unused: 0, unconfirmed: 0 };
   for (const r of rows) counts[r.status]++;

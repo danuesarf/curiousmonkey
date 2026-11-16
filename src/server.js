@@ -17,6 +17,7 @@ import { users } from './routes/users.js';
 import { alerts } from './routes/alerts.js';
 import { reviews } from './routes/reviews.js';
 import { home } from './routes/home.js';
+import { controls } from './routes/controls.js';
 import { refreshSettings } from './settings.js';
 import { metricsText } from './queue.js';
 
@@ -50,6 +51,7 @@ export function createApp() {
   app.use('/api', alerts);
   app.use('/api', reviews);
   app.use('/api', home);
+  app.use('/api', controls);
   app.use('/api', (req, res) => res.status(404).json({ error: 'not_found' }));
 
   // Page code (HTML, JS modules, CSS) is revalidated on every load: the files carry no version in their names, so a

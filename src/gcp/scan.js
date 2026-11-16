@@ -4,6 +4,7 @@
 import { config } from '../config.js';
 import { query, tx } from '../db.js';
 import { analyzeGcp } from './analyze.js';
+import { loadPolicy } from '../controls.js';
 import { demoGcpGateway } from './demo.js';
 import { realGcpGateway } from './real.js';
 import { syncCursors } from './usage.js';
@@ -92,7 +93,7 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
 
   await progress({ stage: 'analysis' });
   const snap = { org: { domain: org?.displayName || null }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
-  const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays });
+  const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays, policy: await loadPolicy() });
   return { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result };
 }
 

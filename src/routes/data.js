@@ -651,7 +651,7 @@ data.post('/trust/expected', requirePerm('decide'), wrap(async (req, res) => {
     sourceLabel: z.string().min(1).max(300),
     roles: z.string().min(1).max(200).default('*'),
     accounts: z.array(z.string().regex(/^\d{12}$/)).max(200).default([]),
-    findings: z.array(z.string().regex(/^[a-z0-9-]{1,60}$/)).max(40).default([]),
+    findings: z.array(z.string().regex(/^[a-z0-9.-]{1,60}$/)).max(40).default([]),
     note: z.string().trim().min(3).max(1000),
     reviewBy: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   }).parse(req.body);

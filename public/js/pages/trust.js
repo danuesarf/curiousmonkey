@@ -22,9 +22,9 @@ const FROM_NAME = Object.fromEntries(FROM.filter(Boolean).map(([l, v]) => [v, l]
 const USED = [['A sign-in came through it', 'yes'], ['IAM says used, no sign-in tied to it', 'iam'], ['Never used', 'no']];
 const USED_NAME = Object.fromEntries(USED.map(([l, v]) => [v, l]));
 const USAGE_FINDINGS = new Set(['never-used', 'used-per-iam', 'used-unnamed', 'used-unattributed']);
-const KEY_NAME = { account: 'Account', env: 'Environment', source: 'From', finding: 'Finding', used: 'Used', severity: 'Severity', provider: 'Provider', from: 'From account',
+const KEY_NAME = { fromenv: 'From environment', account: 'Account', env: 'Environment', source: 'From', finding: 'Finding', used: 'Used', severity: 'Severity', provider: 'Provider', from: 'From account',
   role: 'Role', roleid: 'Role', type: 'Principal', cond: 'Condition', has: 'Has', no: 'Without', text: 'Text', attention: 'Needs attention', expected: 'Expected', decided: 'Decided', new: 'New' };
-const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new'];
+const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv'];
 const PAGE = 50;
 const plural = (n, w, ws = `${w}s`) => `${num(n)} ${n === 1 ? w : ws}`;
 const cut = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));

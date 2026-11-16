@@ -178,12 +178,13 @@ test('an idle role is rated by what it could do; a new role is not idle yet', ()
   const idle = (policies, role = {}) => analyze(base({ policies, role: { arn: ROLE, kind: 'custom', trust_policy: TRUST, last_used_at: null, ...role } }));
   assert.equal(sevOf(idle([policy(['ec2:DescribeInstances', 's3:ListAllMyBuckets'])]), 'role-idle'), 'low');
   assert.equal(sevOf(idle([policy(['ec2:TerminateInstances'])]), 'role-idle'), 'medium');
-  assert.equal(sevOf(idle([policy(['*'])]), 'role-idle'), 'high');
-  assert.equal(sevOf(idle([policy(['iam:AttachRolePolicy'], 'arn:aws:iam::1:role/x')]), 'role-idle'), 'high');
+  assert.equal(sevOf(idle([policy(['*'])]), 'role-idle'), 'medium');            // the high case is the rule "Administrator access not used in 90 days"
   assert.equal(sevOf(idle([policy(['*'])], { kind: 'service-linked' }), 'role-idle'), 'low');
-  assert.equal(sevOf(idle([policy(['ec2:DescribeInstances'])], { trust_policy: { Statement: [{ Effect: 'Allow', Principal: '*', Action: 'sts:AssumeRole' }] } }), 'role-idle'), 'high');
   assert.equal(sevOf(idle([policy(['*'])], { created_in_aws: '2026-10-25T00:00:00Z' }), 'role-idle'), undefined);       // 7 days old
-  assert.equal(sevOf(idle([policy(['*'])], { created_in_aws: '2026-09-01T00:00:00Z' }), 'role-idle'), 'high');
+  assert.equal(sevOf(idle([policy(['*'])], { created_in_aws: '2026-09-01T00:00:00Z' }), 'role-idle'), 'medium');
+  // a workspace override still wins
+  assert.equal(sevOf(analyze(base({ policies: [policy(['*'])], role: { arn: ROLE, kind: 'custom', trust_policy: TRUST, last_used_at: null }, policy: { over: new Map([['usage.role-idle', { enabled: true, severity: 'high' }]]), rules: [], sig: 'x' } })), 'role-idle'), 'high');
+  assert.equal(analyze(base({ policies: [{ name: 'p', kind: 'inline', document: { Statement: [{ Effect: 'Allow', NotAction: 's3:DeleteBucket', Resource: '*' }] } }] })).flags.find((f) => f.category === 'wildcard').control, 'perm.not-action');
 });
 
 test('a role anyone can assume is High whatever it grants', () => {

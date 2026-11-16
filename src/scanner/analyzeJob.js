@@ -7,11 +7,13 @@ import { COMPANIONS } from '../analyzer/actionNames.js';
 import { snapshotAndDiff } from '../radarHistory.js';
 import { accountComplete } from '../history.js';
 import { userFindings, withUserRisk } from '../analyzer/users.js';
+import { loadPolicy } from '../controls.js';
 
 const DAY = 864e5;
 
-export async function analyzeRole(role, windowStart, now = new Date(), maps = null) {
+export async function analyzeRole(role, windowStart, now = new Date(), maps = null, policy = null) {
   maps = maps || await loadMappings();
+  policy = policy || await loadPolicy();
   const [pol, act, prin, pass, adv, boundary] = await Promise.all([
     query('SELECT name, kind, document FROM role_policies WHERE role_id=$1', [role.id]),
     query('SELECT action, sum(count)::int AS count, max(day) AS last FROM activity_daily WHERE role_id=$1 GROUP BY action HAVING sum(count) > 0', [role.id]),
@@ -32,14 +34,14 @@ export async function analyzeRole(role, windowStart, now = new Date(), maps = nu
     }
   }
   const out = analyze({
-    role, policies: pol.rows, boundaryDoc: boundary.rows[0]?.document || null, windowStart, now,
+    role, policies: pol.rows, boundaryDoc: boundary.rows[0]?.document || null, windowStart, now, policy,
     activity: { actions, unmappedServices, passroles: pass.rows, principals },
     advisor: adv.rows,
   });
   if (role.kind !== 'iam-user') return out;
   // an IAM user's credentials count as much as its permissions
   const [d, k] = await Promise.all([query('SELECT * FROM iam_user_details WHERE role_id=$1', [role.id]), query('SELECT * FROM iam_access_keys WHERE role_id=$1', [role.id])]);
-  return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime(), rules: keyRules() }));
+  return withUserRisk(out, userFindings({ details: d.rows[0], keys: k.rows, now: now.getTime(), rules: keyRules(), policy }));
 }
 
 /** Stores one analysis. With `recordRisk`, a change of risk level from the last analysis goes to the identity's history. */
@@ -60,16 +62,16 @@ export async function persistAnalysis(roleId, r, { recordRisk = false } = {}) {
     const keep = [];
     for (const f of r.flags) {
       const row = (await c.query(
-        `INSERT INTO flags(role_id, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, status, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'open',now())
+        `INSERT INTO flags(role_id, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, control, status, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'open',now())
          ON CONFLICT (role_id, category, key) DO UPDATE SET title=EXCLUDED.title, actions=EXCLUDED.actions, resources=EXCLUDED.resources, reason=EXCLUDED.reason,
-           evidence=EXCLUDED.evidence, suggestion=EXCLUDED.suggestion, severity=EXCLUDED.severity, status='open', updated_at=now()
+           evidence=EXCLUDED.evidence, suggestion=EXCLUDED.suggestion, severity=EXCLUDED.severity, control=EXCLUDED.control, status='open', updated_at=now()
          RETURNING id`,
-        [roleId, f.category, f.key, f.title, f.actions, f.resources, f.reason, f.evidence, f.suggestion, f.suggestedResources, f.severity])).rows[0];
+        [roleId, f.category, f.key, f.title, f.actions, f.resources, f.reason, f.evidence, f.suggestion, f.suggestedResources, f.severity, f.control || null])).rows[0];
       keep.push(row.id);
     }
-    // trust findings are filed by trustSync.js, not by this analysis: leave them as they are
-    await c.query(`UPDATE flags SET status='resolved', updated_at=now() WHERE role_id=$1 AND status='open' AND category <> 'trust' AND NOT (id = ANY($2))`, [roleId, keep]);
+    // trust findings are filed by trustSync.js and controls that are rules by policySync.js, not by this analysis: leave them
+    await c.query(`UPDATE flags SET status='resolved', updated_at=now() WHERE role_id=$1 AND status='open' AND category NOT IN ('trust', 'custom', 'rule') AND NOT (id = ANY($2))`, [roleId, keep]);
     await c.query(
       `UPDATE roles SET granted_count=$2, used_count=$3, unused_count=$4, unconfirmed_count=$5, risk=$6, risk_score=$7, risk_reasons=$8,
               reviewer_team=$9, requires_both=$10, analysis_hash=$11, analyzed_at=now(),
@@ -92,12 +94,13 @@ export async function analyzeAccount(accountId, { alive = () => {}, progress = a
   const windowStart = cp.t ? new Date(cp.t) : new Date(Date.now() - 90 * DAY);
   await applyBuiltins();                 // names learned by a newer version settle before history is credited
   const maps = await loadMappings();
+  const policy = await loadPolicy();     // the workspace's controls: severities changed, controls turned off
   // while history is still being read, results are provisional and the risk level can swing: only record it once complete
   const recordRisk = await accountComplete(accountId);
   let done = 0;
   for (const role of roles) {
     alive();
-    await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps), { recordRisk });
+    await persistAnalysis(role.id, await analyzeRole(role, windowStart, new Date(), maps, policy), { recordRisk });
     await progress({ phase: 'analyze', done: ++done, total: roles.length });
   }
   return { roles: roles.length };

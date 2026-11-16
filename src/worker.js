@@ -4,6 +4,7 @@ import { usageTick } from './gcp/usage.js';
 import { analyzeUsage } from './gcp/usageAnalysis.js';
 import { alertsTick } from './alerts.js';
 import { trustTick, pruneCallers } from './trustSync.js';
+import { policyTick } from './policySync.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -225,6 +226,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const trustRun = () => { if (trusting || stop.stopped) return; trusting = true;
     trustTick({ log }).catch((e) => log('error', 'trust findings failed', { error: e.message })).finally(() => { trusting = false; }); };
   timers.push(setInterval(trustRun, 60_000), setTimeout(trustRun, 15_000));
+  // Manage policy: custom controls filed as findings; after a built-in control changes, every account analysed again
+  let policing = false;
+  const policyRun = () => { if (policing || stop.stopped) return; policing = true;
+    policyTick({ log }).catch((e) => log('error', 'policy sync failed', { error: e.message })).finally(() => { policing = false; }); };
+  timers.push(setInterval(policyRun, 60_000), setTimeout(policyRun, 20_000));
   timers.push(setInterval(() => pruneCallers(config.scanner.callerKeepDays, { log }).catch((e) => log('error', 'caller pruning failed', { error: e.message })), 6 * 3600_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });

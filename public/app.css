@@ -996,3 +996,22 @@ a.home-tile:hover{border-color:var(--edge);background:var(--raise)}
   .bell-btn{padding:0 10px}.bell-btn .bell-label{display:none}
   .bell-pop{position:fixed;left:8px;right:8px;width:auto;top:56px}
 }
+
+/* Manage policy */
+.ctl-table td{vertical-align:top}
+.ctl-table td:first-child{max-width:560px}
+.ctl-table .cond-line{display:block;margin:4px 0 2px}
+.ctl-off td:first-child,.ctl-off td:nth-child(4),.ctl-off td:nth-child(5){opacity:.55}
+.ctl-sev button:disabled{opacity:.45;cursor:default}
+.ctl-keys{display:flex;flex-wrap:wrap;gap:4px}
+.ctl-key{font:500 11px/1.7 var(--mono);padding:0 6px;border:1px solid var(--edge);background:transparent;color:var(--ink2);cursor:pointer}
+.ctl-key:hover{border-color:var(--ink);color:var(--ink)}
+.ctl-examples{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+.ctl-test{border:1px solid var(--line);padding:8px 10px;min-height:38px}
+.ctl-matches{max-height:150px;overflow:auto;margin:0}
+.controls-page .filters input[type=search]{min-width:min(520px,60vw)}
+.ctl-table{table-layout:fixed;width:100%}
+.ctl-table th:nth-child(2){width:250px}.ctl-table th:nth-child(3){width:70px}.ctl-table th:nth-child(4){width:120px}.ctl-table th:nth-child(5){width:230px}.ctl-table th:nth-child(6){width:150px}
+.modal.wide{max-height:92vh;overflow:auto}
+.modal .field>.seg{align-self:flex-start}
+.ctl-key sup{font-size:8px;margin-left:2px;opacity:.7;text-transform:uppercase}

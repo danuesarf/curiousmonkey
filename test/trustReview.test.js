@@ -18,6 +18,8 @@ before(async () => {
   await (await import('../src/migrate.js')).migrate(() => {});
   tm = await import('../src/trustmap.js'); sync = await import('../src/trustSync.js');
   await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  // this file is about the Trust map's own findings: the built-in rules of Manage policy are turned off
+  for (const b of (await import('../src/controlCatalog.js')).BUILTIN.filter((x) => x.rule)) await db.query(`INSERT INTO control_overrides(control_id, enabled) VALUES ($1, false)`, [b.id]);
   A = (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ('111111111111','payments-prod','production','arn:x','{us-east-1}','connected') RETURNING id`)).rows[0].id;
   const role = async (name, trust) => (await db.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count, trust_policy) VALUES ($1,$2,$3,'custom',10,$4) RETURNING id`,
     [A, `arn:aws:iam::111111111111:role/${name}`, name, JSON.stringify(trust)])).rows[0].id;

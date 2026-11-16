@@ -7,10 +7,17 @@ export const DEFAULT_KEY_RULES = { rotateDays: 90, staleDays: 90 };
 const age = (d, now) => (d ? Math.floor((now - new Date(d).getTime()) / DAY) : null);
 
 /** Findings for one user, each with the points it adds to the risk score. */
-export function userFindings({ details, keys, now = Date.now(), rules = DEFAULT_KEY_RULES }) {
+export function userFindings({ details, keys, now = Date.now(), rules = DEFAULT_KEY_RULES, policy = null }) {
   const { rotateDays, staleDays } = rules;
   const out = [];
-  const add = (points, id, text) => out.push({ points, id, text });
+  // the workspace's policy (Manage policy): a control turned off adds nothing; one given a severity weighs as that severity
+  // a control set to high weighs enough to make the user High on its own (50), as console-no-mfa does by default
+  const WEIGHT = { high: 50, medium: 15, low: 5 };
+  const add = (points, id, text) => {
+    const o = policy?.over.get(`cred.${id}`);
+    if (o && !o.enabled) return;
+    out.push({ points: o?.severity ? WEIGHT[o.severity] : points, id, text });
+  };
   const active = keys.filter((k) => k.status === 'Active' && !k.deleted_at);
   for (const k of active) {
     const a = age(k.created_at, now);

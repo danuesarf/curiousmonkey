@@ -1,5 +1,7 @@
 # Built-in rules and their severity
 
+These are the defaults. A workspace can change any built-in control's severity or turn it off, and add its own rules, on the Policy page (`control_overrides`, `custom_controls`); its choices win. The policy page's descriptions come from `src/controlCatalog.js`, which must match this page.
+
 What each severity means:
 
 - **High**: someone who should not have access could get it, or already holds administrator-level rights nobody uses. Act now.
@@ -21,7 +23,7 @@ A finding that only says "use could not be proven" is never high.
 | Wildcard on every resource (`wildcard`) | high for `*`, or a pattern reaching the identity plane (`iam:*`, `iam:Put*`, `organizations:*`); medium when it can write, or read data itself (`s3:Get*`); low when read-only (`ec2:Describe*`); low on service-linked roles |
 | Allow with `NotAction` on every resource (`wildcard`) | high; medium when IAM is among the exclusions |
 | Unexpected principal used the role (`external-principal`) | medium |
-| Role not used in the window (`role-idle`) | high when it holds `*`, identity-plane rights or a trust anyone can use; medium when it can write; low when read-only or service-linked. Roles under 14 days old are skipped |
+| Role not used in the window (`role-idle`) | medium when it can write; low when read-only or service-linked. Roles under 14 days old are skipped. An unused administrator role is high through the rule control *Administrator access not used in 90 days* |
 
 "Changes access" means the lists in `src/analyzer/sensitive.js`: IAM, Organizations and Identity Center policy and credential actions; resource policies and grants (KMS, S3, Lambda, Secrets Manager, ECR, SNS, SQS); code that runs as a role; switching off CloudTrail, GuardDuty or Config.
 

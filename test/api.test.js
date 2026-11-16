@@ -1097,3 +1097,70 @@ test('what to do first digest: an alert rule, off until made; posts the team lis
     await db.query('DELETE FROM alert_destinations'); rx.close();
   }
 });
+
+test('manage policy: the catalogue for everyone, changes for those who may change settings, audited; rules tested before saving', async () => {
+  const cat = (await reviewerClient.get('/api/controls')).json;
+  assert.equal(cat.canEdit, false); assert.ok(cat.items.length >= 40); assert.ok(cat.keys.identity.grants.help && cat.keys.identity.reach.clouds[0] === 'gcp' && cat.keys['way-in'].source.help);
+  assert.equal((await owner.get('/api/controls?q=domain:credentials')).json.items.length, 10);
+  assert.equal((await reviewerClient.call('PUT', '/api/controls/usage.role-idle', { severity: 'low' })).status, 403);
+  assert.equal((await owner.call('PUT', '/api/controls/usage.nope', { severity: 'low' })).status, 404);
+  assert.equal((await owner.call('PUT', '/api/controls/usage.role-idle', { severity: 'urgent' })).status, 400);
+
+  const ch = await owner.call('PUT', '/api/controls/usage.role-idle', { severity: 'low', note: 'sandbox roles idle by design' });
+  assert.equal(ch.status, 200); assert.deepEqual(ch.json.after, { severity: 'low', enabled: true });
+  const row = (await owner.get('/api/controls?q=usage.role-idle')).json.items[0];
+  assert.deepEqual([row.severity, row.defaultSeverity, row.changed, row.note], ['low', null, true, 'sandbox roles idle by design']);   // its default varies (medium if it can write)
+  assert.equal((await db.query(`SELECT count(*)::int n FROM flags WHERE control='usage.role-idle' AND status='open' AND severity <> 'low'`)).rows[0].n, 0);
+  assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='control.change' AND target_id='usage.role-idle'`)).rowCount >= 1);
+  assert.equal((await owner.call('PUT', '/api/controls/usage.role-idle', { severity: null })).status, 200);
+  assert.equal((await owner.get('/api/controls?q=state:changed source:builtin')).json.items.length, 0);
+
+  // rules: tested without saving; what is wrong is said
+  let t = (await owner.post('/api/controls/test', { target: 'identity', rule: 'kind:role permissions:>0' })).json;
+  assert.deepEqual(t.errors, []); assert.ok(t.total > 0 && t.of >= t.total && t.items[0].name);
+  t = (await owner.post('/api/controls/test', { target: 'identity', rule: '(environment = production OR environment = staging) AND kind != user' })).json;
+  assert.deepEqual(t.errors, []); assert.ok(t.total > 0 && typeof t.ms === 'number');
+  t = (await owner.post('/api/controls/test', { target: 'identity', rule: 'rsk = high' })).json;
+  assert.match(t.errors[0], /Did you mean risk/);
+  t = (await owner.post('/api/controls/test', { target: 'way-in', rule: 'attention:yes' })).json;
+  assert.match(t.errors[0], /describes the review/);
+  t = (await owner.post('/api/controls/test', { target: 'way-in', rule: 'source = oidc OR source = saml' })).json;
+  assert.deepEqual(t.errors, []); assert.ok(t.of >= t.total);
+
+  // a custom control: created, its findings filed at once, listed in the inbox by control, then deleted
+  assert.equal((await reviewerClient.post('/api/controls', { name: 'x y z', target: 'identity', rule: 'kind:role', severity: 'low' })).status, 403);
+  assert.equal((await owner.post('/api/controls', { name: 'Bad rule', target: 'identity', rule: 'nokey = 1', severity: 'low' })).json.field, 'rule');
+  const c = await owner.post('/api/controls', { name: 'Every role, for the test', target: 'identity', rule: 'kind = role AND permissions > 0', severity: 'low', remediation: 'Nothing.' });
+  assert.equal(c.status, 201, c.text); assert.ok(c.json.filed.opened > 0);
+  const inbox = (await owner.get(`/api/findings?control=${c.json.id}&state=all`)).json;
+  assert.ok(inbox.total > 0 && inbox.total <= c.json.filed.opened); assert.equal(inbox.items[0].category, 'custom'); assert.equal(inbox.items[0].control, c.json.id);
+  assert.deepEqual(inbox.items[0].allowed, ['accept', 'investigate']);
+  assert.match((await owner.get('/api/controls.csv?q=source:custom')).text, /Every role, for the test/);
+  const del = await owner.call('DELETE', `/api/controls/${c.json.id}`);
+  assert.equal(del.status, 200); assert.equal(del.json.findingsResolved, inbox.total);
+  assert.equal((await owner.get(`/api/findings?control=${c.json.id}&state=all`)).json.total, 0);
+
+  // a built-in rule's findings are in the inbox too, under their control
+  const ruleInbox = (await owner.get('/api/findings?category=rule&state=all')).json;
+  assert.ok(ruleInbox.total > 0 && ruleInbox.items.every((x) => x.control.startsWith('rule.')));
+
+  // the policy as a file
+  await owner.call('PUT', '/api/controls/usage.role-idle', { severity: 'high' });
+  const exp = await owner.get('/api/controls/export');
+  assert.match(exp.headers.get('content-disposition'), /policy-\d{4}-\d{2}-\d{2}\.json/);
+  const file = JSON.parse(exp.text);
+  assert.deepEqual(file.overrides.map((o) => [o.id, o.severity]), [['usage.role-idle', 'high']]);
+  await owner.call('PUT', '/api/controls/usage.role-idle', { severity: null });
+  assert.equal((await reviewerClient.post('/api/controls/import', { policy: file })).status, 403);
+  file.custom.push({ name: 'Imported: old keys', target: 'identity', rule: 'keyage > 9000', severity: 'low' });
+  const dry = (await owner.post('/api/controls/import', { policy: file, dryRun: true })).json;
+  assert.deepEqual([dry.dryRun, dry.overrides, dry.created], [true, 1, 1]);
+  const imp = (await owner.post('/api/controls/import', { policy: file })).json;
+  assert.deepEqual([imp.dryRun, imp.created, imp.overrides], [false, 1, 1]);
+  assert.equal((await owner.get('/api/controls?q=usage.role-idle')).json.items[0].severity, 'high');
+  assert.equal((await owner.post('/api/controls/import', { policy: { nope: true } })).status, 400);
+  assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='control.import'`)).rowCount >= 1);
+  const mine = (await owner.get('/api/controls?q=source:custom')).json.items;
+  for (const x of mine) await owner.call('DELETE', `/api/controls/${x.id}`);
+  await owner.call('PUT', '/api/controls/usage.role-idle', { severity: null });
+});
