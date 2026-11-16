@@ -6,6 +6,8 @@ import { query, tx } from '../db.js';
 import { analyzeGcp } from './analyze.js';
 import { demoGcpGateway } from './demo.js';
 import { realGcpGateway } from './real.js';
+import { syncCursors } from './usage.js';
+import { analyzeUsage } from './usageAnalysis.js';
 
 export const gcpGateway = (conn) => (config.awsMode === 'demo' ? demoGcpGateway(conn) : realGcpGateway(conn));
 const PREDEFINED_TTL_DAYS = 7;
@@ -152,6 +154,9 @@ export async function gcpTick(workerId, { gw } = {}) {
     const summary = await scanGcpConnection(conn, { gw: gw || gcpGateway(conn), progress });
     await query(`UPDATE gcp_connections SET status='connected', status_detail=$2, last_scan_at=now(), next_scan_at=now() + interval '24 hours', lease_until=NULL, lease_by=NULL, progress=NULL WHERE id=$1`,
       [conn.id, JSON.stringify(summary)]);
+    // the principals were rewritten: their usage counts come back from the stored activity; new projects get cursors
+    // (a failure here leaves the IAM scan standing; the usage reader retries on its own)
+    await syncCursors(conn.id).then(() => analyzeUsage(conn.id)).catch((e) => { summary.usageError = e.message; });
     return { id: conn.id, ok: true, summary };
   } catch (e) {
     await query(`UPDATE gcp_connections SET status='error', status_detail=$2, next_scan_at=now() + interval '1 hour', lease_until=NULL, lease_by=NULL, progress=NULL WHERE id=$1`,

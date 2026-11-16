@@ -222,6 +222,30 @@ function restartsCard(all, redraw) {
 }
 
 // ---- database ----
+/** AWS data account by account, from the hourly estimate: total, 7-day growth and the tables it sits in. */
+function awsAccountStorage(list) {
+  if (!list?.length) return null;
+  const total = list.reduce((a, x) => a + x.bytes, 0);
+  return h('div', { class: 'stack' }, h('h3', null, `AWS data by account · ${bytes(total)}`),
+    h('p', { class: 'small muted' }, 'Every table tied to an account (directly, through its roles or its sessions), indexes included. Small tables are counted exactly; big ones are split by a sample of their pages (the smallest accounts counted exactly), and each size is the average of the last 24 hourly estimates.'),
+    h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Account', 'Size', 'Last 7 days', 'Rows', 'Mostly in'].map((x) => h('th', null, x)))),
+      h('tbody', null, list.map((a) => h('tr', null,
+        h('td', null, a.name, h('div', { class: 'tiny muted mono' }, a.awsAccount)),
+        h('td', null, bytes(a.bytes), a.sampled ? h('span', { class: 'tiny muted' }, ' est.') : null),
+        h('td', null, a.growth7d == null ? h('span', { class: 'muted' }, 'after 7 days') : `${a.growth7d >= 0 ? '+' : '−'}${bytes(Math.abs(a.growth7d))}`),
+        h('td', null, num(a.rows)),
+        h('td', { class: 'tiny muted' }, a.tables.slice(0, 3).map((t) => `${t.table} ${bytes(t.bytes)}`).join(' · '))))))));
+}
+
+/** Google Cloud role usage data, project by project: rows counted as written, bytes from each table's measured size per row. */
+function gcpUsageStorage(u) {
+  if (!u?.projects?.length) return null;
+  return h('div', { class: 'stack' }, h('h3', null, `Google Cloud usage data by project · ${bytes(u.total)}`),
+    h('p', { class: 'small muted' }, `Per-day counts read from audit logs. About ${u.bytesPerRow.daily} bytes a day row and ${u.bytesPerRow.summary} a summary row, indexes included; the split adds up to the two tables.`),
+    h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Project', 'Connection', 'Size', 'Day rows', 'Summary rows'].map((x) => h('th', null, x)))),
+      h('tbody', null, u.projects.map((p) => h('tr', null, h('td', { class: 'mono' }, p.projectId), h('td', { class: 'muted' }, p.connectionName), h('td', null, bytes(p.bytes)), h('td', null, num(p.dailyRows)), h('td', { class: 'muted' }, num(p.summaryRows))))))));
+}
+
 function databaseCard(db) {
   const { pg, disk: dk, growth: g } = db;
   const used = dk.known ? dk.used / dk.total : null;
@@ -253,6 +277,8 @@ function databaseCard(db) {
       h('div', { class: 'charts' },
         chart('Database size, 30 days', series, { fmt: bytes, days: true, empty: 'The first samples arrive within the hour.' }),
         chart('Disk used under the database, 30 days', diskSeries, { fmt: bytes, days: true, limit: lastTotal, limitLabel: 'disk', empty: dk.known ? 'The first samples arrive within the hour.' : 'The disk is not visible to the app.' })),
+      awsAccountStorage(db.awsAccounts),
+      gcpUsageStorage(db.gcpUsage),
       h('h3', null, `Largest tables${db.tableCount > db.tables.length ? ` (${db.tables.length} of ${db.tableCount})` : ''}`),
       h('div', { class: 'scroll' }, table),
       h('dl', { class: 'kv small' },
