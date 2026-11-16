@@ -125,7 +125,7 @@ export function analyzeGcp(s) {
 
     // findings about the identity
     if (x.kind === 'public') f('public', 'high', 'Granted to everyone', `${x.label} holds ${roles.map((r) => r.role).join(', ')}.`);
-    if (x.kind === 'deleted') f('deleted', 'medium', 'Bound to a deleted identity', 'The identity is gone but its bindings stay; a new account created with the same name does not inherit them, but they are clutter to remove.');
+    if (x.kind === 'deleted') f('deleted', 'low', 'Bound to a deleted identity', 'The identity is gone but its bindings stay; a new account created with the same name does not inherit them, but they are clutter to remove.');
     if ((x.kind === 'user' || x.kind === 'group') && external(x.email)) f('external', 'medium', 'Outside your domain', `${x.email} is not in ${domain}.`);
     for (const r of roles.filter((y) => y.basic && !y.condition)) {
       if (r.role === 'roles/owner') f('basic-owner', 'high', 'Owner', `Owner on ${where(r)}: every permission, including changing who has access.`);

@@ -17,7 +17,7 @@ test('whole-account trust is a finding; how bad depends on whose account and whe
     { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${CONNECTED}:root` }, Action: 'sts:AssumeRole', Condition: { ArnLike: { 'aws:PrincipalArn': `arn:aws:iam::${CONNECTED}:role/ci-*` } } },
   ]), ctx);
   assert.equal(own.group, 'same-account'); assert.equal(own.type, 'aws-root');
-  assert.deepEqual(ids(own), ['info:never-used', 'medium:account-root']);
+  assert.deepEqual(ids(own), ['info:never-used', 'low:account-root']);                    // its own account, an ordinary role
   assert.equal(conn.group, 'connected-account'); assert.equal(conn.principalAccountName, 'data-stg');
   assert.equal(ext.group, 'external-account');
   assert.deepEqual(ids(ext), ['high:account-root', 'high:external-no-externalid', 'info:never-used']);
@@ -67,7 +67,7 @@ test('anyone, NotPrincipal, IAM users, deleted identities, services', () => {
   assert.deepEqual(ids(es[1]), ['medium:public']);
   assert.deepEqual(ids(es[2]), ['high:not-principal']);
   assert.deepEqual(ids(es[3]), ['low:broad-action', 'low:iam-user']);
-  assert.deepEqual(ids(es[4]), ['medium:deleted-principal']);
+  assert.deepEqual(ids(es[4]), ['low:deleted-principal']);                                // nobody can come in through it
   assert.equal(es[5].group, 'service'); assert.deepEqual(ids(es[5]), []);
 });
 
@@ -188,11 +188,11 @@ test('Cognito: judged by the pool (aud) and guests (amr), not by a subject', () 
   assert.deepEqual(ids(noAud), ['high:cognito-no-aud']);
 });
 
-test('your own account with MFA required (break-glass) is low; without it medium', () => {
-  const [mfa, plain] = edgesOf(role('break-glass', [
-    { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${OWN}:root` }, Action: 'sts:AssumeRole', Condition: { Bool: { 'aws:MultiFactorAuthPresent': 'true' } } },
-    { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${OWN}:root` }, Action: 'sts:AssumeRole' },
-  ]), { ...ctx, complete: new Set() });
+test('your own account with MFA required (break-glass) is low; without it medium when the role is High risk, low otherwise', () => {
+  const root = { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${OWN}:root` }, Action: 'sts:AssumeRole' };
+  const c = { ...ctx, complete: new Set() };
+  assert.deepEqual(ids(edgesOf(role('reader', [root]), c)[0]), ['low:account-root']);
+  const [mfa, plain] = edgesOf({ ...role('break-glass', [{ ...root, Condition: { Bool: { 'aws:MultiFactorAuthPresent': 'true' } } }, root]), risk: 'High' }, c);
   assert.deepEqual(ids(mfa), ['low:account-root']);
   assert.deepEqual(ids(plain), ['medium:account-root']);
 });
