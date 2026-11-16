@@ -179,14 +179,18 @@ export function edgesOf(role, ctx) {
           const vendor = origin === 'external-account' && has(/^sts:ExternalId$/i);
           // your own account's root with MFA required (a break-glass role): a person with MFA, not any workload
           const mfa = origin !== 'external-account' && conds.some((c) => /^aws:MultiFactorAuth(Present|Age)$/i.test(c.key) && !c.values.includes('false'));
-          f('account-root', narrowed ? 'info' : vendor || mfa ? 'low' : origin === 'external-account' ? 'high' : 'medium',
+          // the role's own account: IAM's default delegation, where that account's policies decide who may assume it. Low,
+          // unless the role it opens is High risk (an admin role anyone holding sts:AssumeRole can step into): medium.
+          // Another of your accounts: every identity there that holds sts:AssumeRole can cross over: medium. Outside: high.
+          f('account-root', narrowed ? 'info' : vendor || mfa || (origin === 'same-account' && role.risk !== 'High') ? 'low' : origin === 'external-account' ? 'high' : 'medium',
             narrowed ? `Narrowed by ${conds.filter((c) => /^aws:Principal(Arn|Tag)/i.test(c.key)).map((c) => `${c.key} ${c.values.join(' | ')}`).join('; ')}`
               : vendor ? `The usual third-party pattern (account root plus sts:ExternalId). Confirm ${acct} is a vendor you still use.`
               : mfa ? `Any identity in ${acct}${acctName ? ` (${acctName})` : ''} that holds sts:AssumeRole can come in, but only with MFA. Fine for break-glass; name the roles allowed (aws:PrincipalArn) if you can.`
               : `Any identity in ${acct}${acctName ? ` (${acctName})` : ''} that holds sts:AssumeRole can come in.`);
         }
         if (kind === 'aws-user') f('iam-user', 'low', 'An IAM user means access keys that do not expire. Prefer a role.');
-        if (kind === 'deleted') f('deleted-principal', 'medium', 'The identity this statement named was deleted. Recreating one with the same name will not restore access. Remove the statement.');
+        // nobody can come in through it: clutter to remove, not exposure
+        if (kind === 'deleted') f('deleted-principal', 'low', 'The identity this statement named was deleted. Recreating one with the same name will not restore access. Remove the statement.');
         if (origin === 'external-account' && !has(/^sts:ExternalId$/i) && !has(/^aws:Principal(OrgID|OrgPaths)$/i)) {
           f('external-no-externalid', kind === 'aws-root' ? 'high' : 'medium', `Account ${acct} is not one of your connected accounts. If it is a third party, require sts:ExternalId to stop the confused-deputy problem.`);
         }

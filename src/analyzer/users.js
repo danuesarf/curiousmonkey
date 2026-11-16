@@ -11,7 +11,8 @@ export function userFindings({ details, keys, now = Date.now(), rules = DEFAULT_
   const { rotateDays, staleDays } = rules;
   const out = [];
   // the workspace's policy (Manage policy): a control turned off adds nothing; one given a severity weighs as that severity
-  const WEIGHT = { high: 30, medium: 15, low: 5 };
+  // a control set to high weighs enough to make the user High on its own (50), as console-no-mfa does by default
+  const WEIGHT = { high: 50, medium: 15, low: 5 };
   const add = (points, id, text) => {
     const o = policy?.over.get(`cred.${id}`);
     if (o && !o.enabled) return;
@@ -30,7 +31,8 @@ export function userFindings({ details, keys, now = Date.now(), rules = DEFAULT_
   if (active.length > 1) add(5, 'key-two', 'Two active access keys: one should be retired after rotation');
   if (details?.password_enabled) {
     const mfa = (details.mfa || []).length > 0;
-    if (!mfa) add(30, 'console-no-mfa', 'Console password without MFA');
+    // one phished or reused password is the whole account: High on its own (50), like the alert of the same name
+    if (!mfa) add(50, 'console-no-mfa', 'Console password without MFA');
     const idle = details.password_last_used ? age(details.password_last_used, now) : null;
     if (idle == null && age(details.password_created, now) > 30) add(10, 'password-unused', 'Console password never used: remove it');
     else if (idle != null && idle > staleDays) add(10, 'password-unused', `Console password unused for ${idle} days: remove it`);

@@ -2,6 +2,8 @@ import { h, get, post, api, num, ago, fmtDate, toast, copy, field, confirmDialog
 import { session, go } from '../main.js';
 import { gcpSection, cloudTabs } from './gcp.js';
 
+const gbOf = (b) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)} GB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+
 const REGIONS = ['us-east-1', 'us-east-2', 'us-west-2', 'eu-west-1', 'eu-central-1', 'ap-southeast-1', 'ap-southeast-2', 'ap-southeast-3', 'ap-northeast-1', 'ap-south-1'];
 // the environments set on the Configuration page; an account whose environment was removed keeps it until edited
 const envOptions = (current) => [...envs(), ...(current && !envs().some((e) => e.id === current) ? [{ id: current, name: `${current} (removed)` }] : [])]
@@ -423,7 +425,10 @@ function accountDetail(a) {
       h('dt', null, 'Access'), h('dd', null, MODE_LABEL[a.auth_mode], a.auth_mode === 'assume_role' && h('span', { class: 'mono small' }, ` ${a.role_arn}`),
         h('span', { class: 'muted' }, a.auth_mode === 'access_key' ? ` · key ${a.credentials_hint || 'missing'}` : a.base_identity === 'stored' ? ` · from stored key ${a.credentials_hint || 'missing'}` : ' · from the worker’s credentials')),
       h('dt', null, 'Regions'), h('dd', null, a.regions.join(', ')),
-      h('dt', null, 'Roles found'), h('dd', null, num(a.roles)), h('dt', null, 'Last scan'), h('dd', null, a.last_scan_at ? `${fmtDate(a.last_scan_at)} (${ago(a.last_scan_at)})` : 'never')),
+      h('dt', null, 'Roles found'), h('dd', null, num(a.roles)),
+      h('dt', null, 'In the database'), h('dd', null, a.storage ? [gbOf(a.storage.bytes), h('span', { class: 'small muted', title: 'Every table tied to this account, indexes included; big tables are split by a page sample' },
+        ` · about ${num(a.storage.rows)} rows${a.storage.sampled ? ', estimated' : ''} · ${ago(a.storage.at)}`)] : h('span', { class: 'muted' }, 'measured within the hour')),
+      h('dt', null, 'Last scan'), h('dd', null, a.last_scan_at ? `${fmtDate(a.last_scan_at)} (${ago(a.last_scan_at)})` : 'never')),
     a.checkpoints.length > 0 && h('div', null, h('h3', null, 'Stored history'), h('p', { class: 'small muted' }, 'Each daily scan continues from the newest stored event. It never re-reads history that is already saved.'),
       h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Region'), h('th', null, 'History starts'), h('th', null, 'Stored up to'), h('th', null, 'Events read'), h('th', null, 'Gap'))),
         h('tbody', null, a.checkpoints.map((c) => h('tr', null, h('td', { class: 'mono small' }, c.region), h('td', { class: 'small' }, fmtDate(c.first)), h('td', { class: 'small' }, fmtDate(c.last)), h('td', null, num(c.events)),

@@ -104,7 +104,7 @@ test('identity rules become parameterised SQL for AWS and a test for Google Clou
 test('the analyser follows the policy: a control off makes no finding and no risk; a severity set is used', async () => {
   const flags = async (id) => (await db.query(`SELECT control, severity FROM flags WHERE role_id=$1 AND status='open' AND category NOT IN ('trust', 'rule', 'custom') ORDER BY control`, [id])).rows.map((x) => `${x.control}:${x.severity}`);
   assert.ok((await flags(wide)).includes('perm.wildcard-service:medium'));
-  assert.ok((await flags(idle)).includes('usage.role-idle:medium'));
+  assert.ok((await flags(idle)).includes('usage.role-idle:low'));                  // read-only and unused: low
   const before_ = (await db.query('SELECT risk_score FROM roles WHERE id=$1', [wide])).rows[0].risk_score;
 
   let r = await ctl.setOverride(owner, 'perm.wildcard-service', { severity: 'high', note: 'no wildcards here' });
@@ -134,8 +134,8 @@ test('IAM user checks follow the policy: off adds nothing, a severity sets the w
   const { userFindings } = await import('../src/analyzer/users.js');
   const details = { password_enabled: true, password_created: new Date(), mfa: [] }, keys = [{ key_id: 'K', status: 'Active', created_at: new Date(Date.now() - 200 * 864e5), last_used_at: new Date() }];
   const pts = (p) => Object.fromEntries(userFindings({ details, keys, policy: p }).map((f) => [f.id, f.points]));
-  assert.deepEqual(pts(null), { 'key-old': 15, 'console-no-mfa': 30, 'console-and-keys': 5 });
-  assert.deepEqual(pts(policyOf({ 'cred.console-no-mfa': { severity: null, enabled: false }, 'cred.key-old': { severity: 'high', enabled: true } })), { 'key-old': 30, 'console-and-keys': 5 });
+  assert.deepEqual(pts(null), { 'key-old': 15, 'console-no-mfa': 50, 'console-and-keys': 5 });
+  assert.deepEqual(pts(policyOf({ 'cred.console-no-mfa': { severity: null, enabled: false }, 'cred.key-old': { severity: 'high', enabled: true } })), { 'key-old': 50, 'console-and-keys': 5 });       // set to high: High on its own
 });
 
 test('built-in rules are filed like any control, in AWS and Google Cloud; one that ships off stays off until turned on', async () => {

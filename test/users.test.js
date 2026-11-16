@@ -18,7 +18,9 @@ test('credentials: old, unused and doubled keys; console passwords without MFA o
   const con = userFindings({ details: { password_enabled: true, password_created: ago(400), password_last_used: ago(200), mfa: [] }, keys: [{ key_id: 'E', status: 'Active', created_at: ago(10), last_used_at: ago(1) }] });
   assert.deepEqual(ids(con), ['console-no-mfa', 'password-unused', 'console-and-keys']);
   const r = withUserRisk({ risk: 'Low', riskScore: 5, riskReasons: ['x'] }, con);
-  assert.equal(r.risk, 'High'); assert.equal(r.riskScore, 50); assert.equal(r.riskReasons.at(-1), 'x');
+  assert.equal(r.risk, 'High'); assert.equal(r.riskScore, 70);
+  // no MFA is High on its own, before anything else is counted
+  assert.equal(withUserRisk({ risk: 'Low', riskScore: 0, riskReasons: [] }, userFindings({ details: { password_enabled: true, password_created: ago(5), password_last_used: ago(1), mfa: [] }, keys: [] })).risk, 'High'); assert.equal(r.riskReasons.at(-1), 'x');
 });
 
 // ---------------------------------------------------------------- scanned, through the API

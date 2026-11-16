@@ -11,6 +11,11 @@ export const GCP_READER_PERMISSIONS = [
 ];
 // folders cannot hold custom roles: predefined roles that together cover the list above
 export const GCP_READER_PREDEFINED = ['roles/iam.securityReviewer', 'roles/browser', 'roles/iam.workloadIdentityPoolViewer'];
+// role usage (optional): read audit log entries. Admin Activity needs logEntries.list; Data Access logs are private logs.
+export const GCP_USAGE_PERMISSIONS = ['logging.logEntries.list'];
+export const GCP_DATA_ACCESS_PERMISSIONS = ['logging.privateLogEntries.list'];
+export const GCP_USAGE_PREDEFINED = ['roles/logging.viewer'];
+export const GCP_DATA_ACCESS_PREDEFINED = ['roles/logging.privateLogViewer'];
 
 const SA_NAME = 'curious-monkey-reader', POOL = 'curious-monkey', PROVIDER = 'aws-scanner';   // pool and provider IDs are 4 to 32 characters
 const AWS_ROLE_MAPPING = "google.subject=assertion.arn,attribute.aws_role=assertion.arn.contains('assumed-role') ? assertion.arn.extract('{account_arn}assumed-role/') + 'assumed-role/' + assertion.arn.extract('assumed-role/{role_name}/') : assertion.arn";
@@ -21,7 +26,9 @@ export function awsRoleOf(arn) {
   return m ? { account: m[1], role: m[2], sessionArn: `arn:aws:sts::${m[1]}:assumed-role/${m[2]}` } : null;
 }
 
-export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-identity-project', homeNumber = 'PROJECT_NUMBER', orgId = '', aws = null }) {
+export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-identity-project', homeNumber = 'PROJECT_NUMBER', orgId = '', aws = null, usage = false, dataAccess = false }) {
+  const perms = [...GCP_READER_PERMISSIONS, ...(usage ? GCP_USAGE_PERMISSIONS : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PERMISSIONS : [])];
+  const predefined = [...GCP_READER_PREDEFINED, ...(usage ? GCP_USAGE_PREDEFINED : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PREDEFINED : [])];
   const sa = `${SA_NAME}@${home}.iam.gserviceaccount.com`;
   const id = scopeId || (scopeType === 'project' ? 'PROJECT_ID' : scopeType === 'folder' ? 'FOLDER_ID' : 'ORG_ID');
   const steps = [];
@@ -32,13 +39,13 @@ export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-ident
     steps.push({ title: 'A read-only role with only what the scan needs', code:
 `gcloud iam roles create curiousMonkeyReader ${roleParent} \\
   --title="Curious Monkey reader" --stage=GA \\
-  --permissions=${GCP_READER_PERMISSIONS.join(',')}` });
+  --permissions=${perms.join(',')}` });
   }
   steps.push({ title: 'A service account to hold it', code:
-`gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com sts.googleapis.com iamcredentials.googleapis.com --project=${home}
+`gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com sts.googleapis.com iamcredentials.googleapis.com${usage ? ' logging.googleapis.com' : ''} --project=${home}
 gcloud iam service-accounts create ${SA_NAME} --project=${home} --display-name="Curious Monkey reader"` });
   const bind = scopeType === 'organization' ? `gcloud organizations add-iam-policy-binding ${id}` : scopeType === 'folder' ? `gcloud resource-manager folders add-iam-policy-binding ${id}` : `gcloud projects add-iam-policy-binding ${id}`;
-  steps.push({ title: `Grant it on the ${scopeType}`, code: (custom ? [roleName] : GCP_READER_PREDEFINED)
+  steps.push({ title: `Grant it on the ${scopeType}`, code: (custom ? [roleName] : predefined)
     .map((r) => `${bind} \\\n  --member="serviceAccount:${sa}" --role="${r}" --condition=None`).join('\n') });
   if (mode === 'wif') {
     const acct = aws?.account || 'AWS_ACCOUNT_ID', roleArn = aws?.sessionArn || `arn:aws:sts::${acct}:assumed-role/SCANNER_ROLE_NAME`;
@@ -55,5 +62,10 @@ gcloud iam service-accounts add-iam-policy-binding ${sa} --project=${home} \\
     steps.push({ title: 'A key for it (prefer federation: a key works from anywhere until deleted)', code:
 `gcloud iam service-accounts keys create curious-monkey-key.json --iam-account=${sa}` });
   }
-  return { steps, serviceAccount: sa, pool: POOL, provider: PROVIDER, permissions: GCP_READER_PERMISSIONS, predefined: custom ? [] : GCP_READER_PREDEFINED, orgId };
+  if (usage && custom) {
+    steps.push({ title: 'Already connected? Add the log permissions to the existing role instead', code:
+`gcloud iam roles update curiousMonkeyReader ${roleParent} \\
+  --add-permissions=${[...GCP_USAGE_PERMISSIONS, ...(dataAccess ? GCP_DATA_ACCESS_PERMISSIONS : [])].join(',')}` });
+  }
+  return { steps, serviceAccount: sa, pool: POOL, provider: PROVIDER, permissions: perms, predefined: custom ? [] : predefined, orgId, usage };
 }

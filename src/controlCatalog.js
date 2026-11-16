@@ -12,7 +12,7 @@ export const DOMAINS = {
 };
 export const INBOX = 'Findings inbox', TRUST = 'Trust map; high and medium also in the Findings inbox';
 const RISK = 'Risk score of the IAM user', GCP = 'Google Cloud page and its risk score';
-const BY_LEVEL = 'By what the actions can do: high for write and permission management, medium for read and tagging, low for list.';
+const EVIDENCE_SEV = 'Low; medium when the actions that cannot be verified change access (IAM, resource policies, grants, logging), write to every bucket or table, or are iam:PassRole on every role. Never high: nothing was seen to be wrong.';
 
 // id, domain, name, what it checks, severity (null = it varies, said in `varies`), where it shows, how to fix
 const c = (id, domain, name, what, severity, where, fix, varies = null) => ({ id, domain, name, what, severity, varies, where, fix });
@@ -20,19 +20,20 @@ const c = (id, domain, name, what, severity, where, fix, varies = null) => ({ id
 const r = (id, domain, name, what, severity, where, fix, target, rule, { off = false } = {}) => ({ id, domain, name, what, severity, varies: null, where, fix, target, rule, off });
 export const BUILTIN = [
   c('perm.wildcard-all', 'permissions', 'Every action on every resource', 'A policy allows "*" (or "*:*") on Resource "*".', 'high', INBOX, 'Replace with the actions listed under Used.'),
-  c('perm.wildcard-service', 'permissions', 'Wildcard actions on every resource', 'A policy allows a wildcard such as s3:* or iam:Get* on Resource "*".', 'medium', INBOX, 'Replace with the actions listed under Used.'),
-  c('usage.role-idle', 'usage', 'Role not used', 'No successful use in the history read.', 'medium', INBOX, 'Delete the role if nothing depends on it.'),
+  c('perm.wildcard-service', 'permissions', 'Wildcard actions on every resource', 'A policy allows a wildcard such as s3:* or iam:Get* on Resource "*".', null, INBOX, 'Replace with the actions listed under Used.', 'By what the wildcard expands to: high for the identity plane (iam:*, iam:Put*, organizations:*), medium when it can write or read data (s3:*, s3:Get*), low when read-only (ec2:Describe*) or on a service-linked role.'),
+  c('perm.not-action', 'permissions', 'Everything except a list (NotAction)', 'A policy allows every action except a list, on Resource "*", including actions AWS adds later.', null, INBOX, 'Replace with the actions listed under Used.', 'High; medium when IAM is among the exclusions.'),
+  c('usage.role-idle', 'usage', 'Role not used', 'No successful use in the history read. Roles under 14 days old are not counted.', null, INBOX, 'Delete the role if nothing depends on it.', 'Medium when it can write, low when read-only or service-linked. An unused administrator role is also caught, as high, by "Administrator access not used in 90 days".'),
   c('usage.unexpected-principal', 'usage', 'Unexpected principal', 'Something assumed the role that no trust statement names directly.', 'medium', INBOX, 'Confirm with the owner, then name it in the trust policy or block it.'),
-  c('evidence.data-event', 'evidence', 'Data-plane actions not verifiable', 'Object and item level calls are data events; without them "unused" cannot be proved.', null, INBOX, 'Keep, scoped to what the workload needs, or enable data events to verify.', BY_LEVEL),
-  c('evidence.authorization-only', 'evidence', 'Checked by AWS, never logged', 'Actions AWS evaluates during another call and writes no event for.', null, INBOX, 'Reviewer decides: keep scoped or remove.', BY_LEVEL),
-  c('evidence.not-logged', 'evidence', 'Actions CloudTrail cannot record', 'No data-event type exists for these calls, so no setting can confirm them.', null, INBOX, 'Reviewer decides: keep scoped or remove.', BY_LEVEL),
-  c('evidence.before-window', 'evidence', 'Used before the stored history', 'IAM says the service was last used before the oldest event read.', null, INBOX, 'Reviewer decides: keep scoped or remove.', BY_LEVEL),
-  c('evidence.service-unknown', 'evidence', 'Service used, actions not visible', 'IAM says the service was used recently but no matching event was found.', null, INBOX, 'Reviewer decides: keep scoped or remove.', BY_LEVEL),
-  c('evidence.unmapped-event', 'evidence', 'Calls not matched to IAM actions', 'Event names seen that are not IAM action names.', null, INBOX, 'Map the event names on Event coverage, then re-analyse.', BY_LEVEL),
+  c('evidence.data-event', 'evidence', 'Data-plane actions not verifiable', 'Object and item level calls are data events; without them "unused" cannot be proved.', null, INBOX, 'Keep, scoped to what the workload needs, or enable data events to verify.', EVIDENCE_SEV),
+  c('evidence.authorization-only', 'evidence', 'Checked by AWS, never logged', 'Actions AWS evaluates during another call and writes no event for.', null, INBOX, 'Reviewer decides: keep scoped or remove.', EVIDENCE_SEV),
+  c('evidence.not-logged', 'evidence', 'Actions CloudTrail cannot record', 'No data-event type exists for these calls, so no setting can confirm them.', null, INBOX, 'Reviewer decides: keep scoped or remove.', EVIDENCE_SEV),
+  c('evidence.before-window', 'evidence', 'Used before the stored history', 'IAM says the service was last used before the oldest event read.', null, INBOX, 'Reviewer decides: keep scoped or remove.', EVIDENCE_SEV),
+  c('evidence.service-unknown', 'evidence', 'Service used, actions not visible', 'IAM says the service was used recently but no matching event was found.', null, INBOX, 'Reviewer decides: keep scoped or remove.', EVIDENCE_SEV),
+  c('evidence.unmapped-event', 'evidence', 'Calls not matched to IAM actions', 'Event names seen that are not IAM action names.', null, INBOX, 'Map the event names on Event coverage, then re-analyse.', EVIDENCE_SEV),
 
   c('trust.public', 'trust', 'Anyone can assume it', 'The trust policy allows principal "*".', null, TRUST, 'Name the principals that need the role, or add a condition such as aws:PrincipalOrgID.', 'High with no condition; medium when an organisation, account or ARN condition narrows it.'),
   c('trust.not-principal', 'trust', 'Allow with NotPrincipal', 'Everyone except a list is let in.', 'high', TRUST, 'Replace NotPrincipal with the principals that should get in.'),
-  c('trust.account-root', 'trust', 'Trusts a whole AWS account', 'A whole account (:root) is trusted, not a specific role.', null, TRUST, 'Name the roles that come in (aws:PrincipalArn), or trust them directly.', 'High for an account outside your estate, medium for one of yours, low with ExternalId or MFA; not a finding when conditions name who comes in.'),
+  c('trust.account-root', 'trust', 'Trusts a whole AWS account', 'A whole account (:root) is trusted, not a specific role.', null, TRUST, 'Name the roles that come in (aws:PrincipalArn), or trust them directly.', 'High for an account outside your estate; medium for another of your accounts; low for the role\'s own account (medium when the role is High risk), with MFA, or with a vendor\'s ExternalId; informational when narrowed by aws:PrincipalArn or tags.'),
   c('trust.external-no-externalid', 'trust', 'Outside account without ExternalId', 'An account outside your estate is trusted with no sts:ExternalId.', null, TRUST, 'Ask the third party for its ExternalId and require it.', 'High when the whole account is trusted, medium for a named role.'),
   c('trust.oidc-no-sub', 'trust', 'OIDC trust without a subject', 'A web identity provider is trusted with no :sub condition.', null, TRUST, 'Add a :sub condition for the repository, branch or workload.', 'High for CI providers (GitHub, Bitbucket, GitLab…); lower where the provider has no shared tenants.'),
   c('trust.oidc-broad-sub', 'trust', 'OIDC subject is a broad wildcard', 'The :sub condition matches far more than one repository or workload.', null, TRUST, 'Narrow :sub to the repositories and branches that use the role.', 'High for "*", medium for a broad pattern, low for Bitbucket pinned to a repository.'),
@@ -44,7 +45,7 @@ export const BUILTIN = [
   c('trust.idc-multiple', 'trust', 'More than one IAM Identity Center', 'The account trusts several Identity Center instances.', 'high', TRUST, 'Check who runs the others and remove their AWSSSO provider if it is not yours.'),
   c('trust.idc-other', 'trust', 'Identity Center that is not your organisation\'s', 'Most of your accounts trust another instance.', 'high', TRUST, 'Check whose Identity Center this is; remove its provider if it is not yours.'),
   c('trust.iam-user', 'trust', 'Trusts an IAM user directly', 'A user with long-lived keys can assume the role.', 'low', TRUST, 'Trust a role instead of an IAM user.'),
-  c('trust.deleted-principal', 'trust', 'Points at a deleted identity', 'The statement holds a unique ID where an ARN was.', 'medium', TRUST, 'Remove the statement.'),
+  c('trust.deleted-principal', 'trust', 'Points at a deleted identity', 'The statement holds a unique ID where an ARN was.', 'low', TRUST, 'Remove the statement.'),
   c('trust.broad-action', 'trust', 'sts:* or * in a trust policy', 'More than the sts: actions needed are allowed.', 'low', TRUST, 'Allow sts:AssumeRole and only the sts: actions needed.'),
 
   c('cred.console-no-mfa', 'credentials', 'Console password without MFA', 'An IAM user can sign in to the console with a password alone.', 'high', RISK, 'Add an MFA device, or remove the password.'),
@@ -64,7 +65,7 @@ export const BUILTIN = [
   c('gcp.wif-broad', 'gcp', 'Any identity from a federated source', 'A workload identity pool or provider has no attribute condition.', 'high', GCP, 'Add an attribute condition.'),
   c('gcp.key', 'gcp', 'User-managed service account key', 'A service account has keys someone downloaded.', null, GCP, 'Prefer workload identity federation; delete or rotate the key.', 'High for a key that never expires on a powerful account, medium past the rotation age, low otherwise.'),
   c('gcp.external', 'gcp', 'Outside your domain', 'A user or group outside the organisation\'s domain holds a role.', 'medium', GCP, 'Confirm it is expected, or remove the binding.'),
-  c('gcp.deleted', 'gcp', 'Bound to a deleted identity', 'The identity is gone but its bindings stay.', 'medium', GCP, 'Remove the bindings.'),
+  c('gcp.deleted', 'gcp', 'Bound to a deleted identity', 'The identity is gone but its bindings stay.', 'low', GCP, 'Remove the bindings.'),
   c('gcp.disabled', 'gcp', 'Disabled but still granted roles', 'A disabled service account keeps its roles.', 'low', GCP, 'Remove the bindings or delete the service account.'),
 
   // ---- built-in controls that are rules: written in the rule language, so they can be read, copied and adapted
@@ -115,7 +116,7 @@ export const isBuiltin = (id) => BY_ID.has(id);
 /** The control behind an analyser finding. */
 const EVIDENCE = new Set(['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']);
 export function controlOfFlag(category, key) {
-  if (category === 'wildcard') return key === '*' || key === '*:*' ? 'perm.wildcard-all' : 'perm.wildcard-service';
+  if (category === 'wildcard') return key === '*' || key === '*:*' ? 'perm.wildcard-all' : String(key).startsWith('NotAction:') ? 'perm.not-action' : 'perm.wildcard-service';
   if (category === 'role-idle') return 'usage.role-idle';
   if (category === 'external-principal') return 'usage.unexpected-principal';
   if (EVIDENCE.has(category)) return `evidence.${category}`;
