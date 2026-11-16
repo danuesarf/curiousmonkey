@@ -12,6 +12,8 @@ import { isEnvironment, resolveEnvironment, environmentOf, defaultEnvironment } 
 import { gcpSnippets, awsRoleOf } from '../gcp/onboarding.js';
 import { gcpGateway, hierarchy } from '../gcp/scan.js';
 import { crossLinks } from '../gcp/links.js';
+import { syncCursors, usageStorage, coverage, LAG_MS, MAX_LOOKBACK_DAYS } from '../gcp/usage.js';
+import { analyzeUsage, principalUsage } from '../gcp/usageAnalysis.js';
 
 export const gcp = Router();
 gcp.use(requireUser);
@@ -36,6 +38,12 @@ const ConnBase = z.object({
   authMode: z.enum(['wif', 'key']),
   wif: Wif.optional(),
   key: z.string().max(20000).optional(),
+  // role usage from audit logs: off unless turned on (it needs logging.logEntries.list on every project)
+  usage: z.object({
+    enabled: z.boolean(),
+    lookbackDays: z.number().int().min(1).max(MAX_LOOKBACK_DAYS).default(30),
+    dataAccess: z.boolean().default(false),
+  }).optional(),
 });
 const scopeCheck = (b, ctx) => {
   if (b.scopeType && b.scopeId != null && !scopeId(b.scopeType, b.scopeId)) ctx.addIssue({ code: 'custom', path: ['scopeId'], message: b.scopeType === 'project' ? 'Use the project ID, such as acme-payments-prod.' : `Use the numeric ${b.scopeType} ID.` });
@@ -49,6 +57,7 @@ function parseKey(text) {
 const view = (c, counts = {}) => ({
   id: c.id, name: c.name, scopeType: c.scope_type, scopeId: c.scope_id, authMode: c.auth_mode, environment: c.environment,
   wif: c.auth_mode === 'wif' ? c.wif : null, keyHint: c.auth_mode === 'key' ? c.key_hint : null,
+  usage: { enabled: c.usage_enabled, lookbackDays: c.usage_lookback_days, dataAccess: c.usage_data_access, analyzedAt: c.usage_analyzed_at },
   status: c.status, detail: c.status_detail, lastScanAt: c.last_scan_at, nextScanAt: c.next_scan_at, scanning: !!(c.lease_until && new Date(c.lease_until) > new Date()), progress: c.progress,
   ...counts,
 });
@@ -60,16 +69,19 @@ gcp.get('/gcp/connections', requirePerm('view'), unscoped, wrap(async (req, res)
            (SELECT count(*)::int FROM gcp_projects p WHERE p.connection_id = x.connection_id) AS projects FROM gcp_principals x GROUP BY connection_id`),
   ]);
   const by = new Map(counts.rows.map((r) => [r.connection_id, r]));
-  res.json({ items: rows.rows.map((c) => view(c, { projects: by.get(c.id)?.projects || 0, serviceAccounts: by.get(c.id)?.sas || 0, high: by.get(c.id)?.high || 0, principals: by.get(c.id)?.principals || 0 })), awsMode: config.awsMode });
+  const usage = await usageProgress();
+  res.json({ items: rows.rows.map((c) => view(c, { projects: by.get(c.id)?.projects || 0, serviceAccounts: by.get(c.id)?.sas || 0, high: by.get(c.id)?.high || 0, principals: by.get(c.id)?.principals || 0,
+    usageProgress: usage.get(c.id) || null })), awsMode: config.awsMode });
 }));
 
 /** The gcloud commands for a scope, with federation pinned to the AWS role this app's worker runs as. */
 gcp.get('/gcp/onboarding', requirePerm('accounts'), unscoped, wrap(async (req, res) => {
   const q = z.object({ scopeType: z.enum(['organization', 'folder', 'project']).default('organization'), scopeId: z.string().max(40).optional(), mode: z.enum(['wif', 'key']).default('wif'),
-    home: z.string().max(40).optional(), homeNumber: z.string().max(20).optional() }).parse(req.query);
+    home: z.string().max(40).optional(), homeNumber: z.string().max(20).optional(),
+    usage: z.enum(['0', '1']).optional(), dataAccess: z.enum(['0', '1']).optional() }).parse(req.query);
   const w = (await query(`SELECT aws_identity FROM workers WHERE aws_identity IS NOT NULL ORDER BY heartbeat_at DESC LIMIT 1`)).rows[0];
   const aws = awsRoleOf(config.scanner.principalArn || w?.aws_identity?.arn);
-  res.json({ ...gcpSnippets({ ...q, home: q.home || undefined, homeNumber: q.homeNumber || undefined, aws }), aws });
+  res.json({ ...gcpSnippets({ ...q, home: q.home || undefined, homeNumber: q.homeNumber || undefined, aws, usage: q.usage === '1', dataAccess: q.dataAccess === '1' }), aws });
 }));
 
 /** Try the credentials and the scope before saving: who we are, and that the scope can be read. */
@@ -100,9 +112,12 @@ gcp.post('/gcp/connections', requirePerm('accounts'), unscoped, wrap(async (req,
   const env = b.environment ? resolveEnvironment(b.environment) : defaultEnvironment();
   if (!isEnvironment(env)) return res.status(400).json({ error: 'invalid', message: 'Pick one of the environments.' });
   try {
-    const c = (await query(`INSERT INTO gcp_connections(name, scope_type, scope_id, auth_mode, wif, key_enc, key_hint, environment, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [b.name, b.scopeType, b.scopeId, b.authMode, b.authMode === 'wif' ? JSON.stringify({ ...b.wif, serviceAccount: b.wif.serviceAccount || '' }) : null, key?.enc || null, key?.hint || null, env, req.user.id])).rows[0];
-    await audit(req, 'gcp.connect', { type: 'gcp', id: c.id }, { name: b.name, scope: `${b.scopeType}/${b.scopeId}`, auth: b.authMode });
+    const u = b.usage || { enabled: false, lookbackDays: 30, dataAccess: false };
+    const c = (await query(`INSERT INTO gcp_connections(name, scope_type, scope_id, auth_mode, wif, key_enc, key_hint, environment, created_by, usage_enabled, usage_lookback_days, usage_data_access)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [b.name, b.scopeType, b.scopeId, b.authMode, b.authMode === 'wif' ? JSON.stringify({ ...b.wif, serviceAccount: b.wif.serviceAccount || '' }) : null, key?.enc || null, key?.hint || null, env, req.user.id,
+        u.enabled, u.lookbackDays, u.dataAccess])).rows[0];
+    await audit(req, 'gcp.connect', { type: 'gcp', id: c.id }, { name: b.name, scope: `${b.scopeType}/${b.scopeId}`, auth: b.authMode, usage: u });
     clearCache();
     res.status(201).json(view(c));
   } catch (e) {
@@ -121,9 +136,20 @@ gcp.patch('/gcp/connections/:id', requirePerm('accounts'), unscoped, wrap(async 
   if (next.auth_mode === 'key' && !next.key_enc) return res.status(400).json({ error: 'invalid', message: 'Paste the service account key.' });
   if (next.auth_mode === 'wif' && !next.wif) return res.status(400).json({ error: 'invalid', message: 'Fill in the federation details.' });
   const accessChanged = next.auth_mode !== c.auth_mode || JSON.stringify(next.wif) !== JSON.stringify(c.wif) || !!b.key;
-  await query(`UPDATE gcp_connections SET name=$2, environment=$3, auth_mode=$4, wif=$5, key_enc=$6, key_hint=$7, next_scan_at = CASE WHEN $8 THEN now() ELSE next_scan_at END WHERE id=$1`,
-    [id, next.name, next.environment, next.auth_mode, next.auth_mode === 'wif' ? JSON.stringify(next.wif) : null, next.auth_mode === 'key' ? next.key_enc : null, next.auth_mode === 'key' ? next.key_hint : null, accessChanged]);
-  await audit(req, 'gcp.update', { type: 'gcp', id }, { name: next.name, environment: next.environment, auth: next.auth_mode, keyReplaced: !!b.key });
+  const u = b.usage ? { enabled: b.usage.enabled, lookbackDays: b.usage.lookbackDays, dataAccess: b.usage.dataAccess } : { enabled: c.usage_enabled, lookbackDays: c.usage_lookback_days, dataAccess: c.usage_data_access };
+  const usageChanged = u.enabled !== c.usage_enabled || u.lookbackDays !== c.usage_lookback_days || u.dataAccess !== c.usage_data_access;
+  await query(`UPDATE gcp_connections SET name=$2, environment=$3, auth_mode=$4, wif=$5, key_enc=$6, key_hint=$7, next_scan_at = CASE WHEN $8 THEN now() ELSE next_scan_at END,
+                 usage_enabled=$9, usage_lookback_days=$10, usage_data_access=$11 WHERE id=$1`,
+    [id, next.name, next.environment, next.auth_mode, next.auth_mode === 'wif' ? JSON.stringify(next.wif) : null, next.auth_mode === 'key' ? next.key_enc : null, next.auth_mode === 'key' ? next.key_hint : null, accessChanged,
+      u.enabled, u.lookbackDays, u.dataAccess]);
+  if (usageChanged) {
+    // turned on: cursors for every known project, reading starts within seconds; a wider lookback resumes the backfill.
+    // Turned off: reading stops, what was read stays, and the identities lose their usage counts until it is on again.
+    await syncCursors(id);
+    if (accessChanged) await query(`UPDATE gcp_log_cursors k SET run_after = now(), errors_in_row = 0 FROM gcp_usage_projects u WHERE u.id = k.project_ref AND u.connection_id = $1`, [id]);
+    await analyzeUsage(id);
+  } else if (accessChanged) await query(`UPDATE gcp_log_cursors k SET run_after = now(), errors_in_row = 0 FROM gcp_usage_projects u WHERE u.id = k.project_ref AND u.connection_id = $1`, [id]);
+  await audit(req, 'gcp.update', { type: 'gcp', id }, { name: next.name, environment: next.environment, auth: next.auth_mode, keyReplaced: !!b.key, ...(usageChanged ? { usage: u } : {}) });
   clearCache();
   res.json(view((await query('SELECT * FROM gcp_connections WHERE id=$1', [id])).rows[0]));
 }));
@@ -171,7 +197,8 @@ gcp.get('/gcp/projects', requirePerm('view'), unscoped, wrap(async (req, res) =>
 const KIND_LABEL = { serviceAccount: 'Service account', user: 'User', group: 'Group', domain: 'Domain', public: 'Public', federated: 'Federated identity', gke: 'GKE workload', deleted: 'Deleted', other: 'Other' };
 const row = (p) => ({ id: p.id, member: p.member, kind: p.kind, kindLabel: KIND_LABEL[p.kind] || p.kind, email: p.email, name: p.display_name, project: p.project_id, uniqueId: p.unique_id,
   disabled: p.disabled, managed: p.managed_by === 'google', risk: p.risk, riskScore: p.risk_score, reasons: p.risk_reasons, permissions: p.permissions, reach: p.reach,
-  roles: p.roles.length, keys: p.keys.filter((k) => !k.disabled).length, sources: summarizeSources(p.sources), origin: p.origin, connection: p.connection_id });
+  roles: p.roles.length, keys: p.keys.filter((k) => !k.disabled).length, sources: summarizeSources(p.sources), origin: p.origin, connection: p.connection_id,
+  usage: p.used_count == null ? null : { used: p.used_count, unused: p.unused_count, unconfirmed: p.unconfirmed_count, lastActivity: p.last_activity_at } });
 function summarizeSources(list) {
   const by = {};
   for (const s of list || []) by[s.via] = (by[s.via] || 0) + 1;
@@ -182,7 +209,7 @@ function summarizeSources(list) {
 gcp.get('/gcp/principals', requirePerm('view'), unscoped, wrap(async (req, res) => {
   const q = z.object({ q: z.string().max(200).optional(), kind: z.string().max(40).optional(), risk: z.enum(['High', 'Medium', 'Low']).optional(), project: z.string().max(60).optional(),
     source: z.enum(['key', 'wif', 'aws', 'impersonate', 'gke']).optional(), hideManaged: z.enum(['1', '0']).optional(),
-    sort: z.enum(['risk', 'permissions', 'name', 'reach']).default('risk'), limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(req.query);
+    sort: z.enum(['risk', 'permissions', 'name', 'reach', 'unused']).default('risk'), limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).default(0) }).parse(req.query);
   const w = ['TRUE'], p = [];
   const add = (sql, v) => { p.push(v); w.push(sql.replace('?', `$${p.length}`)); };
   if (q.q) add(`(member ILIKE ? OR coalesce(display_name,'') ILIKE $${p.length + 1})`, `%${q.q.replace(/[%_]/g, '\\$&')}%`);
@@ -195,7 +222,8 @@ gcp.get('/gcp/principals', requirePerm('view'), unscoped, wrap(async (req, res) 
   if (q.source === 'impersonate') w.push(`sources @> '[{"via":"token"}]'`);
   if (q.source === 'gke') w.push(`sources @> '[{"via":"gke"}]'`);
   if (q.hideManaged === '1') w.push('managed_by IS NULL');
-  const order = { risk: `CASE risk WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, risk_score DESC, member`, permissions: 'permissions DESC, member', name: 'coalesce(email, member)', reach: 'cardinality(reach) DESC, permissions DESC' }[q.sort];
+  const order = { risk: `CASE risk WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END, risk_score DESC, member`, permissions: 'permissions DESC, member', name: 'coalesce(email, member)', reach: 'cardinality(reach) DESC, permissions DESC',
+    unused: 'unused_count DESC NULLS LAST, permissions DESC, member' }[q.sort];
   const where = w.join(' AND ');
   // an organization and a project inside it may both be connected: the first copy of each member is shown
   const base = `SELECT DISTINCT ON (member) * FROM gcp_principals WHERE ${where} ORDER BY member, analyzed_at DESC`;
@@ -227,6 +255,58 @@ gcp.get('/gcp/principals/:id', requirePerm('view'), unscoped, wrap(async (req, r
     aws: { into: links.awsToGcp.filter((l) => l.gcpPrincipal === p.id), out: links.gcpToAws.filter((l) => l.gcpPrincipal === p.id) },
   });
 }));
+
+/** What one identity used, against what it is granted. Long lists (Owner holds thousands) come back capped per status. */
+gcp.get('/gcp/principals/:id/usage', requirePerm('view'), unscoped, wrap(async (req, res) => {
+  const id = uuid.parse(req.params.id);
+  const p = (await query('SELECT id, member, roles, connection_id FROM gcp_principals WHERE id=$1', [id])).rows[0]; if (!p) throw NotFound();
+  const u = await principalUsage(p);
+  if (!u.enabled) return res.json(u);
+  const CAP = 1000, counts = {}, shown = {};
+  const permissions = u.permissions.filter((x) => { counts[x.status] = (counts[x.status] || 0) + 1; return (shown[x.status] = (shown[x.status] || 0) + 1) <= CAP; });
+  const progress = (await usageProgress(p.connection_id)).get(p.connection_id) || null;
+  res.json({ ...u, permissions, counts, capped: Object.values(counts).some((n) => n > CAP), progress });
+}));
+
+/** Every project's reading of one connection: how far back, how fresh, errors, and the database space it takes. */
+gcp.get('/gcp/connections/:id/usage', requirePerm('view'), unscoped, wrap(async (req, res) => {
+  const id = uuid.parse(req.params.id);
+  const c = (await query('SELECT * FROM gcp_connections WHERE id=$1', [id])).rows[0]; if (!c) throw NotFound();
+  const [cursors, storage] = await Promise.all([
+    query(`SELECT u.id AS ref, u.project_id, k.log, k.hi_time, k.lo_time, k.run_after, k.lease_until, k.entries_read, k.pages_read, k.windows_read, k.last_error, k.error_at, k.errors_in_row
+             FROM gcp_usage_projects u LEFT JOIN gcp_log_cursors k ON k.project_ref = u.id WHERE u.connection_id = $1 ORDER BY u.project_id, k.log`, [id]),
+    usageStorage({ connectionId: id }),
+  ]);
+  const bytes = new Map(storage.items.map((i) => [i.projectId, i]));
+  const now = Date.now(), by = new Map();
+  for (const r of cursors.rows) {
+    const x = by.get(r.project_id) || by.set(r.project_id, { projectId: r.project_id, logs: [], bytes: bytes.get(r.project_id)?.bytes || 0, rows: bytes.get(r.project_id)?.dailyRows || 0 }).get(r.project_id);
+    if (r.log) x.logs.push({ log: r.log, readFrom: r.lo_time, readTo: r.hi_time, coverage: coverage(r, { now, lookbackDays: c.usage_lookback_days }), entries: r.entries_read, pages: r.pages_read,
+      reading: !!(r.lease_until && new Date(r.lease_until) > new Date()), nextAt: r.run_after, error: r.last_error, errorAt: r.error_at, errorsInRow: r.errors_in_row,
+      fresh: r.hi_time ? now - new Date(r.hi_time).getTime() <= LAG_MS + 60 * 60e3 : false });
+  }
+  res.json({ enabled: c.usage_enabled, lookbackDays: c.usage_lookback_days, dataAccess: c.usage_data_access, analyzedAt: c.usage_analyzed_at,
+    projects: [...by.values()], storage: { total: storage.items.reduce((a, i) => a + i.bytes, 0), bytesPerRow: storage.bytesPerRow } });
+}));
+
+/** Per connection: projects read, how much of the lookback is covered, errors, bytes stored. One query and the counters. */
+export async function usageProgress(connectionId = null) {
+  const [rows, storage] = await Promise.all([
+    query(`SELECT u.connection_id, c.usage_lookback_days, k.* FROM gcp_log_cursors k JOIN gcp_usage_projects u ON u.id = k.project_ref JOIN gcp_connections c ON c.id = u.connection_id
+            ${connectionId ? 'WHERE u.connection_id = $1' : ''}`, connectionId ? [connectionId] : []),
+    usageStorage(connectionId ? { connectionId } : {}),
+  ]);
+  const out = new Map(), now = Date.now();
+  for (const r of rows.rows) {
+    const x = out.get(r.connection_id) || out.set(r.connection_id, { cursors: 0, complete: 0, coverage: 0, entries: 0, errors: 0, reading: 0, bytes: 0 }).get(r.connection_id);
+    const cov = coverage(r, { now, lookbackDays: r.usage_lookback_days });
+    x.cursors++; x.coverage += cov; x.entries += Number(r.entries_read); if (cov >= 0.999) x.complete++; if (r.errors_in_row > 0) x.errors++;
+    if (r.lease_until && new Date(r.lease_until) > new Date()) x.reading++;
+  }
+  for (const x of out.values()) x.coverage = x.cursors ? x.coverage / x.cursors : 0;
+  for (const i of storage.items) { const x = out.get(i.connection) || out.set(i.connection, { cursors: 0, complete: 0, coverage: 0, entries: 0, errors: 0, reading: 0, bytes: 0 }).get(i.connection); x.bytes += i.bytes; }
+  return out;
+}
 
 /** A whole permission list, on request (owner roles carry thousands). */
 gcp.get('/gcp/roles/permissions', requirePerm('view'), unscoped, wrap(async (req, res) => {

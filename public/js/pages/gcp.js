@@ -1,5 +1,6 @@
 // Google Cloud pages: connecting an organization, folder or project; the Identities page's Google Cloud list; one identity.
-// Permissions only for now: who can do what, and where they can come from. No audit logs are read.
+// Who can do what and where they can come from, from IAM policies; with role usage turned on for a connection, also
+// what was actually used, from the audit logs of every project.
 import { h, get, post, api, num, ago, fmtDate, toast, copy, riskBadge, confirmDialog, loadEnvironments, envName, tile, pager, searchBox, syncUrl, urlSet } from '../lib.js';
 import { session, go } from '../main.js';
 import { identityShell, section } from './identity.js';
@@ -31,7 +32,7 @@ export async function gcpSection(ctx) {
   await loadEnvironments();
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'ACCOUNTS · GOOGLE CLOUD'), h('h1', null, 'Google Cloud organizations and projects'),
-      h('p', { class: 'muted' }, 'Read-only: IAM policies, service accounts, keys and workload identity federation. Who can do what and where they can come from; audit logs are not read yet.')),
+      h('p', { class: 'muted' }, 'Read-only: IAM policies, service accounts, keys and workload identity federation: who can do what and where they can come from. Turn on role usage on a connection to also read its audit logs and see what was actually used.')),
     can('accounts') && h('a', { class: 'btn primary', href: '#/gcp/new' }, 'Connect Google Cloud')),
     r.items.length ? r.items.map((c) => connectionCard(c, ctx)) : h('div', { class: 'card empty' }, 'No Google Cloud connected yet.'));
 }
@@ -51,6 +52,9 @@ function connectionCard(c, ctx) {
   };
   const det = h('details', null, h('summary', { class: 'btn sm' }, `Projects (${c.projects})`), projBox);
   det.addEventListener('toggle', () => { if (det.open) loadProjects(); });
+  const usageBox = h('div', { class: 'card-b' });
+  const usageDet = c.usage.enabled ? h('details', null, h('summary', { class: 'btn sm' }, 'Role usage by project'), usageBox) : null;
+  usageDet?.addEventListener('toggle', () => { if (usageDet.open) usageTable(c, usageBox); });
   const scope = `${c.scopeType} ${c.scopeId}`;
   return h('section', { class: 'card' },
     h('div', { class: 'card-h' }, h('div', { class: 'row' }, h('h2', null, c.name), h('span', { class: `badge ${STATUS[c.status]}` }, c.scanning ? 'scanning' : c.status), h('span', { class: 'small muted mono' }, `${scope} · ${envName(c.environment)}`)),
@@ -67,8 +71,43 @@ function connectionCard(c, ctx) {
         h('dt', null, 'Access'), h('dd', null, c.authMode === 'wif' ? 'Workload identity federation from this app’s AWS role' : 'Service account key',
           h('span', { class: 'mono small muted' }, c.authMode === 'wif' ? ` · pool ${c.wif?.poolId} / ${c.wif?.providerId}${c.wif?.serviceAccount ? ` → ${c.wif.serviceAccount}` : ''}` : ` · ${c.keyHint || 'missing'}`)),
         h('dt', null, 'Found'), h('dd', null, `${num(c.projects)} projects · ${num(c.serviceAccounts)} service accounts · ${num(c.principals)} identities`, c.high ? h('span', { class: 'badge b-high', style: 'margin-left:8px' }, `${c.high} high risk`) : null),
-        h('dt', null, 'Last scan'), h('dd', null, c.lastScanAt ? `${fmtDate(c.lastScanAt)} (${ago(c.lastScanAt)})` : 'not yet', c.detail?.skipped?.length ? h('span', { class: 'small muted' }, ` · ${c.detail.skipped.length} policies could not be read`) : null)),
-      det));
+        h('dt', null, 'Last scan'), h('dd', null, c.lastScanAt ? `${fmtDate(c.lastScanAt)} (${ago(c.lastScanAt)})` : 'not yet', c.detail?.skipped?.length ? h('span', { class: 'small muted' }, ` · ${c.detail.skipped.length} policies could not be read`) : null),
+        h('dt', null, 'Role usage'), h('dd', null, usageLine(c))),
+      h('div', { class: 'row' }, det, usageDet)));
+}
+
+const gb = (b) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)} GB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round((b || 0) / 1024))} KB`);
+const pct = (x) => `${Math.floor((x || 0) * 100)}%`;
+
+/** One line: off, waiting for the first scan, or how far the audit logs have been read and the space they take. */
+function usageLine(c) {
+  if (!c.usage.enabled) return h('span', { class: 'muted' }, 'Off. ', can('accounts') ? h('a', { href: `#/gcp/${c.id}/edit` }, 'Turn on') : null, ' to read audit logs and see what each identity actually used.');
+  const u = c.usageProgress;
+  if (!u?.cursors) return h('span', null, `On, ${c.usage.lookbackDays} days${c.usage.dataAccess ? ' with Data Access' : ''}. Reading starts after the next scan lists the projects.`);
+  const done = u.complete === u.cursors;
+  return h('span', null,
+    done ? `${c.usage.lookbackDays} days read in all ${u.cursors} project logs` : `Backfilling: ${pct(u.coverage)} of ${c.usage.lookbackDays} days · ${u.complete} of ${u.cursors} project logs complete`,
+    ` · ${num(u.entries)} entries · ${gb(u.bytes)} in the database`,
+    u.reading ? h('span', { class: 'small muted' }, ` · ${u.reading} reading now`) : null,
+    u.errors ? h('span', { class: 'badge b-high', style: 'margin-left:8px' }, `${u.errors} with errors`) : null);
+}
+
+/** Every project's audit log reading: how far back, how fresh, entries, errors, and database space. */
+async function usageTable(c, box) {
+  let r;
+  try { r = await get(`/gcp/connections/${c.id}/usage`); } catch (x) { box.replaceChildren(h('div', { class: 'alert bad' }, x.message)); return; }
+  const LOG = { activity: 'Admin Activity', data_access: 'Data Access' };
+  const bar = (v) => { const i = h('i'); i.style.width = `${Math.max(1, Math.round(v * 100))}%`; return h('span', { class: 'db-bar', role: 'img', 'aria-label': pct(v) }, i); };
+  const rows = r.projects.flatMap((p) => (p.logs.length ? p.logs : [{ log: null }]).map((l, i) => h('tr', null,
+    i === 0 ? h('td', { rowspan: Math.max(1, p.logs.length) }, h('div', { class: 'mono small' }, p.projectId), h('div', { class: 'tiny muted' }, `${gb(p.bytes)} · ${num(p.rows)} day rows`)) : null,
+    h('td', { class: 'small' }, l.log ? LOG[l.log] : h('span', { class: 'muted' }, 'not read any more')),
+    h('td', { class: 'small' }, l.log ? [bar(l.coverage), h('div', { class: 'tiny muted' }, l.readFrom ? `${pct(l.coverage)} · from ${fmtDate(l.readFrom)}` : 'not started')] : null),
+    h('td', { class: 'small' }, l.readTo ? h('span', { class: l.fresh ? '' : 'warn-text' }, ago(l.readTo)) : '—'),
+    h('td', { class: 'small' }, l.log ? num(l.entries) : ''),
+    h('td', { class: 'small' }, l.error ? h('span', { class: 'err', title: l.error }, `${l.error.slice(0, 120)}${l.errorsInRow > 1 ? ` (${l.errorsInRow} times)` : ''}`) : l.reading ? h('span', null, h('span', { class: 'spin' }), ' reading') : l.log ? h('span', { class: 'muted' }, l.coverage >= 0.999 ? `next ${ago(l.nextAt)}` : 'queued') : ''))));
+  box.replaceChildren(
+    h('p', { class: 'small muted' }, `Read with the Logging API, project by project, newest first then back ${r.lookbackDays} days. Admin Activity logs are kept free for 400 days in every project’s _Required bucket. Only per-day counts are stored: ${gb(r.storage.total)} for this connection, about ${r.storage.bytesPerRow.daily} bytes a row.`),
+    h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Project', 'Log', 'Lookback read', 'Up to', 'Entries', 'Status'].map((x) => h('th', null, x)))), h('tbody', null, rows))));
 }
 
 // ---------------------------------------------------------------- connect / edit
@@ -80,7 +119,8 @@ export async function gcpConnectPage(ctx, id = null) {
   ctx.setCrumbs(h('a', { href: GCP_CONNECTIONS }, 'Accounts · Google Cloud'), editing ? `Edit ${existing.name}` : 'Connect Google Cloud');
   const m = { name: existing?.name || '', scopeType: existing?.scopeType || 'organization', scopeId: existing?.scopeId || '', environment: existing?.environment || envList[0].id,
     authMode: existing?.authMode || 'wif', home: '', projectNumber: existing?.wif?.projectNumber || '', poolId: existing?.wif?.poolId || 'curious-monkey', providerId: existing?.wif?.providerId || 'aws-scanner',
-    serviceAccount: existing?.wif?.serviceAccount || '', key: '' };
+    serviceAccount: existing?.wif?.serviceAccount || '', key: '',
+    usage: existing?.usage?.enabled || false, lookbackDays: existing?.usage?.lookbackDays || 30, dataAccess: existing?.usage?.dataAccess || false };
   const err = h('div', { class: 'err', role: 'alert' }), result = h('div'), cmds = h('div', { class: 'stack' });
   const input = (k, attrs = {}) => { const i = h('input', { value: m[k], ...attrs }); i.addEventListener('input', () => { m[k] = i.value.trim(); refreshCmds(); }); return i; };
   const choice = (k, opts, onPick) => h('div', { class: 'pill-bar', role: 'radiogroup' }, opts.map(([v, l]) => {
@@ -89,7 +129,8 @@ export async function gcpConnectPage(ctx, id = null) {
   let t;
   const refreshCmds = () => { clearTimeout(t); t = setTimeout(async () => {
     try {
-      const q = new URLSearchParams({ scopeType: m.scopeType, mode: m.authMode, ...(m.scopeId ? { scopeId: m.scopeId } : {}), ...(m.home ? { home: m.home } : {}), ...(m.projectNumber ? { homeNumber: m.projectNumber } : {}) });
+      const q = new URLSearchParams({ scopeType: m.scopeType, mode: m.authMode, ...(m.scopeId ? { scopeId: m.scopeId } : {}), ...(m.home ? { home: m.home } : {}), ...(m.projectNumber ? { homeNumber: m.projectNumber } : {}),
+        ...(m.usage ? { usage: '1', ...(m.dataAccess ? { dataAccess: '1' } : {}) } : {}) });
       const s = await get(`/gcp/onboarding?${q}`);
       if (!m.serviceAccount && m.home) m.serviceAccount = s.serviceAccount;
       cmds.replaceChildren(
@@ -97,7 +138,7 @@ export async function gcpConnectPage(ctx, id = null) {
           : 'The worker has not reported its AWS identity yet, so the role in the commands is a placeholder. Start a worker (or set SCANNER_PRINCIPAL_ARN) and reload.'),
         ...s.steps.map((st, i) => h('div', { class: 'stack', style: 'gap:6px' }, h('div', { class: 'row' }, h('b', null, `${i + 1}. ${st.title}`), h('span', { class: 'spacer' }), h('button', { class: 'btn sm', type: 'button', onClick: () => copy(st.code) }, 'Copy')),
           h('pre', { class: 'code' }, st.code))),
-        h('p', { class: 'small muted' }, `The role grants ${s.permissions.length} read permissions: IAM policies, service accounts and key metadata, roles, workload identity pools. It cannot read data, secrets or key material, and cannot change anything.`));
+        h('p', { class: 'small muted' }, `The role grants ${s.permissions.length} read permissions: IAM policies, service accounts and key metadata, roles, workload identity pools${s.usage ? ', and log entries (to read the audit logs)' : ''}. It cannot read data, secrets or key material, and cannot change anything.`));
     } catch (x) { cmds.replaceChildren(h('div', { class: 'alert bad' }, x.message)); }
   }, 250); };
 
@@ -128,7 +169,8 @@ export async function gcpConnectPage(ctx, id = null) {
             h('div', { class: 'field' }, h('label', null, 'Pool ID', input('poolId', { class: 'mono' }))),
             h('div', { class: 'field' }, h('label', null, 'Provider ID', input('providerId', { class: 'mono' }))))
             : h('div', { class: 'field' }, h('label', null, 'Key file', keyArea), file, h('span', { class: 'hint' }, 'Stored encrypted and never shown again. A key works from anywhere until it is deleted; rotate it, or move to federation.')))),
-      h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, '3. Run these in Google Cloud'), h('span', { class: 'small muted' }, 'Cloud Shell or any gcloud with rights to grant roles at the scope')), h('div', { class: 'card-b' }, cmds)),
+      usageCard(),
+      h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, '4. Run these in Google Cloud'), h('span', { class: 'small muted' }, 'Cloud Shell or any gcloud with rights to grant roles at the scope')), h('div', { class: 'card-b' }, cmds)),
       h('section', { class: 'card' }, h('div', { class: 'card-b stack' }, err, result,
         h('div', { class: 'row' },
           h('button', { class: 'btn', type: 'button', onClick: test }, 'Test connection'), h('span', { class: 'spacer' }),
@@ -136,7 +178,24 @@ export async function gcpConnectPage(ctx, id = null) {
           h('button', { class: 'btn primary', type: 'button', onClick: save }, editing ? 'Save changes' : 'Connect and scan')))));
     refreshCmds();
   }
+  function usageCard() {
+    const on = h('input', { type: 'checkbox', checked: m.usage });
+    on.addEventListener('change', () => { m.usage = on.checked; draw(); });
+    const days = h('input', { type: 'number', min: 1, max: 400, step: 1, value: m.lookbackDays, disabled: !m.usage, style: 'max-width:8em' });
+    days.addEventListener('input', () => { m.lookbackDays = Math.max(1, Math.min(400, Math.round(Number(days.value) || 30))); });
+    const da = h('input', { type: 'checkbox', checked: m.dataAccess, disabled: !m.usage });
+    da.addEventListener('change', () => { m.dataAccess = da.checked; refreshCmds(); });
+    return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, '3. Role usage from audit logs'), h('span', { class: 'small muted' }, 'Optional, off by default')),
+      h('div', { class: 'card-b stack' },
+        h('label', { class: 'check' }, on, h('span', null, h('b', null, 'Read audit logs to see what each identity actually used'))),
+        h('p', { class: 'small muted' }, 'Each project’s Admin Activity log is read with the Logging API (entries.list), newest first, then back as far as you choose; afterwards only new entries. Those logs are always on and kept free for 400 days, with or without a log sink. Only per-day counts of who used which permission are stored, never the entries. Needs logging.logEntries.list: the commands below include it.'),
+        h('div', { class: 'grid2' },
+          h('div', { class: 'field' }, h('label', null, 'Look back (days)', days), h('span', { class: 'hint' }, 'Up to 400. Longer means a longer first backfill; widening it later reads only the extra days.')),
+          h('div', { class: 'field' }, h('label', { class: 'check' }, da, h('span', null, 'Also read Data Access logs')),
+            h('span', { class: 'hint' }, 'Reads (get, list, reading data) appear only there, and only for services where you enabled them; without them read permissions show as unconfirmed rather than unused. Needs logging.privateLogEntries.list.')))));
+  }
   const body = () => ({ name: m.name, scopeType: m.scopeType, scopeId: m.scopeId, environment: m.environment, authMode: m.authMode,
+    usage: { enabled: m.usage, lookbackDays: m.lookbackDays, dataAccess: m.dataAccess },
     ...(m.authMode === 'wif' ? { wif: { projectNumber: m.projectNumber, poolId: m.poolId, providerId: m.providerId, serviceAccount: m.serviceAccount } } : {}), ...(m.key ? { key: m.key } : {}) });
   async function test(e) {
     e.target.disabled = true; err.textContent = ''; result.replaceChildren(h('div', { class: 'alert' }, h('span', { class: 'spin' }), ' Signing in to Google Cloud and reading the scope…'));
@@ -157,7 +216,7 @@ export async function gcpConnectPage(ctx, id = null) {
   }
   draw();
   return h('div', { class: 'stack-lg' }, h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'GOOGLE CLOUD'), h('h1', null, editing ? `Edit ${existing.name}` : 'Connect Google Cloud'),
-    h('p', { class: 'muted' }, 'Curious Monkey reads IAM only: policies, service accounts, key metadata, workload identity federation. It shows who can do what and where they can come from, including paths from and to your AWS accounts.'))), box);
+    h('p', { class: 'muted' }, 'Curious Monkey reads IAM: policies, service accounts, key metadata, workload identity federation. It shows who can do what and where they can come from, including paths from and to your AWS accounts; with role usage on, also what was actually used.'))), box);
 }
 
 // ---------------------------------------------------------------- Roles page: Google Cloud tab
@@ -212,7 +271,7 @@ export async function gcpRolesTab(ctx) {
       h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Risk' }, ...['High', 'Medium', 'Low'].map((x) => pill(F.risks, x, x))),
       sel('source', [['', 'Any way in'], ['key', 'Has keys'], ['wif', 'Federated'], ['aws', 'From AWS'], ['impersonate', 'Impersonated'], ['gke', 'From GKE']], 'Way in'),
       sel('project', [['', 'All projects'], ...(fx?.projects || []).map((p) => [p.projectId, `${p.projectId} · ${envName(p.environment)}`])], 'Project'),
-      sel('sort', [['risk', 'Riskiest first'], ['permissions', 'Most permissions'], ['reach', 'Widest reach'], ['name', 'Name']], 'Sort'),
+      sel('sort', [['risk', 'Riskiest first'], ['permissions', 'Most permissions'], ['unused', 'Most unused'], ['reach', 'Widest reach'], ['name', 'Name']], 'Sort'),
       h('label', { class: 'check small' }, managed, h('span', null, 'Hide Google-managed service agents')), count);
   }
   const ways = (x) => {
@@ -231,7 +290,9 @@ export async function gcpRolesTab(ctx) {
     h('tbody', null, items.map((x) => h('tr', { class: 'link', tabindex: '0', onClick: () => go(`#/identities/gcp/${x.id}`), onKeydown: (e) => { if (e.key === 'Enter') go(`#/identities/gcp/${x.id}`); } },
       h('td', null, h('div', { class: 'name' }, nameOf(x)), h('div', { class: 'tiny muted' }, [x.kindLabel, x.project, x.name, x.managed ? 'Google-managed' : null, x.disabled ? 'disabled' : null].filter(Boolean).join(' · '))),
       h('td', null, riskBadge(x.risk)),
-      h('td', { class: 'nowrap small' }, `${num(x.permissions)} permissions`, h('div', { class: 'tiny muted' }, `${x.roles} role${x.roles === 1 ? '' : 's'} · ${x.reach.length} project${x.reach.length === 1 ? '' : 's'}`)),
+      h('td', { class: 'nowrap small' }, `${num(x.permissions)} permissions`, h('div', { class: 'tiny muted' }, `${x.roles} role${x.roles === 1 ? '' : 's'} · ${x.reach.length} project${x.reach.length === 1 ? '' : 's'}`),
+        x.usage && h('div', { class: 'tiny', title: 'From the audit logs: used, never used, and reads that cannot be confirmed without Data Access logs' },
+          h('b', null, `${num(x.usage.used)} used`), h('span', { class: 'muted' }, ` · ${num(x.usage.unused)} unused${x.usage.unconfirmed ? ` · ${num(x.usage.unconfirmed)} unconfirmed` : ''}`))),
       h('td', null, h('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, ...ways(x))),
       h('td', { class: 'small' }, x.reasons.filter((r) => r.severity !== 'info').slice(0, 2).map((r) => h('div', null, h('span', { class: `dot ${SEV[r.severity]}` }), r.title)), x.reasons.filter((r) => r.severity !== 'info').length > 2 ? h('div', { class: 'tiny muted' }, `+${x.reasons.filter((r) => r.severity !== 'info').length - 2} more`) : null))))));
 
@@ -239,14 +300,54 @@ export async function gcpRolesTab(ctx) {
   ctx.onLeave(() => search?.cancel());
   return h('div', { class: 'stack-lg' },
     h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'IDENTITIES · GOOGLE CLOUD'), h('h1', null, 'Google Cloud identities'),
-      h('p', { class: 'muted' }, 'Service accounts, people, groups and federated identities: what IAM lets them do, and where they can come from. Read from IAM policies; activity is not read yet, so nothing here says what was actually used.')),
+      h('p', { class: 'muted' }, 'Service accounts, people, groups and federated identities: what IAM lets them do, and where they can come from. What was actually used shows for connections with role usage turned on.')),
     can('accounts') && h('div', { class: 'actions' }, h('a', { class: 'btn', href: GCP_CONNECTIONS }, 'Connections'))),
     tiles, h('section', { class: 'card' }, chips, list));
 }
 
+// ---------------------------------------------------------------- one identity: what it used
+const USE = { used: ['Used', 'b-green'], 'used-elsewhere': ['Used, not from its roles', 'b-neutral'], denied: ['Denied', 'b-high'], unused: ['Never used', 'b-medium'], unconfirmed: ['Unconfirmed', 'b-neutral'] };
+function usageNotice(u) {
+  const pr = u.progress;
+  const done = pr && pr.cursors && pr.complete === pr.cursors;
+  return h('p', { class: 'small muted' }, `Usage from the audit logs, last ${u.lookbackDays} days.`,
+    done ? '' : pr?.cursors ? ` The backfill is ${pct(pr.coverage)} done, so “never used” may still change.` : ' Reading has not started yet.',
+    u.readsKnown ? '' : ' Reads (get, list) are only in Data Access logs, which are not read, so they show as unconfirmed.');
+}
+function usageTab(u) {
+  let status = '';
+  const box = h('div'), filter = h('input', { type: 'search', placeholder: 'Filter permissions' });
+  const opts = [['', 'All'], ...Object.keys(USE).filter((k) => u.counts[k]).map((k) => [k, `${USE[k][0]} ${num(u.counts[k])}`])];
+  const chips = h('div', { class: 'pill-bar', role: 'group', 'aria-label': 'Status' }, opts.map(([key, label]) => {
+    const b = h('button', { type: 'button', class: 'chip', 'aria-pressed': String(status === key) }, label);
+    b.addEventListener('click', () => { status = key; chips.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); draw(); });
+    return b;
+  }));
+  const draw = () => {
+    const n = filter.value.toLowerCase();
+    const list = u.permissions.filter((x) => (!status || x.status === status) && (!n || x.permission.toLowerCase().includes(n)));
+    box.replaceChildren(h('div', { class: 'scroll' }, h('table', { class: 'small' },
+      h('thead', null, h('tr', null, ['Permission', 'Status', 'Calls', 'Last used', 'Projects', 'From role'].map((x) => h('th', null, x)))),
+      h('tbody', null, list.slice(0, 500).map((x) => h('tr', null, h('td', { class: 'mono' }, x.permission), h('td', null, h('span', { class: `badge ${USE[x.status][1]}` }, USE[x.status][0])),
+        h('td', null, x.count != null ? `${num(x.count)}${x.denied ? ` (+${num(x.denied)} denied)` : ''}` : '—'), h('td', null, x.last || '—'),
+        h('td', { class: 'tiny mono' }, (x.projects || []).join(', ')), h('td', { class: 'tiny muted' }, x.roles.map(shortRole).join(', ')))))),
+      list.length > 500 ? h('p', { class: 'small muted' }, `Showing 500 of ${num(list.length)}; filter to narrow.`) : null),
+    u.capped ? h('p', { class: 'small muted' }, 'Very long lists are cut at 1,000 per status.') : null);
+  };
+  filter.addEventListener('input', draw); draw();
+  // calls per day: one bar each
+  const max = Math.max(1, ...u.daily.map((d) => d.count + d.denied));
+  const bars = u.daily.length ? h('div', { class: 'row', role: 'img', 'aria-label': `Calls per day over ${u.daily.length} days`, style: 'align-items:flex-end;gap:2px;height:60px' },
+    u.daily.map((d) => { const b = h('span', { title: `${d.day}: ${num(d.count)} calls${d.denied ? `, ${num(d.denied)} denied` : ''}`, style: `flex:1;min-width:2px;background:var(--accent, #6b8afd);height:${Math.max(2, Math.round(((d.count + d.denied) / max) * 60))}px` }); return b; }))
+    : h('p', { class: 'muted small' }, 'No calls in the lookback.');
+  return h('div', { class: 'stack-lg' },
+    section('Calls per day', `Every permission check this identity made, across the connection’s projects, last ${u.lookbackDays} days.`, bars),
+    section('Permissions, used and not', 'What its roles grant against what the audit logs show. “Used, not from its roles” means it came through a group, a domain, or a role granted elsewhere.', h('div', { class: 'stack' }, h('div', { class: 'row' }, chips, filter), box)));
+}
+
 // ---------------------------------------------------------------- one identity
 export async function gcpPrincipalPage(ctx, id) {
-  const p = await get(`/gcp/principals/${id}`);
+  const [p, u] = await Promise.all([get(`/gcp/principals/${id}`), get(`/gcp/principals/${id}/usage`).catch(() => ({ enabled: false }))]);
   ctx.setCrumbs(h('a', { href: '#/identities?type=gcp' }, 'Identities'), 'Google Cloud', nameOf(p));
   const findings = p.reasons.length ? h('ul', { class: 'plain stack', style: 'gap:8px' }, p.reasons.map((r) => h('li', null, h('span', { class: `badge ${SEV[r.severity]}` }, r.severity), ' ', h('b', null, r.title), h('div', { class: 'small muted' }, r.detail))))
     : h('p', { class: 'muted' }, 'Nothing stands out.');
@@ -313,14 +414,18 @@ export async function gcpPrincipalPage(ctx, id) {
       p.uniqueId && h('span', { class: 'small muted mono', title: 'The ID AWS trust policies use for this service account' }, `unique ID ${p.uniqueId}`), p.managed && h('span', { class: 'badge b-neutral' }, 'Google-managed'), p.disabled && h('span', { class: 'badge b-high' }, 'disabled')],
     sub: [p.name && h('p', { class: 'muted' }, p.name), p.kind !== 'serviceAccount' && p.kind !== 'federated' && h('p', { class: 'mono small muted break' }, p.member)],
     actions: [h('a', { class: 'btn', href: '#/space' }, 'In Space')],
-    notices: [h('p', { class: 'small muted' }, 'Read from IAM policies. Google Cloud activity is not read yet, so nothing here says what was actually used.')],
+    notices: [u.enabled ? usageNotice(u) : h('p', { class: 'small muted' }, 'Read from IAM policies. Role usage is off for this connection, so nothing here says what was actually used.')],
     tabs: [
       ['overview', 'Overview', () => h('div', { class: 'stack-lg' },
         h('section', { class: 'tiles' }, tile('Permissions', num(p.permissions), `across ${p.roles.length} role${p.roles.length === 1 ? '' : 's'}`), tile('Reaches', num(p.reach.length), `project${p.reach.length === 1 ? '' : 's'}`),
           waysIn && tile('Ways in', num(p.sources.filter((x) => !x.wide).length), `${num(p.sources.filter((x) => x.wide).length)} more through wider roles`), p.kind === 'serviceAccount' && tile('Keys', num(keys.length), keys.length ? 'user-managed, long-lived' : 'none'),
-          tile('Can become', num(p.becomes.length), 'service accounts')),
+          tile('Can become', num(p.becomes.length), 'service accounts'),
+          u.enabled && tile('Used', num(u.counts.used || 0), `of ${num(p.permissions)} in ${u.lookbackDays} days`),
+          u.enabled && tile('Never used', num(u.counts.unused || 0), 'candidates to remove'),
+          u.enabled && (u.counts.unconfirmed || 0) > 0 && tile('Unconfirmed', num(u.counts.unconfirmed), 'reads: need Data Access logs')),
         section('Why this risk level', `From the last scan of ${p.connection?.name || 'its connection'}${p.connection?.last_scan_at ? `, ${ago(p.connection.last_scan_at)}` : ''}.`, findings), aws)],
       ['permissions', 'Permissions', () => h('div', { class: 'stack-lg' }, roles, becomes)],
+      u.enabled && ['usage', 'Usage', () => usageTab(u)],
       waysIn && ['credentials', p.kind === 'federated' ? 'Where it comes from' : 'Credentials and ways in', () => h('div', { class: 'stack-lg' }, comesFrom)],
     ].filter(Boolean),
   }).el;

@@ -127,3 +127,68 @@ test('analysis hash is stable and changes with the data', () => {
   const c = analyze(base({ policies: [policy(['ec2:DescribeInstances', 'ec2:RunInstances'])] }));
   assert.equal(a.analysisHash, b.analysisHash); assert.notEqual(a.analysisHash, c.analysisHash);
 });
+
+// ---------------------------------------------------------------- severities
+import { gapSeverity, wildcardSeverity } from '../src/analyzer/analyze.js';
+import { privilegeTier, isDataRead } from '../src/analyzer/sensitive.js';
+const sevOf = (r, cat, key) => r.flags.find((f) => f.category === cat && (!key || f.key === key))?.severity;
+
+test('an evidence gap is never high: the KMS case, data events, SQS, PassRole', () => {
+  // KMS used through another service: Access Advisor says used, no event names the action
+  const kms = analyze(base({ policies: [policy(['kms:Decrypt', 'kms:GenerateDataKey', 'kms:DescribeKey'], 'arn:aws:kms:ap-southeast-3:1:key/k')],
+    advisor: [{ service: 'kms', lastAuthenticated: '2026-10-20' }] }));
+  assert.equal(sevOf(kms, 'service-unknown', 'kms'), 'low');
+  // the same gap with the right to hand the key to others: worth a reviewer's look, still not high
+  const grant = analyze(base({ policies: [policy(['kms:Decrypt', 'kms:CreateGrant'])], advisor: [{ service: 'kms', lastAuthenticated: '2026-10-20' }] }));
+  assert.equal(sevOf(grant, 'service-unknown', 'kms'), 'medium');
+  // data events: one bucket low; writes to every bucket medium; reads of every bucket low
+  assert.equal(sevOf(analyze(base({ policies: [policy(['s3:PutObject', 's3:DeleteObject'], 'arn:aws:s3:::one/*')] })), 'data-event'), 'low');
+  assert.equal(sevOf(analyze(base({ policies: [policy(['s3:PutObject'])] })), 'data-event'), 'medium');
+  assert.equal(sevOf(analyze(base({ policies: [policy(['s3:GetObject'])] })), 'data-event'), 'low');
+  // nothing can ever confirm SQS messages
+  assert.equal(sevOf(analyze(base({ policies: [policy(['sqs:SendMessage', 'sqs:DeleteMessage'])] })), 'not-logged'), 'low');
+  // PassRole: every role medium, named roles low; session tags low
+  assert.equal(sevOf(analyze(base({ policies: [policy(['iam:PassRole'])] })), 'authorization-only'), 'medium');
+  assert.equal(sevOf(analyze(base({ policies: [policy(['iam:PassRole'], 'arn:aws:iam::1:role/app-*')] })), 'authorization-only'), 'low');
+  assert.equal(sevOf(analyze(base({ policies: [policy(['sts:TagSession'])] })), 'authorization-only'), 'low');
+  for (const cat of ['data-event', 'authorization-only', 'not-logged', 'before-window', 'service-unknown', 'unmapped-event']) {
+    assert.notEqual(gapSeverity(cat, [{ action: 'iam:PutRolePolicy', level: 'Write', resources: ['*'] }]), 'high', cat);
+  }
+  assert.equal(privilegeTier('iam:AttachRolePolicy'), 'identity'); assert.equal(privilegeTier('kms:PutKeyPolicy'), 'resource');
+  assert.equal(privilegeTier('logs:PutLogEvents'), null); assert.ok(isDataRead('secretsmanager:GetSecretValue') && !isDataRead('s3:GetBucketPolicy'));
+});
+
+test('wildcards are rated by what they expand to; NotAction is flagged', () => {
+  assert.equal(wildcardSeverity('*'), 'high');
+  assert.equal(wildcardSeverity('iam:*'), 'high'); assert.equal(wildcardSeverity('iam:Put*'), 'high'); assert.equal(wildcardSeverity('organizations:*'), 'high');
+  assert.equal(wildcardSeverity('s3:*'), 'medium'); assert.equal(wildcardSeverity('ec2:*'), 'medium'); assert.equal(wildcardSeverity('s3:Get*'), 'medium');   // reads every object
+  assert.equal(wildcardSeverity('ec2:Describe*'), 'low'); assert.equal(wildcardSeverity('iam:Get*'), 'low'); assert.equal(wildcardSeverity('iam:List*'), 'low');
+  assert.equal(wildcardSeverity('nosuchservice:*'), 'medium');
+  assert.equal(wildcardSeverity('*', { kind: 'service-linked' }), 'low');                       // AWS owns that policy
+  const na = (not) => analyze(base({ policies: [{ name: 'p', kind: 'inline', document: { Statement: [{ Effect: 'Allow', NotAction: not, Resource: '*' }] } }] }));
+  assert.equal(na(['s3:DeleteBucket']).flags.find((f) => f.key.startsWith('NotAction:')).severity, 'high');
+  assert.equal(na(['iam:*', 'organizations:*']).flags.find((f) => f.key.startsWith('NotAction:')).severity, 'medium');   // PowerUser-like
+  // read-only wildcards add nothing to the score; identity-plane ones add 20
+  const ro = analyze(base({ policies: [policy(['ec2:Describe*'])], activity: { actions: new Map([['ec2:DescribeInstances', { count: 1, lastSeen: '2026-10-30' }]]), passroles: [], principals: [] } }));
+  assert.ok(!ro.riskReasons.some((x) => /wildcard/.test(x)));
+  assert.ok(analyze(base({ policies: [policy(['iam:*'])] })).riskReasons.some((x) => /wildcard/.test(x)));
+});
+
+test('an idle role is rated by what it could do; a new role is not idle yet', () => {
+  const idle = (policies, role = {}) => analyze(base({ policies, role: { arn: ROLE, kind: 'custom', trust_policy: TRUST, last_used_at: null, ...role } }));
+  assert.equal(sevOf(idle([policy(['ec2:DescribeInstances', 's3:ListAllMyBuckets'])]), 'role-idle'), 'low');
+  assert.equal(sevOf(idle([policy(['ec2:TerminateInstances'])]), 'role-idle'), 'medium');
+  assert.equal(sevOf(idle([policy(['*'])]), 'role-idle'), 'medium');            // the high case is the rule "Administrator access not used in 90 days"
+  assert.equal(sevOf(idle([policy(['*'])], { kind: 'service-linked' }), 'role-idle'), 'low');
+  assert.equal(sevOf(idle([policy(['*'])], { created_in_aws: '2026-10-25T00:00:00Z' }), 'role-idle'), undefined);       // 7 days old
+  assert.equal(sevOf(idle([policy(['*'])], { created_in_aws: '2026-09-01T00:00:00Z' }), 'role-idle'), 'medium');
+  // a workspace override still wins
+  assert.equal(sevOf(analyze(base({ policies: [policy(['*'])], role: { arn: ROLE, kind: 'custom', trust_policy: TRUST, last_used_at: null }, policy: { over: new Map([['usage.role-idle', { enabled: true, severity: 'high' }]]), rules: [], sig: 'x' } })), 'role-idle'), 'high');
+  assert.equal(analyze(base({ policies: [{ name: 'p', kind: 'inline', document: { Statement: [{ Effect: 'Allow', NotAction: 's3:DeleteBucket', Resource: '*' }] } }] })).flags.find((f) => f.category === 'wildcard').control, 'perm.not-action');
+});
+
+test('a role anyone can assume is High whatever it grants', () => {
+  const r = analyze(base({ policies: [policy(['ec2:DescribeInstances'])], role: { arn: ROLE, kind: 'custom', last_used_at: '2026-10-30T00:00:00Z', trust_policy: { Statement: [{ Effect: 'Allow', Principal: '*', Action: 'sts:AssumeRole' }] } },
+    activity: { actions: new Map([['ec2:DescribeInstances', { count: 1, lastSeen: '2026-10-30' }]]), passroles: [], principals: [] } }));
+  assert.equal(r.risk, 'High');
+});

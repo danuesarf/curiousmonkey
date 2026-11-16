@@ -1,15 +1,55 @@
 // The heart of the tool. Pure function: role + policies + observed activity in, verdicts out.
 import crypto from 'node:crypto';
 import { computeGrants } from './grants.js';
-import { actionInfo } from './catalog.js';
+import { actionInfo, expandAction } from './catalog.js';
+import { privilegeTier, isPrivilege, isDataRead } from './sensitive.js';
 import { unloggableReason, dataEventResource } from './unloggable.js';
 import { trustFindings } from './trust.js';
 import { normalizeStatements } from './policy.js';
 import { isMatchAll } from './wildcard.js';
 import { controlOfFlag, severityOf, DEFAULT_POLICY } from '../controlCatalog.js';
 
-const SEV_BY_LEVEL = { Permissions: 'high', Write: 'high', Tagging: 'medium', Read: 'medium', List: 'low' };
-const RANK = { high: 3, medium: 2, low: 1 };
+const WIDE = (resources) => !resources.length || resources.some(isMatchAll);
+
+/**
+ * How serious an evidence gap is. None of these says something is wrong: they say use could not be proven, so they
+ * are never high. Medium is kept for what a reviewer should really look at: privilege-changing actions that cannot be
+ * verified, writes to every resource, and event names the tool could have mapped. The rest is low.
+ */
+export function gapSeverity(cat, list) {
+  const priv = list.some((x) => isPrivilege(x.action, x.level));
+  const write = list.some((x) => x.level === 'Write' || x.level === 'Permissions');
+  const wide = list.some((x) => WIDE(x.resources || []));
+  switch (cat) {
+    case 'not-logged': return 'low';                                  // no setting can ever confirm these: nothing to act on
+    case 'data-event': return write && wide ? 'medium' : 'low';      // writing or deleting data in every bucket or table, unseen
+    case 'authorization-only': return priv && wide ? 'medium' : 'low';   // iam:PassRole on every role: a way to more privilege
+    case 'before-window': return priv ? 'medium' : 'low';            // not used since before the history: likely removable
+    case 'service-unknown': return priv ? 'medium' : 'low';          // usually a service calling on the role's behalf (KMS through S3)
+    case 'unmapped-event': return priv || write ? 'medium' : 'low';  // fixable: map the event names
+    default: return 'low';
+  }
+}
+
+/**
+ * A wildcard on every resource, rated by what it expands to: everything, or the identity plane (iam:*, iam:Put*), is
+ * high; anything that can write is medium; read-only wildcards are low unless they read the data itself (s3:Get*).
+ * A service-linked role's policy is AWS's own and cannot be edited: low, for the record.
+ */
+export function wildcardSeverity(pattern, role = {}) {
+  if (role.kind === 'service-linked') return 'low';
+  if (pattern === '*' || pattern === '*:*') return 'high';
+  const all = expandAction(pattern);
+  if (!all.length) return 'medium';                                   // a service the catalog does not know: assume it can write
+  let write = false, data = false;
+  for (const a of all) {
+    const level = actionInfo(a)?.level;
+    if (privilegeTier(a, level) === 'identity') return 'high';
+    if (level === 'Write' || level === 'Permissions') write = true;
+    else if (isDataRead(a)) data = true;
+  }
+  return write || data ? 'medium' : 'low';
+}
 const DATA_SERVICES = new Set(['s3', 'dynamodb', 'rds', 'rds-data', 'secretsmanager', 'kms', 'redshift', 'redshift-data', 'athena', 'ssm', 'elasticfilesystem', 'kinesis']);
 
 const TITLES = {
@@ -68,7 +108,7 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
   for (const [k, list] of unconfirmed) {
     const [cat, svc] = k.split('|');
     const key = cat === 'authorization-only' ? list.map((x) => x.action).sort()[0] : svc;
-    const sev = list.reduce((m, x) => (RANK[SEV_BY_LEVEL[x.level] || 'medium'] > RANK[m] ? (SEV_BY_LEVEL[x.level] || 'medium') : m), 'low');
+    const sev = gapSeverity(cat, list);
     const resources = [...new Set(list.flatMap((x) => x.resources))].sort();
     const res = dataEventResource(list[0].action);
     flags.push({
@@ -89,7 +129,14 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
       if (!wide) continue;
       flags.push({ category: 'wildcard', key: a, title: `Wildcard grant ${a} on every resource`, actions: [], resources: ['*'],
         reason: `${pol.name} grants ${a} on Resource "*".`, evidence: `${grants.size} actions are granted in total.`,
-        suggestion: 'Replace with the actions listed under Used.', suggestedResources: [], severity: a === '*' || a === '*:*' ? 'high' : 'medium', decisionKind: 'other' });
+        suggestion: role.kind === 'service-linked' ? 'Nothing to do: AWS owns a service-linked role\'s policy.' : 'Replace with the actions listed under Used.', suggestedResources: [], severity: wildcardSeverity(a, role), decisionKind: 'other' });
+    }
+    // Allow + NotAction on every resource: everything except a list, and every action AWS adds later
+    if (st.notActions.length && (st.resources.some(isMatchAll) || !st.resources.length) && role.kind !== 'service-linked') {
+      const keepsIam = !st.notActions.some((x) => /^(\*|iam:\*)$/i.test(x));
+      flags.push({ category: 'wildcard', key: `NotAction:${st.notActions.slice().sort().join(',')}`.slice(0, 200), title: 'Grants every action except a list (NotAction) on every resource', actions: [], resources: ['*'],
+        reason: `${pol.name} allows everything except ${st.notActions.slice(0, 6).join(', ')}${st.notActions.length > 6 ? '…' : ''}, including actions AWS adds in future.`, evidence: `${grants.size} actions are granted in total.`,
+        suggestion: 'Replace with the actions listed under Used.', suggestedResources: [], severity: keepsIam ? 'high' : 'medium', decisionKind: 'other' });
     }
   }
 
@@ -105,10 +152,15 @@ export function analyze({ role, policies, boundaryDoc = null, activity, advisor 
     }
   }
 
-  const idle = !role.last_used_at || new Date(role.last_used_at) < windowStart;
+  // idle: not used in the window. A role created in the last 14 days has not had the time to be used.
+  const young = role.created_in_aws && now - new Date(role.created_in_aws) < 14 * 864e5;
+  const idle = !young && (!role.last_used_at || new Date(role.last_used_at) < windowStart);
+  // what an unused role is worth to whoever finds a way in: any write medium, read-only low. The high case (an unused
+  // administrator role) is the rule control "Administrator access not used in 90 days", so it is not raised twice.
+  const idleSev = role.kind === 'service-linked' ? 'low' : rows.some((r) => r.level === 'Write' || r.level === 'Permissions') ? 'medium' : 'low';
   if (idle) flags.push({ category: 'role-idle', key: 'idle', title: 'Role not used in the window', actions: [], resources: [],
     reason: `No successful use in the last ${Math.round((now - windowStart) / 864e5)} days.`, evidence: role.last_used_at ? `Last used ${new Date(role.last_used_at).toISOString().slice(0, 10)}.` : 'IAM has never recorded a use.',
-    suggestion: 'Delete the role if nothing depends on it.', suggestedResources: [], severity: 'medium', decisionKind: 'other' });
+    suggestion: role.kind === 'service-linked' ? 'Delete it from its service if the service is no longer used.' : 'Delete the role if nothing depends on it.', suggestedResources: [], severity: idleSev, decisionKind: 'other' });
 
   // the workspace's policy: each finding names its control; one turned off is not made, one given a severity gets it
   flags = flags.flatMap((f) => {
@@ -149,10 +201,11 @@ export function scoreRisk({ rows, flags, role, counts, trust = [] }) {
   const up = unusedLevel('Permissions'), uw = unusedLevel('Write');
   if (up) add(Math.min(20, up), `${up} unused permission-management actions`);
   if (uw) add(Math.min(15, Math.ceil(uw / 10)), `${uw} unused write actions`);
-  const wild = flags.filter((f) => f.category === 'wildcard').length;
-  if (wild) add(Math.min(20, wild * 10), `${wild} wildcard grant(s) on all resources`);
+  // wildcards count by what they open: identity-plane or everything 20, writes 10, read-only nothing
+  const wild = flags.filter((f) => f.category === 'wildcard' && f.severity !== 'low');
+  if (wild.length) add(Math.min(30, wild.reduce((n, f) => n + (f.severity === 'high' ? 20 : 10), 0)), `${wild.length} wildcard grant(s) on all resources`);
   const tw = trust;
-  if (tw.some((f) => f.severity === 'high')) add(30, 'Anyone can assume this role');
+  if (tw.some((f) => f.severity === 'high')) add(50, 'Anyone can assume this role');          // High on its own, whatever it grants
   else if (tw.length) add(10, 'Broad trust policy');
   if (flags.some((f) => f.category === 'external-principal')) add(20, 'Unexpected principal used the role');
   const uc = rows.filter((r) => r.status === 'unconfirmed' && (r.level === 'Write' || r.level === 'Permissions')).length;

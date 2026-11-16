@@ -51,6 +51,12 @@ export const config = {
     callerKeepDays: Math.max(0, Number(env.CALLER_KEEP_DAYS ?? 400)),
   },
 
+  // Google Cloud role usage (audit logs through the Logging API). Turned on per connection; this is the read pace.
+  gcp: {
+    // entries.list read requests per minute, per connection, shared by every worker (the API allows 60 by default)
+    usageReadsPerMinute: Number(env.GCP_USAGE_READS_PER_MINUTE || 50),
+  },
+
   schedule: {
     at: env.SCAN_AT || '01:00',
     tz: env.SCAN_TZ || 'Asia/Jakarta',

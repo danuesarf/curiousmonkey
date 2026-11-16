@@ -35,7 +35,8 @@ export async function snapshotAndDiff(accountId, day = today()) {
         out.push({ role: r, kind: 'cleaned', severity: 'good', title: `${r.name} was trimmed`, detail: `${n(p.granted).toLocaleString('en-US')} → ${r.granted.toLocaleString('en-US')} permissions`, key: `cleaned:${r.id}:${day}` });
       }
       if (n(p.denied) === 0 && n(r.denied) > 0) {
-        out.push({ role: r, kind: 'denied', severity: 'high', title: `First denied calls from ${r.name}`, detail: `${n(r.denied).toLocaleString('en-US')} denied so far`, key: `denied:${r.id}` });
+        // a first AccessDenied is usually a missing permission or a tool probing: worth a look, not an incident
+        out.push({ role: r, kind: 'denied', severity: 'warn', title: `First denied calls from ${r.name}`, detail: `${n(r.denied).toLocaleString('en-US')} denied so far`, key: `denied:${r.id}` });
       }
       if (p.active90 && !r.active90) {
         out.push({ role: r, kind: 'dead', severity: 'info', title: `${r.name} made no calls in 90 days`, detail: `${r.granted.toLocaleString('en-US')} permissions held`, key: `dead:${r.id}:${day}` });
@@ -50,7 +51,7 @@ export async function snapshotAndDiff(accountId, day = today()) {
       `SELECT u.raw_action, u.count FROM unmapped_events u
         WHERE u.account_id=$1 AND u.first_seen > $2::date
           AND NOT EXISTS (SELECT 1 FROM event_action_map m WHERE m.raw_action=u.raw_action AND m.status='accepted')`, [accountId, lastDay])).rows;
-    for (const u of unk) out.push({ role: null, kind: 'unidentified', severity: 'warn', title: 'New event name not identified', detail: u.raw_action, key: `unid:${accountId}:${u.raw_action}` });
+    for (const u of unk) out.push({ role: null, kind: 'unidentified', severity: 'info', title: 'New event name not identified', detail: u.raw_action, key: `unid:${accountId}:${u.raw_action}` });
   }
 
   await tx(async (c) => {

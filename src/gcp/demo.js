@@ -127,6 +127,46 @@ PERMS['roles/editor'] = [...ALL.filter((p) => !/setIamPolicy|iam\.roles|organiza
 PERMS['roles/owner'] = [...ALL, 'resourcemanager.projects.setIamPolicy', 'resourcemanager.folders.setIamPolicy', 'resourcemanager.organizations.setIamPolicy', 'iam.serviceAccountKeys.create', ...many('owner.all', 6400)];
 const TITLES = { 'roles/owner': 'Owner', 'roles/editor': 'Editor', 'roles/viewer': 'Viewer' };
 
+// Audit log activity: who checks which permission, per project. Admin Activity holds writes; reads only appear in
+// Data Access logs. Each pair fires in about one hour in four, at a minute fixed by a hash of the hour, so any split
+// of time into windows yields exactly the same entries (what the reader's no-double-count rule relies on).
+const ACT = {
+  'acme-payments-prod': {
+    activity: [[sa('payments-api', 'acme-payments-prod'), ['cloudsql.instances.connect']], [sa('bq-exporter', 'acme-payments-prod'), ['bigquery.tables.export']],
+      ['300000000001-compute@developer.gserviceaccount.com', ['editor.write.p0001']]],
+    data_access: [[sa('payments-api', 'acme-payments-prod'), ['secretmanager.versions.access', 'cloudsql.instances.get']], [sa('bq-exporter', 'acme-payments-prod'), ['bigquery.tables.getData', 'bigquery.tables.get']]],
+  },
+  'acme-data-stg': {
+    activity: [[sa('lake-sync', 'acme-data-stg'), ['storage.objects.create', 'storage.objects.delete', 'bigquery.tables.updateData']], [sa('etl-runner', 'acme-data-stg'), ['dataflow.jobs.create']],
+      ['user:bob@acme.example', ['bigquery.datasets.create']], ['user:vendor.dev@gmail.com', ['storage.buckets.delete!']]],
+    data_access: [[sa('lake-sync', 'acme-data-stg'), ['storage.objects.get', 'storage.objects.list']]],
+  },
+  'acme-shared-ci': {
+    activity: [[sa('deployer', 'acme-shared-ci'), ['artifactregistry.repositories.uploadArtifacts', 'run.services.update']], [sa('terraform', 'acme-shared-ci'), ['resourcemanager.projects.setIamPolicy']],
+      ['user:alice@acme.example', ['iam.workloadIdentityPools.update']]],
+    data_access: [],
+  },
+};
+const fnv = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
+export function demoLogEntries({ projectId, filter, pageToken = '' }, pageSize = Number(process.env.DEMO_LOG_PAGE_SIZE || 1000)) {
+  const log = /%2Fdata_access"/.test(filter) ? 'data_access' : 'activity';
+  const from = Date.parse(filter.match(/timestamp>="([^"]+)"/)[1]), to = Date.parse(filter.match(/timestamp<"([^"]+)"/)[1]);
+  const all = [];
+  for (let hr = Math.floor(from / 36e5) * 36e5; hr < to; hr += 36e5) {
+    for (const [who, perms] of ACT[projectId]?.[log] || []) for (const raw of perms) {
+      const h = fnv(`${hr}|${who}|${raw}`);
+      if (h % 4) continue;
+      const t = hr + (h % 60) * 60e3;
+      if (t < from || t >= to) continue;
+      const member = who.startsWith('user:') ? who.slice(5) : who;
+      all.push({ timestamp: new Date(t).toISOString(), protoPayload: { authenticationInfo: { principalEmail: member }, authorizationInfo: [{ resource: `projects/${projectId}`, permission: raw.replace(/!$/, ''), granted: !raw.endsWith('!') }] } });
+    }
+  }
+  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const at = Number(pageToken) || 0;
+  return { entries: all.slice(at, at + pageSize), ...(at + pageSize < all.length ? { nextPageToken: String(at + pageSize) } : {}) };
+}
+
 export function demoGcpGateway() {
   const projects = PROJECTS.map((p) => ({ ...p, state: 'ACTIVE' }));
   const policy = (resource) => ({ version: 3, bindings: POLICIES[resource] || [] });
@@ -142,6 +182,7 @@ export function demoGcpGateway() {
     async customRoles(parent) { return Object.keys(PERMS).filter((n) => n.startsWith(`${parent}/roles/`)).map((n) => ({ name: n, title: 'Curious Monkey reader', includedPermissions: PERMS[n], stage: 'GA' })); },
     async role(name) { return PERMS[name] ? { name, title: TITLES[name] || name.split('/').pop(), includedPermissions: PERMS[name], stage: 'GA' } : null; },
     async wifProviders(projectId) { return WIF[projectId] || []; },
+    async logEntries(q) { return demoLogEntries(q); },
     async whoami() { return { email: sa('cm-reader', 'acme-shared-ci') }; },
   };
 }

@@ -1109,7 +1109,7 @@ test('manage policy: the catalogue for everyone, changes for those who may chang
   const ch = await owner.call('PUT', '/api/controls/usage.role-idle', { severity: 'low', note: 'sandbox roles idle by design' });
   assert.equal(ch.status, 200); assert.deepEqual(ch.json.after, { severity: 'low', enabled: true });
   const row = (await owner.get('/api/controls?q=usage.role-idle')).json.items[0];
-  assert.deepEqual([row.severity, row.defaultSeverity, row.changed, row.note], ['low', 'medium', true, 'sandbox roles idle by design']);
+  assert.deepEqual([row.severity, row.defaultSeverity, row.changed, row.note], ['low', null, true, 'sandbox roles idle by design']);   // its default varies (medium if it can write)
   assert.equal((await db.query(`SELECT count(*)::int n FROM flags WHERE control='usage.role-idle' AND status='open' AND severity <> 'low'`)).rows[0].n, 0);
   assert.ok((await db.query(`SELECT 1 FROM audit_log WHERE action='control.change' AND target_id='usage.role-idle'`)).rowCount >= 1);
   assert.equal((await owner.call('PUT', '/api/controls/usage.role-idle', { severity: null })).status, 200);

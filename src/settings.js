@@ -28,6 +28,7 @@ const DEFS = {
   'risk.keyRotateDays':       [z.number().int().min(7).max(730), ['risk', 'keyRotateDays']],
   'risk.keyUnusedDays':       [z.number().int().min(7).max(730), ['risk', 'keyUnusedDays']],
   'alerts.keepDays':          [z.number().int().min(7).max(3650), ['alerts', 'keepDays']],
+  'gcp.usageReadsPerMinute':  [z.number().int().min(1).max(600), ['gcp', 'usageReadsPerMinute']],
 };
 const at = (path) => path.reduce((o, k) => o?.[k], config);
 const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], config); o[path.at(-1)] = v; };

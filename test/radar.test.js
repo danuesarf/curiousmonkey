@@ -47,7 +47,7 @@ test('the next snapshot raises what changed: grew to admin, trimmed, first denie
   await db.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count) VALUES ($1,'arn:aws:iam::111111111111:role/new-one','new-one','custom',10)`, [A]);
   await rh.snapshotAndDiff(A, day(8));
   const ch = (await db.query('SELECT kind, severity, title FROM changes WHERE account_id=$1 ORDER BY kind', [A])).rows;
-  assert.deepEqual(ch.map((c) => [c.kind, c.severity]), [['cleaned', 'good'], ['denied', 'high'], ['grew', 'high'], ['new-role', 'info']]);
+  assert.deepEqual(ch.map((c) => [c.kind, c.severity]), [['cleaned', 'good'], ['denied', 'warn'], ['grew', 'high'], ['new-role', 'info']]);
   assert.match(ch.find((c) => c.kind === 'grew').title, /deployer gained admin-level/);
   await rh.snapshotAndDiff(A, day(8));                                                                                // the same day again records nothing new
   assert.equal((await db.query('SELECT count(*)::int n FROM changes WHERE account_id=$1', [A])).rows[0].n, 4);
