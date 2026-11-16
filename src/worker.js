@@ -1,5 +1,7 @@
 import { rollupBackfillTick } from './rollups.js';
-import { gcpTick } from './gcp/scan.js';
+import { gcpTick, gcpGateway } from './gcp/scan.js';
+import { usageTick } from './gcp/usage.js';
+import { analyzeUsage } from './gcp/usageAnalysis.js';
 import { alertsTick } from './alerts.js';
 import { trustTick, pruneCallers } from './trustSync.js';
 import { historyFor } from './history.js';
@@ -203,6 +205,16 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const gcpRun = () => { if (gcpBusy || stop.stopped) return; gcpBusy = true;
     gcpTick(workerId).then((r) => r && log(r.ok ? 'info' : 'error', r.ok ? 'gcp scan done' : 'gcp scan failed', r)).catch((e) => log('error', 'gcp scan failed', { error: e.message })).finally(() => { gcpBusy = false; }); };
   timers.push(setInterval(gcpRun, 30_000), setTimeout(gcpRun, 5_000));
+  // Google Cloud role usage: audit logs, one project's cursor at a time per worker, until nothing is due
+  let usageBusy = false;
+  const usageRun = async () => { if (usageBusy || stop.stopped) return; usageBusy = true;
+    try {
+      for (let r; !stop.stopped && (r = await usageTick(workerId, { gwFor: gcpGateway, analyze: analyzeUsage, log: (m) => log('warn', m) }));) {
+        if (r.windows || r.error) log(r.error ? 'warn' : 'info', 'gcp usage read', r);
+        if (r.error) break;
+      }
+    } catch (e) { log('error', 'gcp usage read failed', { error: e.message }); } finally { usageBusy = false; } };
+  timers.push(setInterval(usageRun, 15_000), setTimeout(usageRun, 8_000));
   // alerts: any worker may run them; an advisory lock lets one at a time
   let alerting = false;
   const alertRun = () => { if (alerting || stop.stopped) return; alerting = true;

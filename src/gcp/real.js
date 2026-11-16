@@ -8,6 +8,9 @@ import { decrypt } from '../auth/crypto.js';
 const SCOPES = ['https://www.googleapis.com/auth/cloud-platform'];
 const CRM = 'https://cloudresourcemanager.googleapis.com/v3';
 const IAM = 'https://iam.googleapis.com/v1';
+const LOGGING = 'https://logging.googleapis.com/v2';
+const LOG_FIELDS = 'nextPageToken,entries(timestamp,protoPayload/authenticationInfo,protoPayload/authorizationInfo)';
+let fieldsRefused = false;
 
 export const wifAudience = (w) => `//iam.googleapis.com/projects/${w.projectNumber}/locations/global/workloadIdentityPools/${w.poolId}/providers/${w.providerId}`;
 
@@ -95,6 +98,18 @@ export function realGcpGateway(conn, { client: injected } = {}) {
         }
       }
       return out;
+    },
+    // Audit log entries (Logging API v2 entries.list), 1,000 a page. Only the caller and the permission checks are
+    // asked for, so a page is a few hundred KB instead of megabytes of request and response bodies.
+    async logEntries({ projectId, filter, pageToken = '' }) {
+      const body = { resourceNames: [`projects/${projectId}`], filter, orderBy: 'timestamp asc', pageSize: 1000, ...(pageToken ? { pageToken } : {}) };
+      if (!fieldsRefused) {
+        try { return await call('POST', `${LOGGING}/entries:list?fields=${encodeURIComponent(LOG_FIELDS)}`, body); } catch (e) {
+          if (e.status !== 400 || !/field/i.test(e.message)) throw e;
+          fieldsRefused = true;                            // the field mask was refused: read whole entries from now on
+        }
+      }
+      return call('POST', `${LOGGING}/entries:list`, body);
     },
     async whoami() {
       clientP ||= gcpClient(conn);

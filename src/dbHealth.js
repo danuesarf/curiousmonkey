@@ -7,6 +7,7 @@
 import fs from 'node:fs/promises';
 import { query } from './db.js';
 import { config } from './config.js';
+import { usageStorage } from './gcp/usage.js';
 
 const DAY = 864e5;
 const num = (x) => Number(x || 0);
@@ -39,6 +40,7 @@ export async function sampleDatabase() {
   await query(`INSERT INTO db_samples(db_bytes, disk_free, disk_total, tables) VALUES ($1,$2,$3,$4)`,
     [num(size.rows[0].b), d.known ? d.free : null, d.known ? d.total : null, JSON.stringify(Object.fromEntries(t.slice(0, 20).map((x) => [x.name, x.total])))]);
   await query(`DELETE FROM db_samples WHERE taken_at < now() - interval '90 days'`);
+  await usageStorage({ save: true }).catch(() => {});     // Google Cloud usage data per project, kept with the sample
   return true;
 }
 
@@ -95,6 +97,7 @@ export async function databaseHealth() {
     tables(), disk(),
     query(`SELECT taken_at, db_bytes, disk_free, disk_total FROM db_samples WHERE taken_at > now() - interval '30 days' ORDER BY taken_at`),
   ]);
+  const gcpUsage = await usageStorage().catch(() => null);
   const s = stat.rows[0], hit = num(s.blks_hit), read = num(s.blks_read);
   const pg = {
     version: ver.rows[0].server_version, size: num(size.rows[0].b), connections: conn.rows[0].n, activeConnections: conn.rows[0].active, maxConnections: conn.rows[0].max,
@@ -109,5 +112,6 @@ export async function databaseHealth() {
   const growth = { perDay, diskPerDay, daysUntilFull: d.known && fill > 0 ? d.free / fill : null, days: rows.length ? (Date.now() - new Date(rows[0].taken_at).getTime()) / DAY : 0 };
   const h = { pg, disk: d, tables: t, growth, samples: rows.map((x) => ({ at: x.taken_at, db: x.db_bytes, diskUsed: x.disk_total == null ? null : x.disk_total - x.disk_free, diskTotal: x.disk_total })),
     retentionDays: config.scanner.sessionRetentionDays };
-  return { ...h, tables: t.slice(0, 15), tableCount: t.length, advice: databaseAdvice(h) };
+  return { ...h, tables: t.slice(0, 15), tableCount: t.length, advice: databaseAdvice(h),
+    gcpUsage: gcpUsage && { total: gcpUsage.total, bytesPerRow: gcpUsage.bytesPerRow, projects: gcpUsage.items.filter((i) => i.dailyRows || i.summaryRows).slice(0, 50) } };
 }

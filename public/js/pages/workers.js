@@ -222,6 +222,15 @@ function restartsCard(all, redraw) {
 }
 
 // ---- database ----
+/** Google Cloud role usage data, project by project: rows counted as written, bytes from each table's measured size per row. */
+function gcpUsageStorage(u) {
+  if (!u?.projects?.length) return null;
+  return h('div', { class: 'stack' }, h('h3', null, `Google Cloud usage data by project · ${bytes(u.total)}`),
+    h('p', { class: 'small muted' }, `Per-day counts read from audit logs. About ${u.bytesPerRow.daily} bytes a day row and ${u.bytesPerRow.summary} a summary row, indexes included; the split adds up to the two tables.`),
+    h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Project', 'Connection', 'Size', 'Day rows', 'Summary rows'].map((x) => h('th', null, x)))),
+      h('tbody', null, u.projects.map((p) => h('tr', null, h('td', { class: 'mono' }, p.projectId), h('td', { class: 'muted' }, p.connectionName), h('td', null, bytes(p.bytes)), h('td', null, num(p.dailyRows)), h('td', { class: 'muted' }, num(p.summaryRows))))))));
+}
+
 function databaseCard(db) {
   const { pg, disk: dk, growth: g } = db;
   const used = dk.known ? dk.used / dk.total : null;
@@ -253,6 +262,7 @@ function databaseCard(db) {
       h('div', { class: 'charts' },
         chart('Database size, 30 days', series, { fmt: bytes, days: true, empty: 'The first samples arrive within the hour.' }),
         chart('Disk used under the database, 30 days', diskSeries, { fmt: bytes, days: true, limit: lastTotal, limitLabel: 'disk', empty: dk.known ? 'The first samples arrive within the hour.' : 'The disk is not visible to the app.' })),
+      gcpUsageStorage(db.gcpUsage),
       h('h3', null, `Largest tables${db.tableCount > db.tables.length ? ` (${db.tables.length} of ${db.tableCount})` : ''}`),
       h('div', { class: 'scroll' }, table),
       h('dl', { class: 'kv small' },

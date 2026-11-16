@@ -149,10 +149,21 @@ export async function settingsPage(ctx) {
         h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'The IAM users list follows a change at once. Risk levels and findings follow at each identity\'s next analysis: the next catch-up read, or the daily scan.'),
           h('p', { class: 'small muted' }, h('a', { href: '#/admin/alerts' }, 'Alerts'), ' can post when a key passes the rotation age.'))));
 
+    // ---- Google Cloud role usage ----
+    const reads = bind(h('input', { type: 'number', min: 1, max: 600, step: 1, value: draft['gcp.usageReadsPerMinute'] }), 'gcp.usageReadsPerMinute', Number);
+    const gcpUsage = h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Google Cloud role usage'), h('p', { class: 'muted small' }, 'How fast audit logs are read for connections with role usage on. Turned on and off per connection, on its Edit page.'))),
+      h('div', { class: 'card-b settings-grid' },
+        h('div', { class: 'stack' },
+          h('div', { class: 'field' }, h('label', null, 'Log reads per minute, per connection', reads),
+            h('span', { class: 'hint' }, 'Shared by every worker. The Logging API allows 60 entries.list calls a minute by default; keep below it so other tools reading the same logs are not starved. Each read returns up to 1,000 entries.'), origin('gcp.usageReadsPerMinute')),
+          saveBar(['gcp.usageReadsPerMinute'])),
+        h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'At 50 reads a minute a connection reads up to about 3 million audit entries an hour. The first backfill is the slow part; after it, only new entries are read.'))));
+
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, risk, clock, environmentsCard(d.environments, load));
+      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, gcpUsage, risk, clock, environmentsCard(d.environments, load));
     refreshSave();
   }
 
