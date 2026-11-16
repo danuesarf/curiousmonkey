@@ -349,11 +349,11 @@ data.delete('/event-mappings', requirePerm('decide'), wrap(async (req, res) => {
 
 // ---------- sessions and tracks ----------
 data.get('/sessions', requirePerm('view'), wrap(async (req, res) => {
-  const q = z.object({ account: uuid.optional(), role: uuid.optional(), from: uuid.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
+  const q = z.object({ account: uuid.optional(), role: uuid.optional(), from: uuid.optional(), principal: uuid.optional(), limit: z.coerce.number().int().min(1).max(200).default(50) }).parse(req.query);
   if (q.account && !inScope(req.user, q.account)) throw NotFound();
   if (q.from && !inScope(req.user, q.from)) throw NotFound();
   if (q.role) await roleFor(req, q.role);
-  res.json({ items: await listSessions(req.user, { accountId: q.account, roleId: q.role, fromAccountId: q.from, limit: q.limit }), retentionDays: config.scanner.sessionRetentionDays });
+  res.json({ items: await listSessions(req.user, { accountId: q.account, roleId: q.role, principalId: q.principal, fromAccountId: q.from, limit: q.limit }), retentionDays: config.scanner.sessionRetentionDays });
 }));
 data.get('/sessions/:id/track', requirePerm('view'), wrap(async (req, res) => {
   const t = await buildTrack(req.user, uuid.parse(req.params.id));
@@ -444,7 +444,7 @@ data.get('/roles/:id', requirePerm('view'), wrap(async (req, res) => {
   const role = await roleFor(req, req.params.id);
   const [pol, prin, flags, pass, svc, cp, daily, adv] = await Promise.all([
     query('SELECT name, kind, aws_managed, arn, document FROM role_policies WHERE role_id=$1 ORDER BY kind, name', [role.id]),
-    query(`SELECT p.id, p.display, p.kind, p.via, p.caller, p.first_seen, p.last_seen, p.sessions_count, p.source_ips, p.mfa, p.source_identity, p.session_tags,
+    query(`SELECT p.id, p.display, p.kind, p.via, p.caller, p.first_seen, p.last_seen, p.sessions_count, p.source_ips, p.call_ips, p.mfa, p.source_identity, p.session_tags,
                   coalesce((SELECT json_agg(json_build_object('action', action, 'count', c)) FROM (SELECT action, sum(count)::int c FROM activity_daily WHERE principal_id=p.id GROUP BY action ORDER BY c DESC LIMIT 8) t), '[]') AS top_actions
              FROM principals p WHERE p.role_id=$1 ORDER BY p.last_seen DESC NULLS LAST`, [role.id]),
     query(`SELECT f.*, d.decision, d.note, d.resources AS decided_resources, d.decided_at, u.name AS decided_by FROM flags f

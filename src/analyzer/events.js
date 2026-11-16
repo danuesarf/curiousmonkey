@@ -2,6 +2,8 @@
 import { mapEvent, isDenied } from './actionNames.js';
 
 const ROLE_ARN_RE = /arn:aws[a-z-]*:iam::\d{12}:role\/[\w+=,.@\/-]+/g;
+// EC2 takes an instance profile, not a role: { arn } or just { name }. The profile is what CloudTrail shows.
+const PROFILE_ARN_RE = /arn:aws[a-z-]*:iam::\d{12}:instance-profile\/[\w+=,.@\/-]+/g;
 const ASSUME = new Set(['AssumeRole', 'AssumeRoleWithSAML', 'AssumeRoleWithWebIdentity']);
 
 /** Role ARN of the session behind an event (sessionIssuer is the role itself, with its path). */
@@ -9,6 +11,12 @@ export function issuerRoleArn(rec) {
   const ui = rec.userIdentity;
   if (ui?.type !== 'AssumedRole') return null;
   return ui.sessionContext?.sessionIssuer?.arn || null;
+}
+
+function sessionCreatedOf(rec) {
+  const t = rec.userIdentity?.sessionContext?.attributes?.creationDate;
+  const d = t ? new Date(t) : null;
+  return d && !Number.isNaN(d.getTime()) ? d : null;
 }
 
 /** Some events carry an AssumedRole identity without sessionContext. The role name is still in the session ARN. */
@@ -60,6 +68,9 @@ export function parseEvent(rec) {
     eventSource: rec.eventSource, eventName: rec.eventName,
     accessKeyId: rec.userIdentity?.accessKeyId || null,
     sessionName: rec.userIdentity?.arn?.split('/').pop() || null,
+    // when the session's credentials were first issued. The console swaps in new keys during one sign-in; they keep
+    // this time, which is how they are tied back to the sign-in (see applyEvents).
+    sessionCreated: sessionCreatedOf(rec),
     resources, passedRoles: findPassedRoles(rec, roleArn),
   };
 }
@@ -82,18 +93,30 @@ const NOT_PASS_KEY = /policy|document|principal|trust/i;
 export function findPassedRoles(rec, callerRoleArn) {
   if (NO_PASS_SOURCES.has(rec.eventSource)) return [];
   const found = new Set();
-  const walk = (v, passing) => {
+  const acct = rec.recipientAccountId || rec.userIdentity?.accountId;
+  const partition = (rec.userIdentity?.arn || '').split(':')[1] || 'aws';
+  // passing: under a field that hands a role over. inProfile: directly inside an instance-profile field.
+  const walk = (v, passing, inProfile) => {
     if (v == null) return;
-    if (typeof v === 'string') { if (passing) for (const a of v.match(ROLE_ARN_RE) || []) found.add(a); return; }
-    if (Array.isArray(v)) { for (const x of v) walk(x, passing); return; }
-    if (typeof v === 'object') {
-      for (const [k, x] of Object.entries(v)) {
-        if (NOT_PASS_KEY.test(k)) continue;
-        walk(x, passing || PASS_KEY.test(k));
+    if (Array.isArray(v)) { for (const x of v) walk(x, passing, inProfile); return; }
+    if (typeof v === 'string') {
+      if (!passing) return;
+      for (const a of v.match(ROLE_ARN_RE) || []) found.add(a);
+      for (const a of v.match(PROFILE_ARN_RE) || []) found.add(a);
+      return;
+    }
+    if (typeof v !== 'object') return;
+    for (const [k, x] of Object.entries(v)) {
+      if (NOT_PASS_KEY.test(k)) continue;
+      // an instance profile given by name only ({ iamInstanceProfile: { name } })
+      if (inProfile && k === 'name' && typeof x === 'string' && /^[\w+=,.@-]+$/.test(x) && /^\d{12}$/.test(acct || '')) {
+        found.add(`arn:${partition}:iam::${acct}:instance-profile/${x}`);
+        continue;
       }
+      walk(x, passing || PASS_KEY.test(k), /instanceprofile/i.test(k));
     }
   };
-  walk(rec.requestParameters, false);
+  walk(rec.requestParameters, false, false);
   found.delete(callerRoleArn);
   return [...found];
 }

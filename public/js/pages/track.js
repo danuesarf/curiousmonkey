@@ -33,7 +33,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
   const title = roleId && list.items[0] ? list.items[0].role : 'All roles';
   if (!list.items.length) {
     return { title, stop: () => {}, el: h('div', { class: 'stack-lg' }, h('div', { class: 'card card-b stack' }, h('h2', null, 'No sessions to replay yet'),
-      h('p', { class: 'muted' }, `Sessions are recorded from AssumeRole events as history is read, and kept for ${list.retentionDays} days. A session that started before the stored history still shows, marked as started earlier.`),
+      h('p', { class: 'muted' }, `Sessions are recorded from AssumeRole events as history is read, and kept for ${list.retentionDays} days. A session whose sign-in was not in the history read still shows, marked as sign-in not seen. Console keys are grouped under the sign-in they belong to.`),
       empty)) };
   }
   let current = list.items.find((s) => s.id === wanted) || list.items[0];
@@ -103,7 +103,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
       const y = Y(i), c = laneColor(i);
       gLanes.append(svg('path', { d: `M40 ${y} H${W - 20}`, stroke: c, 'stroke-opacity': 0.12, 'stroke-dasharray': '2 6' }),
         svg('text', { x: 40, y: y - 52, fill: c, 'font-family': 'Geist Mono, monospace', 'font-size': 11, 'letter-spacing': 1 }, `LANE ${i + 1} · ${l.role.toUpperCase()}`),
-        svg('text', { x: 40, y: y - 38, fill: '#7e978a', 'font-family': 'Geist, sans-serif', 'font-size': 11 }, `${l.account} · ${l.awsAccountId}${l.sessionName ? ` · ${l.sessionName}` : ''}${l.startKnown ? '' : ' · started before stored history'}`));
+        svg('text', { x: 40, y: y - 38, fill: '#7e978a', 'font-family': 'Geist, sans-serif', 'font-size': 11 }, `${l.account} · ${l.awsAccountId}${l.sessionName ? ` · ${l.sessionName}` : ''}${l.startKnown ? '' : ' · sign-in not seen'}`));
     });
     // origin: whoever started the chain
     gNodes.append(svg('path', { d: `M${origin.x} ${origin.y - 9} L${origin.x + 9} ${origin.y} L${origin.x} ${origin.y + 9} L${origin.x - 9} ${origin.y} Z`, fill: '#e3efe8' }),
@@ -239,7 +239,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
     const facts = (l) => [
       ['Entered by', l.principal || l.callerArn || 'Unknown'], ['How', l.via || '—'], ['Session name', l.sessionName || '—'],
       ['MFA', l.mfa == null ? 'Not reported' : l.mfa ? 'Yes' : 'No'], ['Source IP', l.sourceIp || '—'], ['Source identity', l.sourceIdentity || '—'],
-      ['Started', l.startKnown ? fmtDate(l.startedAt) : 'Before stored history'], ['Calls', `${num(l.calls)}${l.denied ? ` · ${num(l.denied)} denied` : ''}`],
+      ['Started', l.startKnown ? fmtDate(l.startedAt) : `${fmtDate(l.startedAt)} (sign-in not seen)`], ['Calls', `${num(l.calls)}${l.denied ? ` · ${num(l.denied)} denied` : ''}`],
     ];
     const nodeBox = h('div', { class: 'stack' });
     function pick(s, quiet) {
@@ -258,7 +258,7 @@ export async function trackView({ role: roleId = null, account = null, from = nu
       h('div', { class: 'stack' }, h('div', { class: 'eyebrow' }, 'SESSION'), h('h2', null, sel.role), h('div', { class: 'tiny muted' }, `${sel.account} · ${sel.awsAccountId}`)),
       h('div', { class: `cond-box${trust?.matched && trust.conditions?.length ? '' : ' warn'}` },
         h('div', { class: 'stack', style: 'gap:4px' }, h('div', { class: 'eyebrow' }, 'CONDITIONS MET ON ENTRY'),
-          h('div', { class: 'mono tiny', style: 'overflow-wrap:anywhere' }, !trust ? 'Not known: the AssumeRole is older than the stored history.'
+          h('div', { class: 'mono tiny', style: 'overflow-wrap:anywhere' }, !trust ? 'Not known: the sign-in (AssumeRole) was not in the history read.'
             : !trust.matched ? 'Not matched to a statement in the trust policy.' : trust.conditions.length ? trust.conditions.join(' · ') : `Trust statement ${trust.statement ?? ''} matched, with no condition.`))),
       h('dl', { class: 'facts' }, facts(sel).flatMap(([k, v]) => [h('dt', null, k), h('dd', { class: 'mono tiny' }, v)])),
       lanes.length > 1 && h('div', { class: 'jump-box' }, h('div', { class: 'eyebrow', style: 'color:#8ec5ff' }, 'ROLE JUMPS IN THIS TRACK'),

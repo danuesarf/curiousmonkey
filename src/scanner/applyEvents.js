@@ -12,6 +12,10 @@ import { matchTrust } from '../analyzer/trust.js';
 import { recordNewCaller } from '../radarHistory.js';
 
 const DAY = 864e5;
+const SIGNIN_SLACK = 5 * 60e3;                          // a session's creationDate is its sign-in's time, give or take this
+// IAM Identity Center roles live under a path only AWS can create roles in. The name alone can be copied by anyone.
+const isSsoRole = (role) => /:role\/aws-reserved\/sso\.amazonaws\.com\//.test(role.arn || '');
+const IP_RE = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+$/i;       // sourceIPAddress is a service name for calls AWS makes
 const CHUNK = 5000;                                     // rows per statement for the big inserts
 const J = (v) => JSON.stringify(v);
 const knownKinds = new Set();          // call_kinds rows known to be stored (see migration 023)
@@ -45,6 +49,109 @@ export function principalFrom(e) {
 /** The role an event belongs to: by ARN, or by name when the event had no sessionIssuer. */
 export const roleOf = (e, roles) => (e.roleArn ? roles.byArn.get(e.roleArn) : e.roleName ? roles.byName.get(e.roleName) : null) || null;
 
+/**
+ * Console keys. The console signs in with AssumeRoleWithSAML (or another AssumeRole) and then calls with temporary keys
+ * that never appear in that event, so nothing ties their calls to whoever signed in. Every call carries the session's
+ * name and creation time (sessionContext.attributes.creationDate), the same for all keys of one sign-in. A key no
+ * AssumeRole issued is tied, in this order:
+ *   1. to the keys already seen with the same role, session name and creation time (stored or earlier in this batch);
+ *   2. to the sign-in into the same role with that session name, made when the session was created;
+ *   3. on an IAM Identity Center role only (under /aws-reserved/sso.amazonaws.com/), to the federated caller with that
+ *      name: AWS manages those roles' trust and only Identity Center can assume them, so the session name is the user
+ *      name. Elsewhere a name proves nothing;
+ *   4. otherwise to a "session <name>" caller, with all the keys of that session together.
+ * Each key gets an owner (keyOwner) and the key of its session (signinOf, for the replay). Returns role_sessions rows.
+ */
+async function linkConsoleKeys(c, evs, roles, keyOwner, signinOf, ensure) {
+  const issued = new Set();
+  for (const e of evs) if (e.type === 'assume' && e.accessKeyId) issued.add(e.accessKeyId);
+  const orphans = [], seen = new Set();
+  for (const e of evs) {
+    if (e.type !== 'api' || e.userCall || !e.accessKeyId || !e.sessionName || !e.sessionCreated) continue;
+    if (keyOwner.has(e.accessKeyId) || issued.has(e.accessKeyId) || seen.has(e.accessKeyId)) continue;
+    const role = roleOf(e, roles);
+    if (!role) continue;
+    seen.add(e.accessKeyId);
+    orphans.push({ key: e.accessKeyId, role, name: e.sessionName, created: e.sessionCreated, e });
+  }
+  if (!orphans.length) return [];
+  orphans.sort((a, b) => a.created - b.created || a.e.time - b.e.time || (a.key < b.key ? -1 : 1));
+
+  const roleIds = [...new Set(orphans.map((o) => o.role.id))], names = [...new Set(orphans.map((o) => o.name))];
+  let lo = Infinity, hi = -Infinity;
+  for (const o of orphans) { const t = o.created.getTime(); if (t < lo) lo = t; if (t > hi) hi = t; }
+  const sigOf = (roleId, name, created) => `${roleId}|${name}|${created.toISOString()}`;
+
+  // 1. keys of the same session stored by an earlier batch
+  const bySig = new Map();                              // signature -> { owner, signin }
+  const createdList = [...new Set(orphans.map((o) => o.created.toISOString()))];
+  const stored = await c.query(
+    `SELECT access_key_id, signin_key, principal_id, role_id, session_name, session_created FROM role_sessions
+      WHERE role_id = ANY($1) AND session_name = ANY($2) AND session_created = ANY($3::timestamptz[])`, [roleIds, names, createdList]);
+  for (const x of stored.rows) {
+    const sig = sigOf(x.role_id, x.session_name, x.session_created);
+    if (!bySig.has(sig)) bySig.set(sig, { owner: { id: x.principal_id }, signin: x.signin_key || x.access_key_id });
+  }
+
+  // 2. sign-ins: stored, and in this batch. Sign-ins stored before session names were kept fall back on the caller's
+  //    name, which for SAML and web identity is the session name.
+  const signins = [];                                   // { roleId, name, time, key, owner }
+  const s2 = await c.query(
+    `SELECT rs.access_key_id, rs.principal_id, rs.role_id, rs.started_at, coalesce(rs.session_name, p.display) AS name
+       FROM role_sessions rs JOIN principals p ON p.id = rs.principal_id
+      WHERE rs.role_id = ANY($1) AND rs.signin_key IS NULL AND rs.started_at BETWEEN $3 AND $4
+        AND (rs.session_name = ANY($2) OR (rs.session_name IS NULL AND p.kind = 'federated' AND p.display = ANY($2)))`,
+    [roleIds, names, new Date(lo - SIGNIN_SLACK), new Date(hi + SIGNIN_SLACK)]);
+  for (const x of s2.rows) signins.push({ roleId: x.role_id, name: x.name, time: x.started_at.getTime(), key: x.access_key_id, owner: { id: x.principal_id } });
+  const federatedRefs = new Map();                      // 'role|name' -> owner, federated callers signing in this batch
+  for (const e of evs) {
+    if (e.type !== 'assume' || e.denied || !e.accessKeyId || !e.sessionName) continue;
+    const role = roles.byArn.get(e.roleArn);
+    if (!role) continue;
+    // the same caller the main loop records for this sign-in (ensure is idempotent: the first call wins)
+    const p = principalFrom(e), via = `sts:${e.eventName}`;
+    const owner = ensure(role, p, e, via, { ...e.caller, trust: matchTrust(role.trust_policy, e.caller, via) });
+    signins.push({ roleId: role.id, name: e.sessionName, time: e.time.getTime(), key: e.accessKeyId, owner });
+    if (p.kind === 'federated') federatedRefs.set(`${role.id}|${p.display}`, owner);
+  }
+
+  // 3. federated callers by name, for IAM Identity Center roles
+  const ssoIds = [...new Set(orphans.filter((o) => isSsoRole(o.role)).map((o) => o.role.id))];
+  const federated = new Map(federatedRefs);
+  if (ssoIds.length) {
+    const r = await c.query(`SELECT id, role_id, display FROM principals WHERE role_id = ANY($1) AND kind = 'federated' AND display = ANY($2)
+                              ORDER BY last_seen DESC NULLS LAST`, [ssoIds, names]);
+    for (const x of r.rows) if (!federated.has(`${x.role_id}|${x.display}`)) federated.set(`${x.role_id}|${x.display}`, { id: x.id });
+  }
+
+  const signinsBy = new Map();
+  for (const s of signins) { const k = `${s.roleId}|${s.name}`; if (!signinsBy.has(k)) signinsBy.set(k, []); signinsBy.get(k).push(s); }
+  const rows = [];
+  for (const o of orphans) {
+    const sig = sigOf(o.role.id, o.name, o.created);
+    let link = bySig.get(sig);
+    if (!link) {
+      const t = o.created.getTime();
+      let best = null;
+      for (const s of signinsBy.get(`${o.role.id}|${o.name}`) || []) {
+        const d = Math.abs(s.time - t);
+        if (d <= SIGNIN_SLACK && (!best || d < best.d)) best = { d, s };
+      }
+      if (best) link = { owner: best.s.owner, signin: best.s.key };
+      else {
+        const byName = isSsoRole(o.role) ? federated.get(`${o.role.id}|${o.name}`) : null;
+        const owner = byName || ensure(o.role, { key: `session:${o.name}`, kind: 'session', display: `session ${o.name}` }, o.e, 'sign-in not seen', {});
+        link = { owner, signin: o.key };                // the first key seen leads its session
+      }
+      bySig.set(sig, link);
+    }
+    keyOwner.set(o.key, link.owner);
+    if (link.signin !== o.key) signinOf.set(o.key, link.signin);
+    rows.push({ key: o.key, role: o.role, owner: link.owner, signin: link.signin, name: o.name, created: o.created, started: o.e.time });
+  }
+  return rows;
+}
+
 export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   if (!evs.length) return;
   const keepFrom = Date.now() - config.scanner.sessionRetentionDays * DAY;
@@ -53,10 +160,14 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   const keys = new Set();
   for (const e of evs) { if (e.accessKeyId) keys.add(e.accessKeyId); if (e.callerKeyId) keys.add(e.callerKeyId); }
   const keyOwner = new Map();                           // access key -> principal ref: { id } (stored) or { ref } (this batch)
+  const signinOf = new Map();                           // access key -> key of the session its calls belong to (console keys)
   if (keys.size) {
     for (const part of chunks([...keys])) {
-      const r = await c.query(`SELECT access_key_id, principal_id FROM role_sessions WHERE access_key_id = ANY($1)`, [part]);
-      for (const x of r.rows) keyOwner.set(x.access_key_id, { id: x.principal_id });
+      const r = await c.query(`SELECT access_key_id, principal_id, signin_key FROM role_sessions WHERE access_key_id = ANY($1)`, [part]);
+      for (const x of r.rows) {
+        keyOwner.set(x.access_key_id, { id: x.principal_id });
+        if (x.signin_key && x.signin_key !== x.access_key_id) signinOf.set(x.access_key_id, x.signin_key);
+      }
     }
   }
 
@@ -90,6 +201,7 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   const sessUpserts = new Map();                        // access key -> full track_sessions row (from an AssumeRole)
   const callRows = [];                                  // track_calls, resolved to sessions later
   const daily = new Map(), resources = new Map(), passed = new Map();
+  const callIps = new Map();                            // principal -> IP addresses its calls came from
   const pkey = (pr) => pr.id || pr.ref;
 
   const userKeys = new Map();                           // 'user|access key' -> CloudTrail use of an IAM user's key
@@ -105,11 +217,16 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
         u.n++; if (e.time < u.first) u.first = e.time; if (e.time > u.last) u.last = e.time; if (e.ip && u.ips.size < 20) u.ips.add(e.ip); userKeys.set(uk, u);
       }
     }
-    if (!pr) pr = ensure(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, 'unknown (started before the window)', {});
+    if (!pr) pr = ensure(role, { key: `session:${e.sessionName}`, kind: 'session', display: `session ${e.sessionName}` }, e, 'sign-in not seen', {});
+    if (e.ip && !e.userCall && IP_RE.test(e.ip)) {
+      const ik = pkey(pr), ips = callIps.get(ik) || { pr, ips: new Set() };
+      if (ips.ips.size < 20) ips.ips.add(e.ip);
+      callIps.set(ik, ips);
+    }
     else if (pr.id) { const s = seenAgg.get(pr.id) || { first: e.time, last: e.time }; if (e.time < s.first) s.first = e.time; if (e.time > s.last) s.last = e.time; seenAgg.set(pr.id, s); }
     else { const x = P.get(pr.ref); if (e.time < x.first) x.first = e.time; if (e.time > x.last) x.last = e.time; }
     if (e.time.getTime() >= keepFrom && e.accessKeyId && !e.userCall) {         // IAM users' calls are counted, not kept one by one
-      callRows.push({ key: e.accessKeyId, role, pr, e, action, resources: res || [], childKey });
+      callRows.push({ key: signinOf.get(e.accessKeyId) || e.accessKeyId, role, pr, e, action, resources: res || [], childKey });
     }
     if (!action) return;                                // no IAM permission involved (console sign-in)
     const day = e.time.toISOString().slice(0, 10);
@@ -130,6 +247,8 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
       x.n++; if (e.time > x.last) x.last = e.time; passed.set(pk, x);
     }
   };
+
+  const linkRows = await linkConsoleKeys(c, evs, roles, keyOwner, signinOf, ensure);
 
   for (const e of evs) {
     if (e.type === 'assume') {
@@ -155,7 +274,7 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
       for (const t of e.sessionTags || []) a.tags.add(t);
       assumeAgg.set(pr.ref, a);
       if (e.accessKeyId) {
-        if (!keyOwner.has(e.accessKeyId)) { keyOwner.set(e.accessKeyId, pr); newKeys.set(e.accessKeyId, { role, pr, started: e.time }); }   // the first one wins, as before
+        if (!keyOwner.has(e.accessKeyId)) { keyOwner.set(e.accessKeyId, pr); newKeys.set(e.accessKeyId, { role, pr, started: e.time, name: e.sessionName }); }   // the first one wins, as before
         if (e.time.getTime() >= keepFrom) {
           const prev = sessUpserts.get(e.accessKeyId);
           sessUpserts.set(e.accessKeyId, { role, pr, e, viaAction, trust, started: prev && prev.started < e.time ? prev.started : e.time });
@@ -226,9 +345,25 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
   if (newKeys.size) {
     const K = [...newKeys.entries()];
     await c.query(
-      `INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at)
-       SELECT * FROM unnest($1::text[], $2::uuid[], $3::uuid[], $4::timestamptz[]) ON CONFLICT (access_key_id) DO NOTHING`,
-      [K.map(([k]) => k), K.map(([, v]) => v.role.id), K.map(([, v]) => resolve(v.pr)), K.map(([, v]) => v.started)]);
+      `INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at, session_name)
+       SELECT * FROM unnest($1::text[], $2::uuid[], $3::uuid[], $4::timestamptz[], $5::text[]) ON CONFLICT (access_key_id) DO NOTHING`,
+      [K.map(([k]) => k), K.map(([, v]) => v.role.id), K.map(([, v]) => resolve(v.pr)), K.map(([, v]) => v.started), K.map(([, v]) => v.name || null)]);
+  }
+  if (linkRows.length) {
+    for (const part of chunks(linkRows)) {
+      await c.query(
+        `INSERT INTO role_sessions(access_key_id, role_id, principal_id, started_at, signin_key, session_name, session_created)
+         SELECT * FROM unnest($1::text[], $2::uuid[], $3::uuid[], $4::timestamptz[], $5::text[], $6::text[], $7::timestamptz[]) ON CONFLICT (access_key_id) DO NOTHING`,
+        [part.map((x) => x.key), part.map((x) => x.role.id), part.map((x) => resolve(x.owner)), part.map((x) => x.started), part.map((x) => x.signin),
+         part.map((x) => x.name), part.map((x) => x.created)]);
+    }
+  }
+  if (callIps.size) {
+    const I = [...callIps.values()].map((x) => ({ id: resolve(x.pr), ips: [...x.ips] })).filter((x) => x.id);
+    await c.query(
+      `UPDATE principals p SET call_ips = (SELECT ARRAY(SELECT DISTINCT unnest(p.call_ips || ARRAY(SELECT jsonb_array_elements_text(u.ips::jsonb))) LIMIT 20))
+         FROM unnest($1::uuid[], $2::text[]) AS u(id, ips) WHERE p.id = u.id`,
+      [I.map((x) => x.id), I.map((x) => J(x.ips))]);
   }
 
   // ---- 5. session replay (retention window only) ----
@@ -262,10 +397,11 @@ export async function applyEvents(c, evs, roles, accountId, opts = {}) {
       const H = [...placeholders.values()];
       const r = await c.query(
         `INSERT INTO track_sessions(account_id, role_id, access_key_id, principal_id, via, session_name, source_ip, user_agent, start_known, started_at)
-         SELECT $1::uuid, r, k, p, 'started before stored history', sn, ip, ua, false, t
+         SELECT $1::uuid, r, k, p, 'sign-in not seen', sn, ip, ua, false, t
            FROM unnest($2::uuid[], $3::text[], $4::uuid[], $5::text[], $6::text[], $7::text[], $8::timestamptz[]) AS u(r, k, p, sn, ip, ua, t)
          ON CONFLICT (access_key_id) DO UPDATE SET started_at=LEAST(track_sessions.started_at, EXCLUDED.started_at) RETURNING id, access_key_id`,
-        [accountId, H.map((x) => x.role.id), H.map((x) => x.key), H.map((x) => resolve(x.pr)), H.map((x) => x.e.sessionName || null), H.map((x) => x.e.ip), H.map((x) => x.e.userAgent), H.map((x) => x.e.time)]);
+        [accountId, H.map((x) => x.role.id), H.map((x) => x.key), H.map((x) => resolve(x.pr)), H.map((x) => x.e.sessionName || null), H.map((x) => x.e.ip), H.map((x) => x.e.userAgent),
+         H.map((x) => (x.e.sessionCreated && x.e.sessionCreated < x.e.time ? x.e.sessionCreated : x.e.time))]);
       for (const x of r.rows) sessionId.set(x.access_key_id, x.id);
     }
     // duplicates were removed before this point, so every row counts; the session tallies are worked out here

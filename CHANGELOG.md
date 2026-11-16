@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- **Console sessions are tied to the person who signed in.** The console signs in with AssumeRoleWithSAML and then calls with keys that event never shows, so each person appeared twice under *Who assumed this role* (a federated caller with the sign-ins, a `session <name>` caller with the calls, no IPs, "started before the window") and every console key became a session of its own. A key no AssumeRole issued is now tied to its sign-in by session name and creation time; failing that, on an IAM Identity Center role (by its `/aws-reserved/sso.amazonaws.com/` path, not its name) to the person by name; otherwise its keys are at least kept as one session. Migration 038 merges the callers already stored apart on Identity Center roles. Callers show the IPs of their calls as well as of their sign-ins, and the Sessions list can be filtered by person.
+- **PassRole is inferred from role fields only** (task role, function role, schedule target role...), not from any role ARN in a request: reading or analysing a role no longer shows as passing it. EC2 instance profiles, given by ARN or by name, now count. Migration 037 removes the wrong rows stored for IAM, STS and Access Analyzer.
+
 ### Changed
 - **Policy page follows the re-rated defaults.** The control catalogue describes the new built-in severities (evidence gaps, wildcards, idle roles, deleted identities, whole-account trust); new control `perm.not-action`; a credential control set to high weighs 50 (High on its own, like console-no-mfa). An unused administrator role is high through *Administrator access not used in 90 days*, so *Role not used* stops at medium instead of raising it twice. Workspace overrides still win.
 - **Built-in rules re-rated** (every rule and its severity is now listed in `docs/rules.md`). High means someone could get access they should not have; a finding that only says use could not be proven is never high.

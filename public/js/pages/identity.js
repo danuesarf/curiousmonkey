@@ -203,10 +203,13 @@ function overviewTab(d, u, hist, open) {
 }
 
 /** Sessions of this role: one list, the same on every identity. A session opens its replay in a window over the page. */
-function sessionsSection(roleId, ctx) {
+function sessionsSection(roleId, ctx, principals = []) {
   const box = h('div', { class: 'muted small' }, h('span', { class: 'spin' }), ' Loading sessions');
   const open = (s) => { const hash = `#/track?role=${roleId}&session=${s.id}`; ctx.inWindow ? go(hash) : ctx.openWindow(hash, { title: s.sessionName || 'Session', eyebrow: 'TRACK · CALL BY CALL' }); };
-  get(`/sessions?role=${roleId}&limit=50`).then((r) => {
+  // one person at a time: the newest sessions of whoever is busiest would otherwise fill the list
+  const who = principals.length > 1 && h('select', { 'aria-label': 'Sessions of', onChange: () => load() },
+    h('option', { value: '' }, 'Everyone'), principals.map((p) => h('option', { value: p.id }, `${p.display} (${p.kind})`)));
+  const load = () => get(`/sessions?role=${roleId}&limit=50${who && who.value ? `&principal=${who.value}` : ''}`).then((r) => {
     box.className = '';
     box.replaceChildren(r.items.length ? h('div', { class: 'scroll' }, h('table', { class: 'small' },
       h('thead', null, h('tr', null, h('th', null, 'Session'), h('th', null, 'Started by'), h('th', null, 'Calls'), h('th', null, 'Started'), h('th', null, ''))),
@@ -214,11 +217,12 @@ function sessionsSection(roleId, ctx) {
         h('td', { class: 'mono' }, s.sessionName || s.id.slice(0, 8)),
         h('td', null, s.principal || s.callerArn || 'Unknown caller'),
         h('td', { class: 'nowrap' }, num(s.calls), s.denied > 0 && h('span', { class: 'badge b-high', style: 'margin-left:6px' }, `${s.denied} denied`)),
-        h('td', { class: 'nowrap' }, s.startKnown ? ago(s.startedAt) : 'earlier than the stored history'),
+        h('td', { class: 'nowrap' }, s.startKnown ? ago(s.startedAt) : h('span', { title: 'The sign-in that started it was not in the history read' }, `${ago(s.startedAt)}, sign-in not seen`)),
         h('td', { class: 'nowrap' }, s.isJump && h('span', { class: 'badge b-neutral' }, 'jumped in'), s.hasJumps && h('span', { class: 'badge b-neutral', style: 'margin-left:4px' }, 'jumps on'), h('span', { class: 'link-btn', style: 'margin-left:8px' }, 'Replay'))))))) 
       : h('p', { class: 'muted small' }, `No session recorded. Sessions come from AssumeRole events and are kept for ${r.retentionDays} days.`));
   }).catch((e) => { box.textContent = e.message; });
-  return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Sessions'), h('span', { class: 'small muted' }, 'Pick one to replay it call by call, with every role it jumped into.')), h('div', { class: 'card-b' }, box));
+  load();
+  return h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Sessions'), h('span', { class: 'small muted grow' }, 'Pick one to replay it call by call, with every role it jumped into.'), who || null), h('div', { class: 'card-b' }, box));
 }
 
 function activityTab(d, parts, ctx) {
@@ -229,7 +233,7 @@ function activityTab(d, parts, ctx) {
     isUser ? parts.who
       : h('section', { class: 'card', id: 'principals' }, h('div', { class: 'card-h' }, h('h2', null, 'Who assumed this role')),
         d.principals.length ? h('div', { class: 'stack', style: null }, d.principals.map(principalCard)) : h('div', { class: 'empty' }, 'Nobody assumed this role in the window.')),
-    !isUser && sessionsSection(d.role.id, ctx),
+    !isUser && sessionsSection(d.role.id, ctx, d.principals),
     d.passRoles.length > 0 && h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, `Roles this ${isUser ? 'user' : 'role'} passed to services`), h('span', { class: 'small muted' }, 'Inferred from the role fields of each request (a task role, a function role, an instance profile). CloudTrail does not log iam:PassRole itself.')),
       h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Passed role'), h('th', null, 'Service'), h('th', null, 'Times'), h('th', null, 'Last seen'))),
         h('tbody', null, d.passRoles.map((p) => h('tr', null, h('td', { class: 'mono small' }, p.passed_role_arn), h('td', null, p.service), h('td', null, num(p.count)), h('td', { class: 'small' }, ago(p.last_seen))))))))
@@ -297,7 +301,8 @@ function principalCard(p) {
     h('dl', { class: 'kv' },
       h('dt', null, 'First / last seen'), h('dd', null, `${fmtDate(p.first_seen)}  to  ${fmtDate(p.last_seen)}`),
       h('dt', null, 'Sessions'), h('dd', null, num(p.sessions_count)),
-      p.source_ips?.length > 0 && [h('dt', null, 'Source IPs'), h('dd', { class: 'mono small' }, p.source_ips.join(', '))],
+      p.source_ips?.length > 0 && [h('dt', { title: 'Where the AssumeRole came from. For IAM Identity Center these are AWS addresses, not the person.' }, 'Sign-in IPs'), h('dd', { class: 'mono small' }, p.source_ips.join(', '))],
+      p.call_ips?.length > 0 && [h('dt', { title: 'Where its API calls came from' }, 'Call IPs'), h('dd', { class: 'mono small' }, p.call_ips.join(', '))],
       p.source_identity && [h('dt', null, 'Source identity'), h('dd', null, p.source_identity)],
       p.session_tags?.length > 0 && [h('dt', null, 'Session tags'), h('dd', { class: 'mono small' }, p.session_tags.join(', '))],
       h('dt', null, 'Conditions on entry'),

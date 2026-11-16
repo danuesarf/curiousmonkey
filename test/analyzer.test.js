@@ -47,10 +47,16 @@ test('parses an API call made by a role session and detects PassRole', () => {
   const e = parseEvent(rec({
     eventSource: 'ec2.amazonaws.com', eventName: 'RunInstances',
     userIdentity: { type: 'AssumedRole', arn: 'arn:aws:sts::111111111111:assumed-role/app/sess', accessKeyId: 'ASIA1', sessionContext: { sessionIssuer: { arn: ROLE } } },
-    requestParameters: { iamInstanceProfile: { arn: 'arn:aws:iam::111111111111:role/ec2-worker' } },
+    recipientAccountId: '111111111111',
+    requestParameters: { instancesSet: { items: [{ imageId: 'ami-1' }] }, iamInstanceProfile: { arn: 'arn:aws:iam::111111111111:instance-profile/ec2-worker' } },
   }));
   assert.equal(e.type, 'api'); assert.equal(e.action, 'ec2:RunInstances');
-  assert.deepEqual(e.passedRoles, ['arn:aws:iam::111111111111:role/ec2-worker']);
+  // EC2 is given an instance profile, and that is what CloudTrail shows
+  assert.deepEqual(e.passedRoles, ['arn:aws:iam::111111111111:instance-profile/ec2-worker']);
+  const byName = parseEvent(rec({ eventSource: 'ec2.amazonaws.com', eventName: 'AssociateIamInstanceProfile', recipientAccountId: '111111111111',
+    userIdentity: { type: 'AssumedRole', arn: 'arn:aws:sts::111111111111:assumed-role/app/sess', accessKeyId: 'ASIA1', sessionContext: { sessionIssuer: { arn: ROLE } } },
+    requestParameters: { instanceId: 'i-1', iamInstanceProfile: { name: 'ec2-worker' } } }));
+  assert.deepEqual(byName.passedRoles, ['arn:aws:iam::111111111111:instance-profile/ec2-worker']);
 });
 
 test('PassRole: only a role handed to a service counts, not a role that is read or analyzed', () => {

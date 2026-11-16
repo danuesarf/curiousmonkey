@@ -87,11 +87,11 @@ test('someone who can only see the second account sees their part and is told th
   assert.equal(await ses.buildTrack({ scope_accounts: [B] }, (await db.query('SELECT id FROM track_sessions WHERE access_key_id=$1', [sessionA.accessKeyId])).rows[0].id), null);
 });
 
-test('calls of a session whose start is older than stored history still group, marked as such', async () => {
+test('calls of a session whose sign-in was not seen still group, marked as such', async () => {
   const orphan = { ...update, eventID: 'e9', userIdentity: { ...sessionB, accessKeyId: 'ASIACCCCCCCCCCCCCCC3', arn: 'arn:aws:sts::222222222222:assumed-role/payments-deployer/old' } };
   await apply([orphan], B, [roleB]);
   const s = (await db.query('SELECT start_known, via, calls FROM track_sessions WHERE access_key_id=$1', ['ASIACCCCCCCCCCCCCCC3'])).rows[0];
-  assert.deepEqual(s, { start_known: false, via: 'started before stored history', calls: 1 });
+  assert.deepEqual(s, { start_known: false, via: 'sign-in not seen', calls: 1 });
 });
 
 // In the target account's trail a cross-account AssumeRole carries no ARN: { type: AWSAccount, accountId, principalId }.
