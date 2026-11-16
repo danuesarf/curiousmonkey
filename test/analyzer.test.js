@@ -53,6 +53,26 @@ test('parses an API call made by a role session and detects PassRole', () => {
   assert.deepEqual(e.passedRoles, ['arn:aws:iam::111111111111:role/ec2-worker']);
 });
 
+test('PassRole: only a role handed to a service counts, not a role that is read or analyzed', () => {
+  const ui = { type: 'AssumedRole', sessionContext: { sessionIssuer: { arn: ROLE } } };
+  const OTHER = 'arn:aws:iam::111111111111:role/ecs/backend/Task';
+  const EXEC = 'arn:aws:iam::111111111111:role/ecs/backend/Exec';
+  const passed = (eventSource, eventName, requestParameters) => parseEvent(rec({ eventSource, eventName, userIdentity: ui, requestParameters })).passedRoles;
+  // passed
+  assert.deepEqual(passed('ecs.amazonaws.com', 'RegisterTaskDefinition', { family: 'x', taskRoleArn: OTHER, executionRoleArn: EXEC }), [OTHER, EXEC]);
+  assert.deepEqual(passed('lambda.amazonaws.com', 'CreateFunction20150331', { functionName: 'f', role: OTHER }), [OTHER]);
+  assert.deepEqual(passed('access-analyzer.amazonaws.com', 'StartPolicyGeneration',
+    { policyGenerationDetails: { principalArn: OTHER }, cloudTrailDetails: { accessRole: EXEC, trails: [] } }), [EXEC]);
+  assert.deepEqual(passed('redshift.amazonaws.com', 'ModifyClusterIamRoles', { addIamRoles: [OTHER] }), [OTHER]);
+  // looked at, not passed
+  assert.deepEqual(passed('iam.amazonaws.com', 'GenerateServiceLastAccessedDetails', { arn: OTHER }), []);
+  assert.deepEqual(passed('iam.amazonaws.com', 'UpdateAssumeRolePolicy', { roleName: 'x', policyDocument: `{"Principal":{"AWS":"${OTHER}"}}` }), []);
+  assert.deepEqual(passed('access-analyzer.amazonaws.com', 'StartPolicyGeneration', { policyGenerationDetails: { principalArn: OTHER } }), []);
+  assert.deepEqual(passed('access-analyzer.amazonaws.com', 'ValidatePolicy', { policyDocument: `{"Resource":"${OTHER}"}` }), []);
+  assert.deepEqual(passed('eks.amazonaws.com', 'CreateAccessEntry', { principalArn: OTHER }), []);
+  assert.deepEqual(passed('s3.amazonaws.com', 'PutBucketPolicy', { bucketPolicy: { Statement: [{ Principal: { AWS: OTHER } }] } }), []);
+});
+
 test('denied calls are marked', () => {
   const e = parseEvent(rec({ eventSource: 's3.amazonaws.com', eventName: 'ListBuckets', errorCode: 'AccessDenied',
     userIdentity: { type: 'AssumedRole', sessionContext: { sessionIssuer: { arn: ROLE } } } }));

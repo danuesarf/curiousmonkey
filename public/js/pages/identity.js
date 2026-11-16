@@ -230,7 +230,7 @@ function activityTab(d, parts, ctx) {
       : h('section', { class: 'card', id: 'principals' }, h('div', { class: 'card-h' }, h('h2', null, 'Who assumed this role')),
         d.principals.length ? h('div', { class: 'stack', style: null }, d.principals.map(principalCard)) : h('div', { class: 'empty' }, 'Nobody assumed this role in the window.')),
     !isUser && sessionsSection(d.role.id, ctx),
-    d.passRoles.length > 0 && h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, `Roles this ${isUser ? 'user' : 'role'} passed to services`), h('span', { class: 'small muted' }, 'Inferred from request parameters. CloudTrail does not log iam:PassRole itself.')),
+    d.passRoles.length > 0 && h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, `Roles this ${isUser ? 'user' : 'role'} passed to services`), h('span', { class: 'small muted' }, 'Inferred from the role fields of each request (a task role, a function role, an instance profile). CloudTrail does not log iam:PassRole itself.')),
       h('div', { class: 'scroll' }, h('table', null, h('thead', null, h('tr', null, h('th', null, 'Passed role'), h('th', null, 'Service'), h('th', null, 'Times'), h('th', null, 'Last seen'))),
         h('tbody', null, d.passRoles.map((p) => h('tr', null, h('td', { class: 'mono small' }, p.passed_role_arn), h('td', null, p.service), h('td', null, num(p.count)), h('td', { class: 'small' }, ago(p.last_seen))))))))
   );

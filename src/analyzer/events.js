@@ -64,10 +64,36 @@ export function parseEvent(rec) {
   };
 }
 
-/** CloudTrail never logs iam:PassRole itself, but the role ARN shows up in the request that used it. */
+// Services that never take a passed role: a role ARN in their requests is the role being read, changed or analyzed.
+const NO_PASS_SOURCES = new Set(['iam.amazonaws.com', 'sts.amazonaws.com']);
+// A field that hands a role to a service is named for it: role, roleArn, executionRoleArn, serviceRole, iamRoles,
+// accessRole, nodeRole, iamInstanceProfile... Fields such as principalArn, resourceArn or arn only name a role.
+const PASS_KEY = /role|instanceprofile/i;
+// A policy or document that sits under such a field lists roles; it does not pass them.
+const NOT_PASS_KEY = /policy|document|principal|trust/i;
+
+/**
+ * CloudTrail never logs iam:PassRole itself, but the role ARN shows up in the request that used it.
+ * Only role ARNs under a field that hands the role to the service count (RunInstances iamInstanceProfile,
+ * RegisterTaskDefinition taskRoleArn, CreateFunction role, StartPolicyGeneration cloudTrailDetails.accessRole...).
+ * A role ARN anywhere else (GetRole, GenerateServiceLastAccessedDetails, Access Analyzer's principalArn) is a role
+ * this one looked at, not one it passed.
+ */
 export function findPassedRoles(rec, callerRoleArn) {
-  const text = JSON.stringify(rec.requestParameters || {});
-  const found = new Set(text.match(ROLE_ARN_RE) || []);
+  if (NO_PASS_SOURCES.has(rec.eventSource)) return [];
+  const found = new Set();
+  const walk = (v, passing) => {
+    if (v == null) return;
+    if (typeof v === 'string') { if (passing) for (const a of v.match(ROLE_ARN_RE) || []) found.add(a); return; }
+    if (Array.isArray(v)) { for (const x of v) walk(x, passing); return; }
+    if (typeof v === 'object') {
+      for (const [k, x] of Object.entries(v)) {
+        if (NOT_PASS_KEY.test(k)) continue;
+        walk(x, passing || PASS_KEY.test(k));
+      }
+    }
+  };
+  walk(rec.requestParameters, false);
   found.delete(callerRoleArn);
   return [...found];
 }
