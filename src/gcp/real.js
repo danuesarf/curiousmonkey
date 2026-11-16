@@ -9,8 +9,35 @@ const SCOPES = ['https://www.googleapis.com/auth/cloud-platform'];
 const CRM = 'https://cloudresourcemanager.googleapis.com/v3';
 const IAM = 'https://iam.googleapis.com/v1';
 const LOGGING = 'https://logging.googleapis.com/v2';
-const LOG_FIELDS = 'nextPageToken,entries(timestamp,protoPayload/authenticationInfo,protoPayload/authorizationInfo)';
-let fieldsRefused = false;
+// Partial responses: the `fields` system parameter, which every Google REST API takes
+// (https://cloud.google.com/apis/docs/system-parameters). The reader never falls back to whole entries. The first
+// mask reaches inside protoPayload, a google.protobuf.Any; if that is refused, or the paths get dropped on the way
+// (so pages come back with entries but no protoPayload), it steps down to the whole protoPayload, still without
+// resource, labels, operation and the rest. If both fail, the read fails with a clear error and is retried later.
+export const LOG_MASKS = [
+  'nextPageToken,entries(timestamp,protoPayload/authenticationInfo,protoPayload/authorizationInfo)',
+  'nextPageToken,entries(timestamp,protoPayload)',
+];
+let maskAt = 0;                                    // per process: once a mask fails, later reads start at the next one
+export const logMaskInUse = () => (maskAt < LOG_MASKS.length ? LOG_MASKS[maskAt] : null);
+/** Entries came back, but none carries a caller or a permission check: the mask lost the fields it asked for. */
+export const maskDropped = (r) => (r.entries || []).length > 0 && !(r.entries || []).some((e) => e?.protoPayload?.authenticationInfo || e?.protoPayload?.authorizationInfo);
+
+/** One entries.list page through the field masks, best first. `post(mask)` makes the request. Never reads whole entries. */
+export async function readWithMasks(post) {
+  for (; maskAt < LOG_MASKS.length; maskAt++) {
+    let r;
+    try { r = await post(LOG_MASKS[maskAt]); } catch (e) {
+      if (e.status === 400 && /field|mask|path/i.test(e.message)) continue;          // this mask refused: try the next
+      throw e;
+    }
+    if (maskDropped(r)) continue;                                                     // accepted but emptied: try the next
+    return r;
+  }
+  maskAt = 0;                                                                         // the next retry starts from the best mask again
+  throw Object.assign(new Error('The Logging API returned no caller or permission fields under any field mask, so nothing was counted; whole entries are never read. Retried later.'), { status: 422 });
+}
+export const resetLogMask = () => { maskAt = 0; };
 
 export const wifAudience = (w) => `//iam.googleapis.com/projects/${w.projectNumber}/locations/global/workloadIdentityPools/${w.poolId}/providers/${w.providerId}`;
 
@@ -103,13 +130,7 @@ export function realGcpGateway(conn, { client: injected } = {}) {
     // asked for, so a page is a few hundred KB instead of megabytes of request and response bodies.
     async logEntries({ projectId, filter, pageToken = '' }) {
       const body = { resourceNames: [`projects/${projectId}`], filter, orderBy: 'timestamp asc', pageSize: 1000, ...(pageToken ? { pageToken } : {}) };
-      if (!fieldsRefused) {
-        try { return await call('POST', `${LOGGING}/entries:list?fields=${encodeURIComponent(LOG_FIELDS)}`, body); } catch (e) {
-          if (e.status !== 400 || !/field/i.test(e.message)) throw e;
-          fieldsRefused = true;                            // the field mask was refused: read whole entries from now on
-        }
-      }
-      return call('POST', `${LOGGING}/entries:list`, body);
+      return readWithMasks((mask) => call('POST', `${LOGGING}/entries:list?fields=${encodeURIComponent(mask)}`, body));
     },
     async whoami() {
       clientP ||= gcpClient(conn);

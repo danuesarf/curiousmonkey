@@ -261,7 +261,9 @@ data.get('/accounts', requirePerm('view'), wrap(async (req, res) => {
       (SELECT json_build_object('id', id, 'status', status, 'trigger', trigger, 'created_at', created_at, 'finished_at', finished_at, 'error', error)
          FROM scan_runs WHERE account_id=a.id AND trigger <> 'tail' ORDER BY created_at DESC LIMIT 1) AS last_run,
       (SELECT coalesce(json_agg(json_build_object('region', region, 'first', first_event_time, 'last', last_event_time, 'events', events_read, 'gap', gap_detected)), '[]')
-         FROM scan_checkpoints WHERE account_id=a.id) AS checkpoints
+         FROM scan_checkpoints WHERE account_id=a.id) AS checkpoints,
+      (SELECT json_build_object('bytes', COALESCE((SELECT avg(x.bytes)::bigint FROM account_storage_samples x WHERE x.account_id = s.account_id AND x.at > now() - interval '24 hours'), s.bytes),
+         'rows', rows_est, 'sampled', sampled, 'at', at) FROM account_storage s WHERE s.account_id=a.id) AS storage
     FROM cloud_accounts a WHERE ${scopeSql(req.user, 'a.id', p)} ORDER BY a.name`, p);
   const hist = await historyFor(r.rows);
   res.json({ items: r.rows.map((a) => ({ ...publicAccount(a), history: hist.get(a.id) })) });
