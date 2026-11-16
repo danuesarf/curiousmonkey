@@ -91,8 +91,7 @@ test('the migration merges callers already stored apart, on Identity Center role
   const old = (await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen) VALUES ($1,'session:bernard@krom.id','session','session bernard@krom.id','unknown (started before the window)', now() - interval '20 days', now()) RETURNING id`, [sso.id])).rows[0].id;
   await db.query(`INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count) VALUES ($1,$2,'notifications:ListManagedNotificationEvents', current_date, 1984, 0)`, [sso.id, old]);
   const dep = (await callers(deployer)).find((x) => x.kind === 'session');
-  const sql = fs.readFileSync(new URL('../src/migrations/038_console_sessions.sql', import.meta.url), 'utf8')
-    .split('\n').filter((l) => !/^(ALTER TABLE|CREATE INDEX)/.test(l)).join('\n');
+  const sql = fs.readFileSync(new URL('../src/migrations/040_console_sessions_merge.sql', import.meta.url), 'utf8');
   await db.tx((c) => c.query(sql));
   const after = await callers(sso);
   assert.deepEqual(after.map((x) => x.kind), ['federated', 'federated']);                    // bernard and michael, nobody twice

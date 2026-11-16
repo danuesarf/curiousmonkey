@@ -5,6 +5,8 @@ import { query } from './db.js';
 import { inScope } from './auth/rbac.js';
 
 const MAX_HOPS = 12;
+// sessions stored before migration 038 carry the old label
+const viaLabel = (v) => (v === 'started before stored history' ? 'sign-in not seen' : v);
 
 const SESSION_COLS = `s.id, s.account_id, s.role_id, s.access_key_id, s.parent_key_id, s.via, s.caller_type, s.caller_arn, s.session_name,
   s.source_ip, s.user_agent, s.mfa, s.source_identity, s.trust, s.start_known, s.started_at, s.last_call_at, s.calls, s.denied,
@@ -70,7 +72,7 @@ export async function buildTrack(user, sessionId) {
        FROM track_calls WHERE session_id = ANY($1) ORDER BY at, event_id LIMIT 5000`, [visible.map((s) => s.id)])).rows : [];
   return {
     sessionId: start.id,
-    origin: { caller: root.principal || root.caller_arn || 'unknown', callerType: root.caller_type, via: root.via, startKnown: root.start_known },
+    origin: { caller: root.principal || root.caller_arn || 'unknown', callerType: root.caller_type, via: viaLabel(root.via), startKnown: root.start_known },
     sessions: visible.map((s, i) => ({ ...publicSession(s), lane: i, parentLane: s.parent_key_id && keyIndex.has(s.parent_key_id) ? keyIndex.get(s.parent_key_id) : null })),
     hidden: ordered.length - visible.length,           // sessions in accounts this user cannot see
     calls: calls.map((c) => ({
@@ -85,7 +87,7 @@ export async function buildTrack(user, sessionId) {
 function publicSession(s) {
   return {
     id: s.id, accountId: s.account_id, account: s.account_name, awsAccountId: s.aws_account_id, roleId: s.role_id, role: s.role_name, roleArn: s.role_arn,
-    principal: s.principal, principalKind: s.principal_kind, via: s.via, callerType: s.caller_type, callerArn: s.caller_arn, sessionName: s.session_name,
+    principal: s.principal, principalKind: s.principal_kind, via: viaLabel(s.via), callerType: s.caller_type, callerArn: s.caller_arn, sessionName: s.session_name,
     sourceIp: s.source_ip, userAgent: s.user_agent, mfa: s.mfa, sourceIdentity: s.source_identity, trust: s.trust, startKnown: s.start_known,
     startedAt: s.started_at, lastCallAt: s.last_call_at, calls: s.calls, denied: s.denied,
     isJump: s.is_jump ?? !!s.parent_key_id, hasJumps: s.has_jumps ?? false,
