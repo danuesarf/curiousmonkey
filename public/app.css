@@ -152,15 +152,79 @@ ul.plain{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;g
 .tag{font-family:var(--mono);font-size:10.5px;padding:1px 6px;border:1px solid var(--edge);color:var(--muted)}.tag.bad{border-color:var(--red-line);color:var(--red-ink)}
 .unk-tag{font-family:var(--mono);font-size:10.5px;padding:1px 6px;border:1px dashed var(--amber);color:var(--amber);text-decoration:none}
 
-/* ---- sign in ---- */
-.auth{min-height:100vh;display:grid;grid-template-columns:minmax(0,1.2fr) minmax(380px,1fr)}
-@media (max-width:900px){.auth{grid-template-columns:1fr}.auth-art{display:none!important}}
-.auth-art{position:relative;display:flex;align-items:center;justify-content:center;border-right:1px solid var(--line);padding:40px}
-.auth-art svg{width:min(86%,620px);height:auto}
-.auth-art h2{position:absolute;left:40px;bottom:36px;font-size:26px;font-weight:500;letter-spacing:-.02em;line-height:1.2;max-width:520px}
-.auth-art h2 span{color:var(--banana)}
-.auth-form{display:flex;align-items:center;justify-content:center;padding:40px}
-.auth-form form{width:100%;max-width:380px;display:flex;flex-direction:column;gap:16px}
+/* ---- sign in, sign up, two-factor setup: the radar, and a monkey peeking over the form ---- */
+/* Colours only through custom properties: the light theme rewrites literal colours, and these have light values below. */
+:root{--au-sweep:#f6e016;--au-dot:#5f8c73;--au-cross:#16392a;--au-shadow:rgba(0,0,0,.55)}
+:root[data-theme=light]{--au-sweep:#c9a800;--au-dot:#6b9680;--au-cross:#d3e2d9;--au-shadow:rgba(16,58,38,.18)}
+.au{position:relative;min-height:100vh;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;padding:24px 16px 28px}
+.au-mid{position:relative;z-index:1;width:100%;max-width:400px;margin-top:132px}
+.au-panel{position:relative;z-index:2;display:flex;flex-direction:column;gap:16px;padding:28px;background:var(--panel);border:1px solid var(--edge);border-radius:var(--radius);box-shadow:0 24px 60px -20px var(--au-shadow);animation:au-panel .7s .2s cubic-bezier(.2,.7,.2,1) backwards}
+.au-panel input,.au-panel .btn{min-height:44px}
+.au-secret{display:flex;gap:8px}.au-secret input{flex:1;min-width:0}.au-show{flex:none;min-width:64px;font-size:13px}
+.au-qr{align-items:flex-start}.au-qr img{border-radius:var(--radius)}.au-qr code{overflow-wrap:anywhere}
+.au-motto{position:relative;z-index:1;color:var(--muted);text-align:center}
+@media (max-width:480px){.au-panel{padding:22px 18px}}
+
+/* radar */
+.au-radar{position:absolute;left:50%;top:50%;width:1600px;height:1600px;margin:-800px 0 0 -800px;pointer-events:none;animation:au-in 1.4s cubic-bezier(.2,.7,.2,1) backwards}
+.au-disc{fill:var(--panel);stroke:var(--edge)}
+.au-ring{fill:none;stroke:var(--edge);stroke-dasharray:3 6}
+.au-cross{stroke:var(--au-cross)}.au-dots{fill:var(--au-dot)}
+.au-stop{stop-color:var(--au-sweep)}
+.au-beam{stroke:var(--au-sweep);stroke-width:2.5}
+.au-sweep{transform-origin:800px 800px;animation:au-turn 6s linear infinite}
+.au-pulse{fill:none;stroke:var(--au-sweep);stroke-width:3;opacity:0;transform-box:fill-box;transform-origin:center}
+.au-mono{font-family:var(--mono);font-size:14px}.au-note{font-size:12px;fill:var(--muted)}
+.au-yes{fill:var(--banana)}.au-no{fill:var(--red)}.au-maybe{fill:var(--amber)}
+.au-banana{fill:var(--banana-fill);stroke:var(--banana)}
+.au-hollow{fill:none;stroke:var(--amber);stroke-width:2}
+.au-x{stroke:var(--red);stroke-width:2.5}
+.au-echo{fill:none;stroke:var(--au-sweep);stroke-width:1.5;transform-box:fill-box;transform-origin:center;animation:au-echo 6s linear infinite;animation-delay:var(--d)}
+.au-unknown .au-echo{stroke:var(--amber)}
+.au-blip{animation:au-ping 6s linear infinite;animation-delay:var(--d)}
+.au-bazooka{transform-box:fill-box;transform-origin:left center}
+
+/* the monkey */
+.au-head,.au-hands{position:absolute;left:50%;top:-128px;width:240px;height:190px;margin-left:-120px}
+.au-head{z-index:1;animation:au-rise .9s .55s cubic-bezier(.2,1.5,.4,1) backwards;transition:transform .45s cubic-bezier(.2,1.6,.4,1)}
+.au-hands{z-index:3;pointer-events:none;overflow:visible;animation:au-grab .35s 1.25s cubic-bezier(.3,1.6,.5,1) backwards}
+.au-pupils{transform:translate(calc(var(--ex,0)*5px),calc(var(--ey,0)*5px));transition:transform .12s ease-out}
+.au-brows{transition:transform .25s}
+.au-paw,.au-arm{transform-box:fill-box;transform-origin:center bottom;transition:transform .38s cubic-bezier(.3,1.5,.5,1)}
+.au-shake{animation:au-shake .5s ease-in-out}
+
+/* moods: idle watches the sweep (or the pointer), read follows the text, secret covers his eyes and peeks, peek stares */
+.m-idle:not(.tracking) .au-pupils{animation:au-watch 6s linear infinite}
+.m-read .au-pupils{transform:translate(calc(var(--tx,0)*4px),5px)}
+.m-secret .au-pupils,.m-peek .au-pupils{transform:translate(0,5px)}
+.m-peek .au-brows,.m-ok .au-brows{transform:translateY(-5px)}
+.m-err .au-brows{transform:translateY(3px)}
+.m-secret .au-l{transform:translate(45px,-39px)}
+.m-secret .au-r{transform:translate(-45px,-39px);animation:au-peek 4.5s 1.3s ease-in-out infinite}
+.m-busy .au-pupils{animation:au-watch .7s linear infinite}
+.m-busy .au-pulse{animation:au-pulse .9s ease-out infinite}
+.m-ok .au-head{transform:translateY(-38px)}
+.m-ok .au-pupils{transform:translate(0,-2px)}
+.m-ok .au-l{transform:translate(-14px,-74px) rotate(-18deg)}
+.m-ok .au-r{transform:translate(14px,-74px) rotate(18deg)}
+.m-ok .au-bazooka{animation:au-drop 1s .15s cubic-bezier(.5,0,.9,.4) forwards}
+.m-ok .au-kept{animation:none}
+.m-ok .au-kept .au-echo{animation:au-echo-fast 1.1s ease-out infinite}
+
+@keyframes au-turn{to{transform:rotate(360deg)}}
+@keyframes au-in{from{opacity:0;transform:scale(.9)}}
+@keyframes au-panel{from{opacity:0;transform:translateY(14px)}}
+@keyframes au-rise{from{transform:translateY(96px)}}
+@keyframes au-grab{from{opacity:0;transform:translateY(-16px)}}
+@keyframes au-ping{0%,6%{opacity:1}65%,100%{opacity:.5}}
+@keyframes au-echo{0%{transform:scale(.5);opacity:.9}22%,100%{transform:scale(1.5);opacity:0}}
+@keyframes au-echo-fast{0%{transform:scale(.5);opacity:.9}100%{transform:scale(1.6);opacity:0}}
+@keyframes au-pulse{0%{transform:scale(.25);opacity:.7}100%{transform:scale(1);opacity:0}}
+@keyframes au-drop{to{transform:translateY(190px) rotate(24deg);opacity:0}}
+@keyframes au-watch{0%,100%{transform:translate(4px,0)}12.5%{transform:translate(2.8px,2.8px)}25%{transform:translate(0,4px)}37.5%{transform:translate(-2.8px,2.8px)}50%{transform:translate(-4px,0)}62.5%{transform:translate(-2.8px,-2.8px)}75%{transform:translate(0,-4px)}87.5%{transform:translate(2.8px,-2.8px)}}
+@keyframes au-peek{0%,18%,62%,100%{transform:translate(-45px,-39px)}26%,54%{transform:translate(-45px,-24px)}}
+@keyframes au-shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-9px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(4px)}}
+@media (prefers-reduced-motion:reduce){.au *{animation:none!important;transition:none!important}}
 
 /* ---- wizard and forms ---- */
 .wizard-nav{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.wizard-nav .grow{flex:1}
