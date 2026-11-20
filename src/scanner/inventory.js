@@ -1,6 +1,7 @@
 import { getGateway } from '../aws/gateway.js';
 import { query, tx } from '../db.js';
 import { docHash } from '../analyzer/policy.js';
+import { inventoryResources } from '../resourceSync.js';
 
 export const roleKind = (name, path) =>
   path.includes('/aws-service-role/') || name.startsWith('AWSServiceRoleFor') ? 'service-linked'
@@ -279,8 +280,12 @@ export async function runInventory(ctx) {
     } catch (e) { if (!denied(e)) ctx.log(`Identity Center assignments not read: ${e.message}`, null, 'warn'); }
   }
 
+  // resource-based policies (S3, KMS, DynamoDB, SQS, SNS, Secrets Manager, Lambda, ECR): who they let in. Optional:
+  // a service the scanner role may not list is skipped; nothing here fails the scan.
+  const resources = await inventoryResources(ctx, account, gw).catch((e) => { ctx.log(`resource policies not read: ${e.message}`, null, 'warn'); return null; });
+
   // buckets and other resources that have data events turned on
-  const found =await gw.discoverDataEvents().catch((e) => { ctx.log(`data event discovery failed: ${e.message}`, null, 'warn'); return []; });
+  const found = await gw.discoverDataEvents().catch((e) => { ctx.log(`data event discovery failed: ${e.message}`, null, 'warn'); return []; });
   await tx(async (c) => {
     await c.query('DELETE FROM data_event_sources WHERE account_id=$1', [account.id]);
     for (const f of found) {
@@ -292,5 +297,6 @@ export async function runInventory(ctx) {
     }
   });
   await query(`UPDATE cloud_accounts SET status='connected', status_detail=NULL WHERE id=$1`, [account.id]);
-  return { roles: seen.length, users: userArns ? userArns.length : null, dataEventSources: found.length };
+  return { roles: seen.length, users: userArns ? userArns.length : null, dataEventSources: found.length,
+    resources: resources ? Object.values(resources.resources).reduce((a, b) => a + b, 0) : null, resourcesSkipped: resources?.skipped || [] };
 }

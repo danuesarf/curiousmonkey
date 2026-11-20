@@ -51,3 +51,43 @@ test('direction: In keeps who can get in, Out where it can go, and paths inside 
   // nothing picked: In is from outside the org, Out the paths between your accounts
   assert.equal(ids('in', null), 'ade'); assert.equal(ids('out', null), 'bc');
 });
+
+test('In and Out on the estate count who is at the other end, for every kind of path, in both clouds', async () => {
+  const { wayEnds } = await import('../public/js/pages/spaceRelated.js');
+  const M = { view: 'estate', by: new Map([['a', {}], ['b', {}], ['gcp:p', {}]]), links: [
+    { id: '1', from: 'src:x', to: 'a', kind: 'extHigh' }, { id: '2', from: 'src:x', to: 'a', kind: 'resHigh' },   // one outsider, two paths
+    { id: '3', from: 'src:y', to: 'a', kind: 'res' }, { id: '4', from: 'b', to: 'a', kind: 'chain' },
+    { id: '5', from: 'cm', to: 'a', kind: 'scan' },                                                                 // the scanner: not counted
+    { id: '6', from: 'a', to: 'gcp:p', kind: 'xcloud' }, { id: '7', from: 'b', to: 'gcp:p', kind: 'xcloudHigh' },
+    { id: '8', from: 'gsrc:v', to: 'gcp:p', kind: 'extWarn' }, { id: '9', from: 'gcp:p', to: 'b', kind: 'xcloud' }] };
+  assert.deepEqual([wayEnds(M, 'a', 'in'), wayEnds(M, 'a', 'out')], [3, 1]);
+  assert.deepEqual([wayEnds(M, 'gcp:p', 'in'), wayEnds(M, 'gcp:p', 'out')], [3, 1]);
+  assert.equal(wayEnds(M, null, 'in'), null);
+});
+
+test('In and Out in one account or project: outsiders by their paths to the gate (trust and resources), accounts at the edge', async () => {
+  const { wayEnds } = await import('../public/js/pages/spaceRelated.js');
+  const M = { view: 'account', links: [
+    { id: '1', from: 'src:a', to: 'gate:a', kind: 'extHigh' }, { id: '2', from: 'src:a', to: 'gate:a', kind: 'resHigh' }, { id: '3', from: 'src:b', to: 'gate:b', kind: 'res' },
+    { id: '4', from: 'gate:a', to: 'r1', kind: 'fan' }, { id: '5', from: 'far:x', to: 'r1', kind: 'in' }, { id: '6', from: 'r1', to: 'far:y', kind: 'out' }, { id: '7', from: 'cm', to: 'r1', kind: 'scan' }] };
+  assert.deepEqual([wayEnds(M, null, 'in'), wayEnds(M, null, 'out')], [3, 1]);
+});
+
+test('the wheel: a pinch or a mouse wheel zooms, a two-finger swipe moves the view in any direction', async () => {
+  const { wheelKind } = await import('../public/js/pages/spaceRelated.js');
+  const k = (ev, mem = {}, now = 1000) => wheelKind({ deltaX: 0, deltaY: 0, deltaMode: 0, ...ev }, mem, now);
+  assert.equal(k({ deltaY: 3.2, ctrlKey: true }), 'pinch');                       // trackpad pinch (the browser adds Ctrl)
+  assert.equal(k({ deltaY: 12 }), 'pan');                                         // two fingers, up or down
+  assert.equal(k({ deltaY: -7.5, deltaX: 2 }), 'pan');                             // two fingers, diagonal
+  assert.equal(k({ deltaX: -20 }), 'pan');
+  assert.equal(k({ deltaY: 100 }), 'zoom');                                        // a mouse notch (Chrome, Windows)
+  assert.equal(k({ deltaY: 4, wheelDeltaY: -120 }), 'zoom');                       // a mouse notch on a Mac
+  assert.equal(k({ deltaY: 3, deltaMode: 1 }), 'zoom');                            // Firefox: lines
+  assert.equal(k({ deltaY: 3, metaKey: true }), 'zoom');
+  assert.equal(k({ deltaY: 40, shiftKey: true }), 'pan');
+  // a fast swipe whose step happens to look like a notch stays a swipe while the fingers move
+  const mem = {};
+  assert.equal(k({ deltaY: 20 }, mem, 1000), 'pan');
+  assert.equal(k({ deltaY: 120 }, mem, 1050), 'pan');
+  assert.equal(k({ deltaY: 120 }, mem, 1400), 'zoom');
+});

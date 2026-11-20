@@ -9,9 +9,11 @@
 // The bar under the scene picks the hour (the last 24, in the shown time zone); play steps through them.
 import { h, svg, get, getCached, num, ago, loadEnvironments, envPalette, whoControl, whoOf, whoQs, COLOR, CHANGE_KIND, fmtClock, TZ_LABEL, TZ, paint, syncUrl, wallMode } from '../lib.js';
 import { go, windowIcon } from '../main.js';
-import { related, dirFilter, FADE } from './spaceRelated.js';
+import { related, dirFilter, wayEnds, wheelKind, FADE } from './spaceRelated.js';
+import { stripResources, estateResourceLinks, accountResources, worstRes } from './spaceResources.js';
 
 const W = 1000, H = 900;
+const HOME = { az: -14, el: 33, zoom: 1.15 };   // the starting camera; Reset and 0 go back to it
 // one colour per environment, checked together with every pair compared (colour-blind ΔE ≥ 10, normal vision ≥ 17).
 // Shared is a muted olive: the only non-red hue that still clears both floors next to the other four.
 // base = rings, paths, swatches; hot/dim = the brightest and faintest stars. Red is never an environment.
@@ -45,6 +47,7 @@ function glyph(kind, x, y, s) {
   if (kind === 'web') return `M${ring(3, -Math.PI / 2).join(' L')} Z`;
   if (kind === 'monkey') { const e = s * 0.45, c = (cx, cy, r) => `M${f(cx - r)} ${f(cy)} a${f(r)} ${f(r)} 0 1 0 ${f(2 * r)} 0 a${f(r)} ${f(r)} 0 1 0 ${f(-2 * r)} 0 Z`; return `${c(x, y, s)} ${c(x - s * 0.95, y - s * 0.35, e)} ${c(x + s * 0.95, y - s * 0.35, e)}`; }
   if (kind === 'service') return `M${ring(6, Math.PI / 6).join(' L')} Z`;
+  if (kind === 'box') return `M${f(x - s)} ${f(y - s)} L${f(x + s)} ${f(y - s)} L${f(x + s)} ${f(y + s)} L${f(x - s)} ${f(y + s)} Z`;
   return `M${f(x - s)} ${f(y)} a${f(s)} ${f(s)} 0 1 0 ${f(2 * s)} 0 a${f(s)} ${f(s)} 0 1 0 ${f(-2 * s)} 0 Z`;
 }
 function ctrl3(a, b, side, lift) {
@@ -94,7 +97,12 @@ function estateModel(d) {
   });
   const links = [];
   for (const c of d.chains) if (by.has(c.from) && by.has(c.to)) links.push({ ...c, kind: c.isNew ? 'new' : 'chain', vol: Math.min(3, 1 + lg(c.sessions) / 2), at: c.hours.length ? c.hours : null, denied: 0 });
-  for (const s of sources) for (const t of s.targets) if (by.has(t.accountId)) links.push({ from: s.id, to: t.accountId, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges || [], roles: t.roles.length });
+  for (const s of sources) for (const t of s.targets) if (by.has(t.accountId) && t.roles.length) {
+    const w = s.trustWorst ?? s.worst;
+    links.push({ from: s.id, to: t.accountId, kind: w === 'high' ? 'extHigh' : w === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges || [], roles: t.roles.length });
+  }
+  // resource access: a dashed path beside the trust one, from the same outside identity
+  links.push(...estateResourceLinks(sources, (id) => by.has(id)));
   // Curious Monkey floats above the account its identity lives in (or off the plane when that one is not connected),
   // one dotted path to the scanner role in every account it reads
   let scanner = null;
@@ -117,7 +125,10 @@ function estateModel(d) {
 // AWS moves forward, Google Cloud sits behind. A project is a ring; each service account a star, higher the more it
 // can do, red when it is high risk. Paths between the fields are where one cloud can sign in to the other.
 const isGcp = (id) => String(id).startsWith('gcp:');
-function withGcp(M, g) {
+// Google Cloud services by the first part of their permissions
+const GSVC = { storage: 'Cloud Storage', bigquery: 'BigQuery', pubsub: 'Pub/Sub', cloudkms: 'Cloud KMS', secretmanager: 'Secret Manager', run: 'Cloud Run', cloudfunctions: 'Cloud Functions',
+  artifactregistry: 'Artifact Registry', dataflow: 'Dataflow', cloudsql: 'Cloud SQL', compute: 'Compute Engine', container: 'GKE', iam: 'IAM', resourcemanager: 'Resource Manager', logging: 'Logging' };
+function withGcp(M, g, showRes = true) {
   const aws = { id: 'aws', label: 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 };
   if (!g?.projects?.length) { M.planes = [aws]; return M; }
   // AWS in front (smaller y is nearer the camera), Google Cloud behind it
@@ -143,23 +154,36 @@ function withGcp(M, g) {
     list.forEach((p, i) => {
       const cx = x0 + cw * (i % cols + 0.5), cy = -380 + ch * (Math.floor(i / cols) + 0.5) + DY;
       const R = Math.max(14, Math.min(18 + Math.sqrt(p.accounts.length) * 5.5, 0.4 * Math.min(cw, ch)));
-      const stars = cloud(cx, cy, R, p.accounts.filter((a) => !a.managed).map((a) => ({ id: `gsa:${a.id}`, sa: a, risk: a.risk, calls7: a.permissions })), 0, hash(p.projectId));
-      gg.push({ id: `gcp:${p.projectId}`, cloud: 'gcp', project: p, name: p.projectId, label: p.projectId, env, x: cx, y: cy, R, coldShare: 0, prof: Array(24).fill(0), hourly: [], stars,
-        roles: p.accounts.length, cold: 0, high: p.risky, calls7: 0, keys: p.keys });
+      // like an account: with usage read, a star's height is its calls in 7 days and the never-called lie on the floor;
+      // without it, the height is what it can do (permissions) and nothing is called cold
+      const own = p.accounts.filter((a) => !a.managed), active = p.usage ? own.filter((a) => a.used) : own;
+      const stars = cloud(cx, cy, R, active.map((a) => ({ id: `gsa:${a.id}`, sa: a, risk: a.risk, calls7: p.usage ? a.calls7 : a.permissions })), Math.min(p.cold, 16), hash(p.projectId));
+      gg.push({ id: `gcp:${p.projectId}`, cloud: 'gcp', project: p, name: p.projectId, label: p.projectId, env, x: cx, y: cy, R, coldShare: own.length ? p.cold / own.length : 0,
+        prof: p.hourly.map((b) => b.calls), hourly: p.hourly, stars, usage: p.usage, roles: own.length, cold: p.cold, high: p.risky, calls7: p.calls7, calls24h: p.calls24h, keys: p.keys,
+        resources: showRes ? p.resources : null });
     });
     x1 = x0;
   }
   M.zones.push(...gz); M.groups.push(...gg);
   for (const x of gg) M.by.set(x.id, x);
   // identities from outside the organization, off the far edge of the Google Cloud field
-  const outs = g.outside.filter((o) => o.targets.some((t) => M.by.has(`gcp:${t.projectId}`)));
+  // the same as AWS's: trust (service accounts it can become, roles on the project) is a solid path, resources it can
+  // use through their own IAM policy a dashed one beside it. Neighbours alternate height so their names do not collide.
+  const trustOf = (t) => t.principals.length + t.direct.length;
+  const outs = g.outside.map((o) => ({ ...o, targets: o.targets.filter((t) => M.by.has(`gcp:${t.projectId}`) && (trustOf(t) || (showRes && t.resources.length))) }))
+    .filter((o) => o.targets.length).map((o) => (showRes ? o : { ...o, worst: o.trustWorst, resources: 0 }));
   const srcs = outs.map((o, i) => {
-    const deg = outs.length === 1 ? 90 : 42 + (96 * i) / (outs.length - 1), [gap, z] = PLACE[o.worst] || PLACE.none, at = off(deg, gap, z);
-    return { id: `gsrc:${o.key}`, key: o.key, gcp: true, label: o.label, sub: o.sub, group: o.group, kind: o.group === 'oidc' ? 'oidc' : o.group === 'public' ? 'web' : 'account', risk: o.worst, findings: [],
-      principal: o.principal || null, targets: o.targets.map((t) => ({ accountId: `gcp:${t.projectId}`, roles: t.principals, edges: [] })), sessions: 0, ...at, y: at.y + DY };
+    const deg = outs.length === 1 ? 90 : 42 + (96 * i) / (outs.length - 1), [gap, z] = PLACE[o.worst] || PLACE.none, at = off(deg, gap + (i % 2) * 24, z + (i % 2) * 46);
+    return { id: `gsrc:${o.key}`, key: o.key, gcp: true, label: o.label, sub: o.sub, group: o.group, kind: o.group === 'oidc' ? 'oidc' : o.group === 'public' ? 'web' : 'account', risk: o.worst, trustWorst: o.trustWorst,
+      findings: o.findings || [], principal: o.principal || null, resources: o.resources,
+      targets: o.targets.map((t) => ({ accountId: `gcp:${t.projectId}`, roles: t.principals, direct: t.direct, edges: t.edges, resources: showRes ? t.resources : [], resourceCount: showRes ? t.resourceCount : 0 })), sessions: 0, ...at, y: at.y + DY };
   });
   M.sources.push(...srcs);
-  for (const x of srcs) for (const t of x.targets) M.links.push({ from: x.id, to: t.accountId, kind: x.risk === 'high' ? 'extHigh' : x.risk === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: [], roles: t.roles.length, gcp: true });
+  for (const x of srcs) for (const t of x.targets) {
+    const tw = x.trustWorst ?? x.risk;
+    if (t.roles.length || t.direct.length) M.links.push({ from: x.id, to: t.accountId, kind: tw === 'high' ? 'extHigh' : tw === 'medium' ? 'extWarn' : 'ext', vol: 1, at: null, edges: t.edges, roles: t.roles.length, gcp: true });
+  }
+  M.links.push(...estateResourceLinks(srcs, (id) => M.by.has(id)).map((l) => ({ ...l, gcp: true })));
   // the paths between the clouds, one per pair of account and project
   const pairs = new Map();
   const add = (from, to, dir, l) => {
@@ -184,9 +208,13 @@ function accountModel(d) {
   const groups = d.clusters.map((c, i, all) => {
     const deg = 150 - (360 * i) / Math.max(1, all.length), x = Math.cos((deg * Math.PI) / 180) * 345, y = Math.sin((deg * Math.PI) / 180) * 252;
     const roles = c.roles.map((r) => ({ ...r }));
-    [...roles].sort((m, n) => n.calls7 - m.calls7).forEach((r, k, arr) => { const rad = 58 * Math.sqrt((k + 0.5) / arr.length), a = 0.7 + k * 2.39996; Object.assign(r, { x: x + Math.cos(a) * rad, y: y + Math.sin(a) * rad, z: 14 + 24 * lg(r.calls7), cold: false }); });
+    const weight = (r) => (d.cloud === 'gcp' && !d.usage ? r.permissions || 0 : r.calls7);   // a project without usage: what it can do
+    [...roles].sort((m, n) => weight(n) - weight(m)).forEach((r, k, arr) => { const rad = 58 * Math.sqrt((k + 0.5) / arr.length), a = 0.7 + k * 2.39996; Object.assign(r, { x: x + Math.cos(a) * rad, y: y + Math.sin(a) * rad, z: 14 + 24 * lg(weight(r)), cold: false }); });
     const prof = Array.from({ length: 24 }, (_, hr) => roles.reduce((s, r) => s + r.hourly[hr], 0));
-    return { id: `cl:${c.key}`, key: c.key, env, label: c.key === 'other' ? 'Other services' : c.key === 'quiet this week' ? 'Quiet this week' : `Mostly ${c.key}`, x, y, R: 72, roles, stars: roles, more: c.more,
+    const name = d.cloud === 'gcp' ? GSVC[c.key] || c.key : c.key;
+    const label = c.key === 'other' ? 'Other services' : c.key === 'quiet this week' ? 'Quiet this week' : d.cloud === 'gcp' && !d.usage
+      ? (c.key === 'every service' ? 'Owner, Editor or Viewer' : c.key === 'no roles' ? 'No roles' : c.key === 'custom' ? 'Custom roles' : `Can use ${name}`) : `Mostly ${name}`;
+    return { id: `cl:${c.key}`, key: c.key, env, label, x, y, R: 72, roles, stars: roles, more: c.more,
       calls7: roles.reduce((s, r) => s + r.calls7, 0), coldShare: 0, prof };
   });
   const roles = groups.flatMap((g) => g.roles.map((r) => Object.assign(r, { cluster: g })));
@@ -208,9 +236,15 @@ function accountModel(d) {
   const gates = sources.map((s) => { const a = Math.atan2(s.y, s.x), r = edgeDist(a) - 22, roles = s.targets.flatMap((t) => t.roles); return { id: `gate:${s.key}`, src: s.id, x: Math.cos(a) * r, y: Math.sin(a) * r, roles, risk: s.risk }; });
   for (const g of gates) {
     const s = sources.find((x) => x.id === g.src);
-    links.push({ from: s.id, to: g.id, kind: s.worst === 'high' ? 'extHigh' : s.worst === 'medium' ? 'extWarn' : 'ext', vol: 1, edges: s.targets.flatMap((t) => t.edges || []), roles: g.roles.length });
+    const edges = s.targets.flatMap((t) => t.edges || []), rs = s.targets.flatMap((t) => t.resources || []);
+    const tw = s.trustWorst ?? s.worst, rw = worstRes(rs);
+    if (g.roles.length) links.push({ from: s.id, to: g.id, kind: tw === 'high' ? 'extHigh' : tw === 'medium' ? 'extWarn' : 'ext', vol: 1, edges, roles: g.roles.length });
+    if (rs.length) links.push({ from: s.id, to: g.id, kind: rw === 'high' ? 'resHigh' : rw === 'medium' ? 'resWarn' : 'res', vol: 1, resources: rs, resourceCount: s.targets.reduce((n, t) => n + (t.resourceCount || 0), 0) });
     for (const id of g.roles) if (byRole.has(id)) links.push({ from: g.id, to: id, kind: 'fan', src: s.id, risk: s.worst, vol: 1 });
   }
+  // resource access: a box beside its service's tower for each exposed resource, fanned to from the gates
+  const res = accountResources(d.resources, towers, gates, sources);
+  links.push(...res.links);
   let scanner = null;
   if (d.scanner) {
     scanner = { ...d.scanner, id: CM_ID, ...off(8, 100, 170) };
@@ -234,7 +268,7 @@ function accountModel(d) {
   links.forEach((l, i) => { l.id = `link:${i}`; });
   const events = d.events.map((e) => ({ id: e.id, kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
   for (const t of towers) t.denied = roles.reduce((n, r) => n + (r.services.find((v) => v.name === t.name)?.denied || 0), 0);
-  return { view: 'account', account: d.account, zones: [], groups, roles, byRole, towers, gates, doors, rim, sources, scanner, fars, links, events, hidden: d.outside.hidden,
+  return { view: 'account', account: d.account, usage: d.usage !== false, zones: [], groups, roles, byRole, towers, gates, doors, rim, sources, scanner, fars, links, events, hidden: d.outside.hidden, resources: res.marks,
     coldCount: d.coldCount, roleCount: d.roleCount, hourStart: new Date(d.hourStart).getTime(),
     defaultSel: events.find((e) => e.target)?.target || [...roles].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
 }
@@ -244,11 +278,19 @@ export async function spacePage(ctx) {
   // both views are fetched together and remembered briefly, so zooming into an account and back does not wait twice
   // ?day=N: the 24 hours of N days ago (hourly counts are kept 30 days); links and fetches carry it along
   const day = Math.max(0, Math.min(29, Math.floor(Number(ctx.params.get('day')) || 0)));
-  const who = whoOf(ctx.params), wa = `${whoQs(who, '&')}${day ? `&day=${day}` : ''}`, wq = wa ? `?${wa.slice(1)}` : '';
-  const wanted = view === 'account' && ctx.params.get('account') ? getCached(`/space/account/${ctx.params.get('account')}${wq}`) : null;
+  // resource access is a layer: on unless ?res=0
+  const showRes = ctx.params.get('res') !== '0';
+  const who = whoOf(ctx.params), wa = `${whoQs(who, '&')}${day ? `&day=${day}` : ''}${showRes ? '' : '&res=0'}`, wq = wa ? `?${wa.slice(1)}` : '';
+  const apiQ0 = wq.replace(/[?&]res=0/, '').replace(/^&/, '?');
+  // one account, or one Google Cloud project (account=gcp:<project id>), which comes in the same shape
+  const oneUrl = (id) => (isGcp(id) ? `/space/gcp/project/${encodeURIComponent(id.slice(4))}${day ? `?day=${day}` : ''}` : `/space/account/${id}${apiQ0}`);
+  const wanted = view === 'account' && ctx.params.get('account') ? getCached(oneUrl(ctx.params.get('account'))) : null;
   wanted?.catch(() => {});
-  const [est, envs, gcpData] = await Promise.all([getCached(`/space${wq}`), loadEnvironments(), view === 'estate' && who !== 'users' ? getCached('/space/gcp').catch(() => null) : null]);
+  const apiQ = wq.replace(/[?&]res=0/, '').replace(/^&/, '?');
+  const [est0, envs, gcpData] = await Promise.all([getCached(`/space${apiQ}`), loadEnvironments(), view === 'estate' && who !== 'users' ? getCached(`/space/gcp${day ? `?day=${day}` : ''}`).catch(() => null) : null]);
   useEnvironments(envs);
+  // a copy: the cached answer is shared with the next visit, and the layer switch must not change it
+  const est = showRes ? structuredClone(est0) : stripResources(est0);
   // a Google service account an AWS role trusts is drawn as a path between the fields, not as an outside identity
   const hasGcp = !!gcpData?.projects?.length;
   // users have no trust policy: the identities that roles let in, and the scanner's role, are not part of their picture
@@ -258,14 +300,24 @@ export async function spacePage(ctx) {
   if (!est.accounts.length) return h('div', { class: 'stack' }, h('h1', null, 'Space'), h('p', { class: 'muted' }, 'No accounts yet. Connect one to see it here.'), h('a', { class: 'btn primary', href: '#/accounts/new' }, 'Connect an account'));
   const live = est.accounts.filter((a) => !a.planned);
   const accountId = ctx.params.get('account') || [...(live.length ? live : est.accounts)].sort((a, b) => b.calls7 - a.calls7)[0].id;
-  const M = view === 'estate' ? withGcp(estateModel(est), gcpData) : accountModel(await (wanted || getCached(`/space/account/${accountId}${wq}`)));
-  if (!M.planes) M.planes = [{ id: 'aws', label: 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 }];
+  const M = view === 'estate' ? withGcp(estateModel(est), gcpData, showRes) : accountModel((showRes ? (x) => structuredClone(x) : stripResources)(await (wanted || getCached(oneUrl(accountId)))));
+  // a Google Cloud project is drawn on the blue plane
+  if (!M.planes) M.planes = [{ id: M.account?.cloud === 'gcp' ? 'gcp' : 'aws', label: M.account?.cloud === 'gcp' ? 'GOOGLE CLOUD' : 'AWS', x0: -560, x1: 560, y0: -380, y1: 380 }];
+  // the words and links of one account, or of one Google Cloud project
+  const G1 = M.view === 'account' && M.account.cloud === 'gcp', usage1 = !G1 || M.usage;
+  const V = G1 ? { role: 'service account', roles: 'service accounts', Roles: 'Service accounts', ROLE: 'SERVICE ACCOUNT', ROLES: 'SERVICE ACCOUNTS', enter: 'become', svc: 'GOOGLE CLOUD SERVICE', others: 'AWS accounts',
+    idLine: M.account.title && M.account.title !== M.account.name ? M.account.title : `project ${M.account.number}`, open: (id) => `#/identities/gcp/${id}`, openLabel: 'Open service account',
+    trust: (q = '') => `#/trust?cloud=gcp&project=${encodeURIComponent(M.account.projectId)}${q ? `&q=${encodeURIComponent(q)}` : ''}`, resources: (q = M.account.projectId) => `#/resources?cloud=gcp&q=${encodeURIComponent(q)}` }
+    : { role: 'role', roles: 'roles', Roles: 'Roles', ROLE: 'ROLE', ROLES: 'ROLES', enter: 'enter', svc: 'AWS SERVICE', others: 'other accounts', idLine: M.account?.awsAccountId || '', open: (id) => `#/identities/${id}`, openLabel: 'Open role',
+      trust: (q = '') => `#/trust?q=${encodeURIComponent(q)}`, resources: () => `#/resources?accounts=${M.account?.id}` };
+  // projects for the account picker: Google Cloud is not shown to members limited to some AWS accounts
+  const gcpList = view === 'account' && who !== 'users' ? await getCached('/gcp/projects').then((r) => r.items, () => []) : [];
   const awsGroups = () => M.groups.filter((x) => x.cloud !== 'gcp');
   ctx.setCrumbs(h('a', { href: '#/space' }, 'Space'), ...(view === 'account' ? [M.account.name] : []));
-  const st = { dir: 'both', sel: null, lit: false, hour: 23, playing: false, az: -14, el: 33, zoom: 1.15, px: 0, py: 0, zone: '', timer: null, fit: null, dragging: false };
+  const st = { dir: 'both', sel: null, lit: false, hour: 23, playing: false, az: HOME.az, el: HOME.el, zoom: HOME.zoom, px: 0, py: 0, zone: '', timer: null, fit: null, dragging: false };
   // the bell (and links) can open Space on one thing at one hour; otherwise nothing is picked and the overview shows
   { const want = ctx.params.get('sel'), hr = Number(ctx.params.get('hour'));
-    if (want && (M.view === 'estate' ? M.by.has(want) : M.byRole.has(want))) { st.sel = want; st.lit = true; }
+    if (want && (M.view === 'estate' ? M.by.has(want) : M.byRole.has(want) || M.resources?.some((x) => x.id === want)) || M.sources.some((x) => x.id === want)) { st.sel = want; st.lit = true; }
     if (ctx.params.get('hour') != null && hr >= 0 && hr <= 23) st.hour = Math.floor(hr);
     if (['in', 'out'].includes(ctx.params.get('dir'))) st.dir = ctx.params.get('dir');
     if (M.view === 'estate' && (ctx.params.get('zone') === 'outer' || M.zones.some((z) => z.id === ctx.params.get('zone')))) st.zone = ctx.params.get('zone'); }
@@ -331,11 +383,17 @@ export async function spacePage(ctx) {
     if (az !== st.az || el !== st.el) { st.az = az; st.el = el; if (!drag.raf) drag.raf = requestAnimationFrame(() => { drag && (drag.raf = 0); render(); }); }
   });
   const endDrag = () => { if (drag?.moved) { st.dragging = false; render(); setTimeout(() => { drag = null; }, 0); } else drag = null; };
-  // zoom only when asked: the wheel, or the + and − buttons
-  // a sideways swipe (or Shift+wheel) moves the view left and right
+  // zoom only when asked: pinching, a mouse wheel, Ctrl/⌘+wheel, or the + and − buttons. A two-finger swipe on a
+  // trackpad moves the view in any direction (Shift+wheel moves it sideways with a mouse).
+  const wheelMem = {};
   stage.addEventListener('wheel', (ev) => { ev.preventDefault();
-    if (Math.abs(ev.deltaX) > Math.abs(ev.deltaY) || ev.shiftKey) { set({ px: clampPan(st.px - (ev.deltaX || ev.deltaY) * 0.8, W) }); return; }
-    const z2 = Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * 0.0015)));
+    const kind = wheelKind(ev, wheelMem);
+    if (kind === 'pan') {
+      const k = W / (stage.getBoundingClientRect().width || W), dx = ev.shiftKey && !ev.deltaX ? ev.deltaY : ev.deltaX, dy = ev.shiftKey && !ev.deltaX ? 0 : ev.deltaY;
+      set({ px: clampPan(st.px - dx * k, W), py: clampPan(st.py - dy * k, H) }); return;
+    }
+    // a pinch sends small steps with Ctrl held: zoom faster per unit so it follows the fingers
+    const z2 = Math.max(0.6, Math.min(3, st.zoom * Math.exp(-ev.deltaY * (kind === 'pinch' ? 0.01 : 0.0015))));
     const m = stage.getScreenCTM(), q = m ? new DOMPoint(ev.clientX, ev.clientY).matrixTransform(m.inverse()) : null;
     if (!q || !st.cam) return set({ zoom: z2 });
     set(zoomAbout(q.x, q.y, z2)); }, { passive: false });
@@ -365,7 +423,7 @@ export async function spacePage(ctx) {
   stage.addEventListener('keydown', (ev) => {
     const z = { '+': 1.25, '=': 1.25, '-': 0.8, _: 0.8 }[ev.key];
     if (z) { ev.preventDefault(); set({ zoom: Math.max(0.6, Math.min(3, st.zoom * z)) }); return; }
-    if (ev.key === '0') { ev.preventDefault(); set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }); return; }
+    if (ev.key === '0') { ev.preventDefault(); set({ ...HOME, px: 0, py: 0 }); return; }
     if ((ev.key === 'f' || ev.key === 'F') && st.sel) { ev.preventDefault(); flyTo(st.sel); return; }
     const d = { ArrowLeft: [90, 0], ArrowRight: [-90, 0], ArrowUp: [0, 60], ArrowDown: [0, -60] }[ev.key]; if (!d) return;
     ev.preventDefault(); set({ px: clampPan(st.px + d[0], W), py: clampPan(st.py + d[1], H) });
@@ -378,14 +436,16 @@ export async function spacePage(ctx) {
     const view = (az, elr) => { const c = Math.cos(az), s2 = Math.sin(az), ce2 = Math.cos(elr), se2 = Math.sin(elr);
       return (x, y, z) => { const X = x * c - y * s2, Y = x * s2 + y * c, vy = Y + D * ce2, vz = z - D * se2, dep = vy * ce2 - vz * se2; return [X / dep, (vy * se2 + vz * ce2) / dep, dep]; }; };
     const p = view(az, el);
-    if (!st.fit || (fitPts && !st.dragging && (st.fit.az !== st.az || st.fit.el !== st.el))) {
-      // framed for the angle the camera has now, so the scene fills the view; held while dragging, refitted after.
+    if (!st.fit && fitPts) {
+      // framed once, for the starting angle, so the scene fills the view. Turning the camera keeps this scale: only
+      // the zoom changes the size (refitting for each angle made the scene grow and shrink on its own as it turned).
       // The frame is centred on the plane, not on what happens to be in view.
+      const p0 = view((HOME.az * Math.PI) / 180, (HOME.el * Math.PI) / 180);
       let ext = 0, top = 0, bottom = 0;
-      const [ox, ou] = p(0, 0, 0);
-      for (const [x, y, z] of fitPts) { const [X, U] = p(x, y, z); ext = Math.max(ext, Math.abs(X - ox)); top = Math.max(top, U - ou); bottom = Math.max(bottom, ou - U); }
+      const [ox, ou] = p0(0, 0, 0);
+      for (const [x, y, z] of fitPts) { const [X, U] = p0(x, y, z); ext = Math.max(ext, Math.abs(X - ox)); top = Math.max(top, U - ou); bottom = Math.max(bottom, ou - U); }
       const F = Math.min((W - 40) / (2 * ext), (H - 130) / (top + bottom));
-      st.fit = { D, F, top, bottom, az: st.az, el: st.el };
+      st.fit = { D, F, top, bottom };
     }
     const F = st.fit.F * st.zoom, [ox, ou] = p(0, 0, 0);
     const CX = W / 2 - F * ox + st.px, CY = 90 + st.fit.F * st.fit.top + ((H - 130) - st.fit.F * (st.fit.top + st.fit.bottom)) / 2 + F * ou + st.py;
@@ -411,8 +471,8 @@ export async function spacePage(ctx) {
     for (const g of M.groups) ent.set(g.id, { p3: [g.x, g.y, 22], env: g.env });
     for (const s of M.sources) ent.set(s.id, { p3: [s.x, s.y, s.z], env: 'outer' });
     if (M.scanner) ent.set(CM_ID, { p3: [M.scanner.x, M.scanner.y, M.scanner.z], env: 'scanner' });
-    if (M.view === 'account') { for (const t of M.towers) ent.set(t.id, { p3: [t.x, t.y, t.h], env: 'svc' }); for (const r of M.roles) ent.set(r.id, { p3: [r.x, r.y, r.z], env: r.cluster.env }); for (const n of M.fars) ent.set(`far:${n.id}`, { p3: [n.x, n.y, 8], env: n.env }); for (const g of M.gates) ent.set(g.id, { p3: [g.x, g.y, 4], env: 'outer' }); for (const d of M.doors) ent.set(d.id, { p3: [d.x, d.y, 4], env: d.env }); }
-    const liftOf = (l, a, b) => (/^xcloud/.test(l.kind) ? 70 + 0.12 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
+    if (M.view === 'account') { for (const t of M.towers) ent.set(t.id, { p3: [t.x, t.y, t.h], env: 'svc' }); for (const r of M.roles) ent.set(r.id, { p3: [r.x, r.y, r.z], env: r.cluster.env }); for (const n of M.fars) ent.set(`far:${n.id}`, { p3: [n.x, n.y, 8], env: n.env }); for (const g of M.gates) ent.set(g.id, { p3: [g.x, g.y, 4], env: 'outer' }); for (const d of M.doors) ent.set(d.id, { p3: [d.x, d.y, 4], env: d.env }); for (const r of M.resources || []) ent.set(r.id, { p3: [r.x, r.y, 8], env: 'outer' }); }
+    const liftOf = (l, a, b) => (/^res(High|Warn)?$/.test(l.kind) ? 12 + 0.05 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'resfan' ? 18 + 0.05 * Math.hypot(b[0] - a[0], b[1] - a[1]) : /^xcloud/.test(l.kind) ? 70 + 0.12 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'scan' ? 10 : l.kind === 'fan' ? 24 + 0.06 * Math.hypot(b[0] - a[0], b[1] - a[1]) : l.kind === 'use' ? 30 : l.kind === 'use1' ? 34 : l.kind === 'denied' && M.view === 'account' ? 40 : /^ext/.test(l.kind) ? 26 + 0.07 * Math.hypot(b[0] - a[0], b[1] - a[1]) : null);
     const fitPts = [...M.planes.flatMap((q) => [[q.x0, q.y0, 0], [q.x1, q.y0, 0], [q.x1, q.y1, 0], [q.x0, q.y1, 0], [0, q.y0 - 60, 0]]), ...M.sources.flatMap((s) => [[s.x, s.y, s.z + 14], [s.x, s.y, 0], [s.x + (s.x < 0 ? -90 : 90), s.y, s.z + 14]]),   // and some room for its name
  ...(M.fars || []).flatMap((n) => [[n.x - 50, n.y - 50, 0], [n.x + 50, n.y + 50, 0]])];
     if (M.view === 'estate') for (const q of M.planes) fitPts.push([-760 - (M.planes.length > 1 ? 120 : 0), (q.y0 + q.y1) / 2, 0], [760, (q.y0 + q.y1) / 2, 0]);
@@ -442,7 +502,7 @@ export async function spacePage(ctx) {
       out.floor.push(svg('g', { opacity: !focus || focus === z.id ? 1 : 0.35 }, svg('path', { d: `${path(pts)} Z`, fill: E.base, 'fill-opacity': 0.06, stroke: E.base, 'stroke-dasharray': '4 5' }),
         svg('text', { x: f(l[0]), y: f(l[1] + 24), 'text-anchor': 'middle', fill: E.hot, class: 'sp-zone' }, label)));
     }
-    if (M.view === 'account' && M.rim.length) { const l = P(0, -380, 0); out.floor.push(svg('text', { x: f(l[0]), y: f(l[1] + 24), 'text-anchor': 'middle', fill: '#b6c2bb', class: 'sp-zone' }, `GREY DOTS ROUND THE EDGE · ${M.coldCount} ROLES WITH NO RECORDED CALL`)); blocks.push([l[0] - 230, l[1] + 12, l[0] + 230, l[1] + 29]); }
+    if (M.view === 'account' && M.rim.length) { const l = P(0, -380, 0); out.floor.push(svg('text', { x: f(l[0]), y: f(l[1] + 24), 'text-anchor': 'middle', fill: '#b6c2bb', class: 'sp-zone' }, `GREY DOTS ROUND THE EDGE · ${M.coldCount} ${V.ROLES} WITH NO RECORDED CALL`)); blocks.push([l[0] - 230, l[1] + 12, l[0] + 230, l[1] + 29]); }
 
     // accounts / clusters
     const maxHour = Math.max(1, ...M.groups.flatMap((g) => g.prof));
@@ -457,6 +517,15 @@ export async function spacePage(ctx) {
       else out.halo.push(svg('ellipse', { cx: f(c[0]), cy: f(c[1]), rx: f(rx), ry: f(rx * sinEl), fill: `url(#sp-h-${g.env})`, opacity: o2((0.08 + 0.64 * Math.sqrt(g.prof[hour] / maxHour)) * dim) }));
       if (!g.planned) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0, a0 + act), fill: 'none', stroke: E.base, 'stroke-width': 1.5, opacity: o2(0.95 * dim) }));
       if (!g.planned && g.coldShare > 0.001) out.rings.push(svg('path', { d: ring3(g.x, g.y, g.R, a0 + act, a0 + Math.PI * 2), fill: 'none', stroke: COLD, 'stroke-width': 1.2, 'stroke-dasharray': '2 3', opacity: o2(0.9 * dim) }));
+      // resource access: a small box on the ring, how many of its resources anyone or an outside account can use
+      if (M.view === 'estate' && g.resources && (g.resources.public || g.resources.external)) {
+        const n = g.resources.public + g.resources.external, q = P(g.x + g.R * 0.72, g.y - g.R * 0.72, 0), kk = Math.max(0.75, q[3] / ref);
+        const col = g.resources.worst === 'high' ? RED : g.resources.worst === 'medium' ? WARN : '#d5dceb';
+        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(g.id), opacity: o2(dim) },
+          svg('title', null, `${g.name}: ${g.resources.public ? `${g.resources.public} resource${g.resources.public === 1 ? '' : 's'} open to anyone` : ''}${g.resources.public && g.resources.external ? ', ' : ''}${g.resources.external ? `${g.resources.external} shared outside the estate` : ''} · click for which`),
+          svg('path', { d: glyph('box', q[0], q[1], 5.5 * kk), fill: '#03100b', stroke: col, 'stroke-width': 1.3 }),
+          svg('text', { x: f(q[0]), y: f(q[1] + 3 * kk), 'text-anchor': 'middle', fill: col, class: 'sp-small', style: 'font-size:8px' }, String(n))));
+      }
       const k0 = M.view === 'account' ? 1.55 : 1;
       let bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9, topZ = 0;
       if (g.planned) { const q = P(g.x, g.y, 0); bx0 = bx1 = q[0]; by0 = by1 = q[1]; }
@@ -474,7 +543,7 @@ export async function spacePage(ctx) {
       tops.set(g.id, t);
       const target = M.view === 'estate' ? g.id : g.roles[0]?.id;
       const hc = P(g.x, g.y, 30);
-      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, g.cloud === 'gcp' ? `${g.name} · Google Cloud · ${ENV[g.env].name} · ${g.roles} service accounts${g.high ? ` · ${g.high} high risk` : ''}` : M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
+      out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(target) }, svg('title', null, g.cloud === 'gcp' ? `${g.name} · Google Cloud · ${ENV[g.env].name} · ${g.roles} service accounts${g.usage ? ` · ${kfmt(g.calls7)} calls in 7 days` : ''}${g.high ? ` · ${g.high} high risk` : ''}` : M.view === 'estate' ? (g.planned ? `${g.name} · ${ENV[g.env].name} · planned, not onboarded yet` : `${g.name} · ${ENV[g.env].name} · ${g.roles} roles · ${kfmt(g.calls7)} calls in 7 days`) : `${g.label} · ${g.roles.length} roles`),
         svg('circle', { cx: f(hc[0]), cy: f(hc[1]), r: f(Math.max(16, g.R * c[3] * 1.15)), fill: '#000', opacity: 0 })));
       const isSel = M.view === 'estate' ? sel === g.id : selRole?.cluster === g;
       cands.push({ pr: (isSel ? 3000 : 0) + (evNow.some((e) => e.target === g.id) ? 900 : 0) + lg(g.calls7) * 40 + (dim < 1 ? -500 : 0) + (g.planned ? -200 : 0), x: t[0], y: t[1], text: g.label, color: dim < 1 ? '#3c5a4b' : g.planned ? '#8d9a93' : E.base, faded: dim < 0.5, pick: pick(target), below: fp[2][1] - t[1] + 14 });
@@ -487,7 +556,7 @@ export async function spacePage(ctx) {
     if (M.view === 'account') {
       for (const r of M.roles) {
         const p = P(r.x, r.y, r.z); tops.set(r.id, p);
-        out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(r.id) }, svg('title', null, `${pretty(r.name).label} · ${kfmt(r.calls7)} calls in 7 days`), svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 7, fill: '#000', opacity: 0 })));
+        out.hits.push(svg('g', { class: 'sp-hit', onClick: pick(r.id) }, svg('title', null, `${pretty(r.name).label} · ${usage1 ? `${kfmt(r.calls7)} calls in 7 days` : `${num(r.permissions || 0)} permissions`}`), svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 7, fill: '#000', opacity: 0 })));
         if (sel === r.id) { out.marks.push(svg('path', { d: glyph('account', p[0], p[1], 9), fill: 'none', stroke: '#fff', 'stroke-width': 1.6 })); out.marks.push(svg('path', { d: ring3(r.cluster.x, r.cluster.y, r.cluster.R * 1.12, 0, Math.PI * 2, 56), fill: 'none', stroke: '#fff', 'stroke-width': 1.1, opacity: 0.55 })); }
       }
       for (const s of M.rim) { const p = P(s.x, s.y, 0); out.stars.push([p[2], svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f(2.1 * Math.max(0.72, p[3] / ref)), fill: '#8d9a93', opacity: o2(0.85 * (rel ? FADE : 1)) })]); }
@@ -505,9 +574,10 @@ export async function spacePage(ctx) {
       for (const g of M.gates) {
         if (!dirs.inside) continue;
         const c = P(g.x, g.y, 0), k = Math.max(0.75, c[3] / ref), col = g.risk === 'high' ? RED : g.risk === 'medium' ? WARN : '#d5dceb', on = sel === g.src;
-        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(g.src), opacity: fade(g.id, g.src) }, svg('title', null, `${g.roles.length} roles can be entered from here · click for the list`),
+        const nr = g.res?.length || 0;
+        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(g.src), opacity: fade(g.id, g.src) }, svg('title', null, `${g.roles.length ? `${g.roles.length} role${g.roles.length === 1 ? '' : 's'} can be entered` : ''}${g.roles.length && nr ? ' and ' : ''}${nr ? `${nr} resource${nr === 1 ? '' : 's'} used` : ''} from here · click for the list`),
           svg('path', { d: glyph('saml', c[0], c[1], 7 * k), fill: '#03100b', stroke: col, 'stroke-width': on ? 2 : 1.3 }),
-          svg('text', { x: f(c[0]), y: f(c[1] + 4 * k), 'text-anchor': 'middle', fill: col, class: 'sp-small', style: 'font-size:9px' }, String(g.roles.length))));
+          svg('text', { x: f(c[0]), y: f(c[1] + 4 * k), 'text-anchor': 'middle', fill: col, class: 'sp-small', style: 'font-size:9px' }, String(g.roles.length + nr))));
       }
       for (const d of M.doors) {
         if (!M.links.some((l) => (l.from === d.id || l.to === d.id) && dirs.link(l))) continue;
@@ -515,6 +585,17 @@ export async function spacePage(ctx) {
         out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(d.far), opacity: fade(d.id, d.far) }, svg('title', null, `${d.n} way${d.n === 1 ? '' : 's'} with no single role here: the whole account, or roles not drawn · click for the list`),
           svg('path', { d: glyph('account', c[0], c[1], 6 * k), fill: '#03100b', stroke: E.hot, 'stroke-width': 1.2 }),
           svg('text', { x: f(c[0]), y: f(c[1] + 3.5 * k), 'text-anchor': 'middle', fill: E.hot, class: 'sp-small', style: 'font-size:8px' }, String(d.n))));
+      }
+      for (const r of M.resources || []) {
+        if (!dirs.inside) continue;
+        const b = P(r.x, r.y, 0), p = P(r.x, r.y, 8), k = Math.max(0.75, p[3] / ref), col = r.risk === 'high' ? RED : r.risk === 'medium' ? WARN : '#d5dceb', on = sel === r.id;
+        tops.set(r.id, p);
+        out.rings.push(svg('g', { class: 'sp-hit', onClick: pick(r.id), opacity: fade(r.id) }, svg('title', null, `${r.name} · ${r.service} · ${r.exposure === 'public' ? 'open to anyone' : 'shared outside the estate'} · click for who`),
+          svg('line', { x1: f(b[0]), y1: f(b[1]), x2: f(p[0]), y2: f(p[1]), stroke: col, 'stroke-width': 0.7, opacity: 0.5 }),
+          svg('path', { d: glyph('box', p[0], p[1], 4.2 * k), fill: r.exposure === 'public' ? col : '#03100b', 'fill-opacity': r.exposure === 'public' ? 0.85 : 1, stroke: col, 'stroke-width': on ? 2 : 1.2 }),
+          svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 9, fill: '#000', opacity: 0 })));
+        if (on) out.marks.push(svg('path', { d: glyph('box', p[0], p[1], 9), fill: 'none', stroke: '#fff', 'stroke-width': 1.5 }));
+        cands.push({ pr: (on ? 3000 : 0) + (r.risk === 'high' ? 600 : 200) - (fade(r.id) < 1 ? 1400 : 0), x: p[0], y: p[1], text: r.name, color: col, faded: fade(r.id) < 1, pick: pick(r.id), below: 18 });
       }
       for (const n of M.fars) {
         const E = ENV[n.env], c = P(n.x, n.y, 0), id = `far:${n.id}`;
@@ -549,6 +630,12 @@ export async function spacePage(ctx) {
       else if (l.kind === 'ext') { o = t ? 0.9 : 0.2; flow = t ? 1 : 0; }
       else if (l.kind === 'extWarn') { color = WARN; o = t ? 0.95 : 0.35; flow = t ? 1 : 0; if (t) flag = { text: 'LOOSE TRUST', bg: WARN }; }
       else if (l.kind === 'extHigh') { color = RED; w = 1.4; o = t ? 1 : 0.5; flow = t ? 1 : 0; if (t) flag = { text: '⚠ RISKY TRUST', bg: RED }; }
+      else if (l.kind === 'res' || l.kind === 'resWarn' || l.kind === 'resHigh') {
+        color = l.kind === 'resHigh' ? RED : l.kind === 'resWarn' ? WARN : OUT; w = l.kind === 'resHigh' ? 1.3 : 1; dash = '5 4';
+        o = t ? 1 : l.kind === 'resHigh' ? 0.5 : l.kind === 'resWarn' ? 0.35 : 0.2; flow = t ? 1 : 0;
+        if (t && l.kind !== 'res') flag = { text: `${l.kind === 'resHigh' ? '⚠ ' : ''}${l.resourceCount} RESOURCE${l.resourceCount === 1 ? '' : 'S'} OPEN`, bg: l.kind === 'resHigh' ? RED : WARN };
+      }
+      else if (l.kind === 'resfan') { show = sel === l.src || sel === l.to; color = l.risk === 'high' ? RED : l.risk === 'medium' ? WARN : OUT; w = 0.9; dash = '3 3'; o = 0.7; }
       else if (l.kind === 'use') { color = ENV[a.env].base; w = 0.5 + 1.6 * l.vol; o = selRole ? 0.12 : 0.28; }
       else if (l.kind === 'use1') { show = t; color = ENV[a.env].hot; w = 1.4; o = 0.95; flow = 1; }
       else if (l.kind === 'xcloud') { color = GCP; w = 1.5; o = t ? 1 : 0.6; flow = t ? 2 : 1; if (t) flag = { text: l.dir === 'aws-gcp' ? 'AWS → GOOGLE CLOUD' : 'GOOGLE CLOUD → AWS', bg: GCP }; }
@@ -567,9 +654,9 @@ export async function spacePage(ctx) {
       const g3 = arc3(a.p3, b.p3, l.from < l.to ? 1 : -1, P, liftOf(l, a.p3, b.p3));
       out.arcs.push(svg('path', { d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: color, 'stroke-width': f(sel === l.id ? w + 1.2 : w), opacity: o2(o), 'stroke-dasharray': dash, class: cls, 'stroke-linecap': 'round' }));
       // every path but the per-cluster service bundles can be clicked: a wide invisible stroke along it
-      const ext = /^ext/.test(l.kind), mid = g3.pts[ext ? 6 : 12];
+      const ext = /^(ext|res)/.test(l.kind), mid = g3.pts[ext ? 6 : 12];
       tops.set(l.id, mid);
-      if (l.kind !== 'use' && l.kind !== 'fan' && (o > 0.15 || (rel && !on && o > 0.15 * FADE))) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
+      if (l.kind !== 'use' && l.kind !== 'fan' && l.kind !== 'resfan' && (o > 0.15 || (rel && !on && o > 0.15 * FADE))) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
         svg('title', null, linkTitle(l))));
       if (sel === l.id) out.marks.push(svg('circle', { cx: f(mid[0]), cy: f(mid[1]), r: 6, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
       if (cut < 1 && t) { const q = g3.pts[Math.round(cut * 24)]; out.sparks.push(svg('g', null, svg('circle', { cx: f(q[0]), cy: f(q[1]), r: 5, fill: 'none', stroke: RED, 'stroke-width': 1.4, class: 'sp-pulse' }))); }
@@ -587,14 +674,16 @@ export async function spacePage(ctx) {
 
     // labels: outside identities, event tags, then the selection and busy things. What would overlap keeps its tooltip
     for (const { s, p } of [...sats].sort((a, c) => (c.s.risk === 'high') - (a.s.risk === 'high'))) {
-      const w = Math.max(s.label.length * 6.7, s.sub.length * 6.15) + 4;
-      const tries = [['start', p[0] + 15, p[1] - 2], ['end', p[0] - 15, p[1] - 2], ['middle', p[0], p[1] - 32], ['middle', p[0], p[1] + 26]];
+      // text is drawn FZ times larger when the scene is shown small: measure it at that size
+      const w = (Math.max(s.label.length * 6.7, s.sub.length * 6.15) + 4) * FZ;
+      const tries = [['start', p[0] + 15, p[1] - 2], ['end', p[0] - 15, p[1] - 2], ['middle', p[0], p[1] - 32 * FZ], ['middle', p[0], p[1] + 26 * FZ]];
       let pl = null;
-      for (const [anchor, lx, ly] of tries) { const x0 = anchor === 'start' ? lx : anchor === 'end' ? lx - w : lx - w / 2, r = [x0, ly - 11, x0 + w, ly + 17]; if (fits(r)) { pl = [anchor, lx, ly]; blocks.push(r); break; } }
-      s.place = pl || (p[0] < W / 2 ? tries[0] : tries[1]);
+      for (const [anchor, lx, ly] of tries) { const x0 = anchor === 'start' ? lx : anchor === 'end' ? lx - w : lx - w / 2, r = [x0, ly - 11 * FZ, x0 + w, ly + 17 * FZ]; if (fits(r)) { pl = [anchor, lx, ly]; blocks.push(r); break; } }
+      // nowhere free: no name on the map (it stays on hover and in the cards), unless it is the one picked
+      s.place = pl || (sel === s.id ? (p[0] < W / 2 ? tries[0] : tries[1]) : null);
     }
     for (const { s, p, g0, k, size } of sats) {
-      const [anchor, lx, ly] = s.place, ring = s.risk === 'high' ? RED : s.risk === 'medium' ? WARN : null;
+      const [anchor, lx, ly] = s.place || [], ring = s.risk === 'high' ? RED : s.risk === 'medium' ? WARN : null;
       out.sats.push(svg('g', { class: 'sp-hit', onClick: pick(s.id), opacity: (focus && focus !== 'outer' ? 0.35 : 1) * fade(s.id) },
         svg('title', null, `${s.label} · ${s.sub}${s.findings.length ? ` · ${s.findings.join('; ')}` : ''}`),
         svg('line', { x1: f(p[0]), y1: f(p[1]), x2: f(g0[0]), y2: f(g0[1]), stroke: '#8b98ad', 'stroke-width': 0.8, 'stroke-dasharray': '1.5 3.5' }),
@@ -602,8 +691,8 @@ export async function spacePage(ctx) {
         svg('circle', { cx: f(p[0]), cy: f(p[1]), r: 16, fill: '#000', opacity: 0 }),
         svg('path', { d: glyph(s.kind, p[0], p[1], size), fill: '#d5dceb', stroke: '#fff', 'stroke-width': 0.8, filter: 'url(#sp-glow)' }),
         ring && svg('circle', { cx: f(p[0]), cy: f(p[1]), r: f(size + 6), fill: 'none', stroke: ring, 'stroke-width': 1.5, 'stroke-dasharray': s.risk === 'high' ? null : '3 3', class: 'sp-pulse' }),
-        svg('text', { x: f(lx), y: f(ly), 'text-anchor': anchor, fill: '#e6ebf4', class: 'sp-name' }, s.label),
-        svg('text', { x: f(lx), y: f(ly + 13), 'text-anchor': anchor, fill: s.risk === 'high' ? '#ffb0a6' : '#a9b4c6', class: 'sp-small' }, s.sub)));
+        s.place && svg('text', { x: f(lx), y: f(ly), 'text-anchor': anchor, fill: '#e6ebf4', class: 'sp-name' }, s.label),
+        s.place && svg('text', { x: f(lx), y: f(ly + 13), 'text-anchor': anchor, fill: s.risk === 'high' ? '#ffb0a6' : '#a9b4c6', class: 'sp-small' }, s.sub)));
     }
     if (M.scanner && dirs.inside) {
       const sc = M.scanner, p = P(sc.x, sc.y, sc.z), g0 = P(sc.x, sc.y, 0), on = sel === CM_ID, today = sc.targets.filter((t) => t.hours.includes(hour)).length;
@@ -671,7 +760,7 @@ export async function spacePage(ctx) {
     renderBar();
     // what is shown goes in the address, so reload and a copied link give the same view
     if (!ctx.inWindow) syncUrl({ view: M.view === 'account' ? 'account' : null, account: M.view === 'account' ? accountId : null, who: who === 'all' ? null : who,
-      sel: st.sel, zone: st.zone || null, dir: st.dir === 'both' ? null : st.dir, day: day || null, hour: st.hour === 23 ? null : st.hour });
+      sel: st.sel, zone: st.zone || null, dir: st.dir === 'both' ? null : st.dir, day: day || null, hour: st.hour === 23 ? null : st.hour, res: showRes ? null : '0' });
   }
   let sideKey = null;
   // When a panel is rebuilt, the control that had focus is found again in the new one by what it says
@@ -695,6 +784,8 @@ export async function spacePage(ctx) {
       const t = M.towers.find((x) => x.id === id); if (t) return t.name;
       const n = M.fars.find((x) => `far:${x.id}` === id); if (n) return n.name;
       if (String(id).startsWith('door:')) return `${M.account.name} (whole account)`;
+      const rs = M.resources?.find((x) => x.id === id); if (rs) return rs.name;
+      if (String(id).startsWith('gate:')) return M.account.name;
       const g = M.groups.find((x) => x.id === id); if (g) return g.label;
     }
     return 'somewhere';
@@ -703,6 +794,7 @@ export async function spacePage(ctx) {
     const a = nameOf(l.from), b = nameOf(l.to);
     if (/^xcloud/.test(l.kind)) return `${a} → ${b} · ${l.pairs.length} way${l.pairs.length === 1 ? '' : 's'} between the clouds${l.kind === 'xcloudHigh' ? ' · any AWS role can use it' : ''} · click for which`;
     if (/^ext/.test(l.kind) && l.gcp) return `${a} can get into ${b} in Google Cloud · click for who`;
+    if (/^res(High|Warn)?$/.test(l.kind)) return `${a} can use ${l.resourceCount} resource${l.resourceCount === 1 ? '' : 's'} in ${M.view === 'estate' ? b : M.account.name}${l.kind === 'resHigh' ? ' · data or admin access' : ''} · click for which`;
     if (/^ext/.test(l.kind)) return `${a} can enter ${b}${l.kind === 'extHigh' ? ' · risky trust' : l.kind === 'extWarn' ? ' · loose trust' : ''} · click for the trust statement`;
     if (l.kind === 'chain' || l.kind === 'new') return `${a} entered ${b} · ${num(l.sessions)} sessions in 90 days${l.today ? ` · ${l.today} today` : ''}${l.kind === 'new' ? ' · first seen today' : ''} · click for who`;
     if (l.kind === 'denied') return `${a} → ${b} · ${l.denied} calls refused in 7 days`;
@@ -711,6 +803,12 @@ export async function spacePage(ctx) {
     return `${a} → ${b}`;
   }
   const clip = (t, n = 170) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  // resources an outside identity can use, as panel rows: picked on the map when drawn, else opened in Resource access
+  const SVC = { s3: 'S3', kms: 'KMS', dynamodb: 'DynamoDB', sqs: 'SQS', sns: 'SNS', secretsmanager: 'Secrets Manager', lambda: 'Lambda', ecr: 'ECR',
+    ...GSVC };
+  const resItems = (list, where) => list.map((r) => ({ label: r.name, icon: 'box', meta: [SVC[r.service] || r.service, where, r.expected ? 'marked expected' : r.title].filter(Boolean).join(' · '),
+    tone: r.expected ? null : r.severity === 'high' ? 'bad' : 'warn', pick: M.view === 'account' && M.resources?.some((x) => x.rid === r.id) ? `res:${r.id}` : null,
+    window: `#/resources?q=${encodeURIComponent(r.name)}&exposure=all`, winTitle: r.name, winEyebrow: 'RESOURCE ACCESS' }));
   function linkDetail(l) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
     const a = nameOf(l.from), b = nameOf(l.to);
@@ -729,12 +827,25 @@ export async function spacePage(ctx) {
         rows: [], lists: [{ title: into ? 'AWS role → Google Cloud identity' : 'Service account → AWS role', items }],
         actions: into ? [['Identities from AWS', '#/identities?type=gcp&source=aws', true]] : [['Trust map', `#/trust?q=${encodeURIComponent('provider:google')}`, true]] };
     }
+    if (/^res(High|Warn)?$/.test(l.kind)) {
+      const s = M.sources.find((x) => x.id === l.from), acct = M.view === 'estate' ? M.by.get(l.to) : M.account;
+      const open = l.resources.filter((r) => !r.expected).length;
+      return { eyebrow: `RESOURCE ACCESS · ${s.group === 'public' ? 'ANYONE' : 'OUTSIDE YOUR ESTATE'}`, title: `${s.label} → ${acct.name}`, sub: `can use ${l.resourceCount} resource${l.resourceCount === 1 ? '' : 's'} through their own policies, without entering a role`,
+        swatch: l.kind === 'resHigh' ? RED : l.kind === 'resWarn' ? WARN : '#d5dceb', round: true,
+        tags: l.kind === 'resHigh' ? [{ t: '⚠ DATA OR ADMIN ACCESS', c: RED }] : l.kind === 'resWarn' ? [{ t: 'RESOURCE SHARED', c: WARN }] : [],
+        rows: [row('Needs a decision', open ? `${open} of them` : 'none: every one is marked expected', open ? 'bad' : 'ok')],
+        lists: [{ title: 'Resources it can use', items: resItems(l.resources, null), empty: 'none drawn' }],
+        actions: [['Resource access', acct.cloud === 'gcp' ? `#/resources?cloud=gcp&q=${encodeURIComponent(acct.projectId || acct.name)}&exposure=${s.group === 'public' ? 'public' : 'external'}` : `#/resources?accounts=${acct.id}&exposure=${s.group === 'public' ? 'public' : 'external'}`, true]] };
+    }
     if (/^ext/.test(l.kind) && l.gcp) {
       const src = M.sources.find((x) => x.id === l.from), g = M.by.get(l.to);
       return { eyebrow: 'GOOGLE CLOUD · FROM OUTSIDE', title: `${a} → ${b}`, sub: src.sub, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
         tags: l.kind === 'extHigh' ? [{ t: '⚠ ANY IDENTITY', c: RED }] : l.kind === 'extWarn' ? [{ t: 'OUTSIDE YOUR DOMAIN', c: WARN }] : [], rows: [],
-        lists: [{ title: `In ${g.name}`, items: (src.targets.find((t) => t.accountId === l.to)?.roles || []).map((pid) => ({ label: gcpName(pid), window: `#/identities/gcp/${pid}`, winTitle: gcpName(pid), winEyebrow: 'GOOGLE CLOUD · IDENTITY' })) }],
-        actions: [['Identities', `#/identities?type=gcp&project=${encodeURIComponent(g.name)}`, true]] };
+        lists: (() => { const t = src.targets.find((x) => x.accountId === l.to) || { roles: [], direct: [], edges: [] };
+          return [...(t.roles.length ? [{ title: `Service accounts it can become in ${g.name}`, items: t.roles.map((pid) => { const e = (t.edges || []).find((x) => x.roleId === pid);
+            return { label: gcpName(pid), meta: e ? [e.actions[0], e.findings[0]?.title].filter(Boolean).join(' · ') : null, tone: e?.worst === 'high' ? 'bad' : e?.worst === 'medium' ? 'warn' : null, window: `#/identities/gcp/${pid}`, winTitle: gcpName(pid), winEyebrow: 'GOOGLE CLOUD · IDENTITY' }; }) }] : []),
+            ...(t.direct?.length ? [{ title: 'Roles it holds itself', items: t.direct.map((d) => ({ label: d.role, meta: [d.what, d.findings[0]?.title].filter(Boolean).join(' · '), tone: d.worst === 'high' ? 'bad' : d.worst === 'medium' ? 'warn' : null })) }] : [])]; })(),
+        actions: [['Trust map', `#/trust?cloud=gcp&project=${encodeURIComponent(g.name)}&q=${encodeURIComponent(src.label)}`, true], ['Identities', `#/identities?type=gcp&project=${encodeURIComponent(g.name)}`]] };
     }
     if (/^ext/.test(l.kind)) {
       const s = M.sources.find((x) => x.id === l.from), edges = l.edges || [];
@@ -742,18 +853,22 @@ export async function spacePage(ctx) {
       // the worst statement in full, the rest by name
       const e = edges[0], rows = [];
       if (e) {
-        rows.push(row(edges.length > 1 ? 'Worst statement · role' : 'Role it can enter', pretty(e.role).label));
+        rows.push(row(edges.length > 1 ? `Worst statement · ${V.role}` : G1 ? 'Service account it can become' : 'Role it can enter', pretty(e.role).label));
         rows.push(row('Why it is flagged', e.findings.length ? clip(e.findings.map((x) => `${x.title}${x.detail ? `: ${x.detail}` : ''}`).join(' · '), 220) : 'nothing flagged', e.findings.some((x) => x.severity === 'high') ? 'bad' : null));
-        rows.push(row('Trusts', clip(e.principal, 120)));
+        rows.push(row(G1 ? 'Granted to' : 'Trusts', clip(e.principal, 120)));
+        if (G1) rows.push(row('Through', e.actions?.[0] || '—'));
         rows.push(row('Only when', e.conditions.length ? clip(e.conditions.join(' and '), 160) : 'no conditions', e.conditions.length ? null : 'bad'));
-        rows.push(row('Used', e.sessions ? `${num(e.sessions)} sessions, last ${ago(e.lastSeen)}` : 'never seen used'));
+        if (!G1) rows.push(row('Used', e.sessions ? `${num(e.sessions)} sessions, last ${ago(e.lastSeen)}` : 'never seen used'));
       }
-      const q = `account:${acct.awsAccountId} ${trustQ(s)}`;
-      return { eyebrow: `TRUST · ${s.group.toUpperCase()}`, title: `${a} → ${b}`, sub: `can enter ${edges.length || l.roles || 1} role${(edges.length || l.roles || 1) === 1 ? '' : 's'} in ${acct.name}`, swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
+      const direct = G1 ? s.targets.flatMap((t) => t.direct || []) : [];
+      const q = `account:${acct.awsAccountId} ${trustQ(s)}`, nIn = edges.length || (G1 ? 0 : l.roles || 1);
+      return { eyebrow: `TRUST · ${s.group.toUpperCase()}`, title: `${a} → ${b}`, sub: G1 ? [nIn ? `can become ${nIn} service account${nIn === 1 ? '' : 's'}` : null, direct.length ? `holds ${direct.length} role${direct.length === 1 ? '' : 's'} itself` : null].filter(Boolean).join(' and ') + ` in ${acct.name}` : `can enter ${nIn} role${nIn === 1 ? '' : 's'} in ${acct.name}`,
+        swatch: l.kind === 'extHigh' ? RED : l.kind === 'extWarn' ? WARN : '#d5dceb', round: true,
         tags: l.kind === 'extHigh' ? [{ t: '⚠ RISKY TRUST', c: RED }] : l.kind === 'extWarn' ? [{ t: 'LOOSE TRUST', c: WARN }] : [],
         rows: rows.length ? rows : [row('Trust', s.findings.join('; ') || 'nothing flagged')],
-        lists: edges.length > 1 ? [{ title: 'Roles it can enter', items: roleItems(edges, []) }] : [],
-        actions: [['Trust map', `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [['Open role', `#/identities/${edges[0].roleId}`]] : [])] };
+        lists: [...(edges.length > 1 ? [{ title: G1 ? 'Service accounts it can become' : 'Roles it can enter', items: roleItems(edges, []) }] : []),
+          ...(direct.length ? [{ title: 'Roles it holds itself', items: direct.map((d) => ({ label: d.role, meta: [d.what, d.findings[0]?.title].filter(Boolean).join(' · '), tone: d.worst === 'high' ? 'bad' : d.worst === 'medium' ? 'warn' : null })) }] : [])],
+        actions: [['Trust map', G1 ? V.trust(s.label) : `#/trust?q=${encodeURIComponent(q)}`, true], ...(edges[0] ? [[V.openLabel, V.open(edges[0].roleId)]] : [])] };
     }
     if (l.kind === 'scan') {
       const t = l.target, acct = M.view === 'estate' ? M.by.get(t.accountId) : M.account;
@@ -784,16 +899,20 @@ export async function spacePage(ctx) {
   function overview() {
     const order = { high: 0, medium: 1 };
     const ways = [...M.sources].filter((x) => !x.gcp || x.risk === 'high').sort((a, b) => (order[a.risk] ?? 2) - (order[b.risk] ?? 2) || (b.sessions || 0) - (a.sessions || 0)).slice(0, 6)
-      .map((x) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, meta: [x.sub, x.findings[0] || 'conditions pinned', x.sessions ? `used ${num(x.sessions)}×` : 'never used'].join(' · '), pick: x.id }));
+      .map((x) => { const roles = x.targets.some((t) => t.roles.length), res = x.targets.reduce((n, t) => n + (t.resourceCount || 0), 0);
+        return { label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id,
+          meta: [x.sub, ...(roles ? [x.findings[0] || 'conditions pinned', x.sessions ? `used ${num(x.sessions)}×` : 'never used'] : []), ...(res ? [`${res} resource${res === 1 ? '' : 's'} open to it`] : [])].join(' · ') }; });
     const risky = M.sources.filter((x) => x.risk === 'high').length, loose = M.sources.filter((x) => x.risk === 'medium').length;
     if (M.view === 'estate') {
       const live = awsGroups().filter((g) => !g.planned), roles = live.reduce((n, g) => n + g.roles, 0), cold = live.reduce((n, g) => n + g.cold, 0), high = live.reduce((n, g) => n + g.high, 0);
       return { eyebrow: 'OVERVIEW', title: 'Your estate', sub: 'Click anything on the map for its details', swatch: '#2a8a5c', closable: false, tags: [],
-        summary: `${live.length} account${live.length === 1 ? '' : 's'} with ${num(roles)} ${noun}. ${roles ? Math.round((100 * cold) / roles) : 0}% of them were never called. ${M.sources.filter((x) => !x.gcp).length + M.hidden} identities outside your org can get in${risky ? `, ${risky} through risky trust` : ''}.${M.gcp ? ` Behind it, Google Cloud: ${M.gcp.projects.length} projects, ${num(M.gcp.projects.reduce((n, g) => n + g.roles, 0))} service accounts, ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} paths between the clouds.` : ''}`,
+        summary: `${live.length} account${live.length === 1 ? '' : 's'} with ${num(roles)} ${noun}. ${roles ? Math.round((100 * cold) / roles) : 0}% of them were never called. ${M.sources.filter((x) => !x.gcp).length + M.hidden} identities outside your org can get in${risky ? `, ${risky} with risky access` : ''}.${M.gcp ? ` Behind it, Google Cloud: ${M.gcp.projects.length} projects, ${num(M.gcp.projects.reduce((n, g) => n + g.roles, 0))} service accounts, ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} paths between the clouds.` : ''}`,
         stats: [{ k: 'Accounts', v: num(live.length) }, { k: Noun, v: num(roles) }, { k: 'Never called', v: num(cold), tone: roles && cold / roles > 0.5 ? 'warn' : null },
-          { k: 'High-risk roles', v: num(high), tone: high ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Loose ways in', v: num(loose), tone: loose ? 'warn' : null }],
+          { k: 'High-risk roles', v: num(high), tone: high ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Loose ways in', v: num(loose), tone: loose ? 'warn' : null },
+          ...(showRes ? [(() => { const all = [...live, ...(M.gcp?.projects || [])], n = all.reduce((t, g) => t + (g.resources ? g.resources.public + g.resources.external : 0), 0), hi = all.some((g) => g.resources?.worst === 'high');
+            return { k: 'Open resources', v: num(n), tone: hi ? 'bad' : n ? 'warn' : null, hint: M.gcp ? 'open to anyone, or to identities outside your estate, in both clouds' : 'open to anyone, or to accounts outside your estate' }; })()] : [])],
         rows: [],
-        lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.',
+        lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst first: trust into roles, and resource policies.', items: ways, empty: 'No identity outside your org can get in.',
           full: { label: 'See all in Trust map', href: '#/trust', eyebrow: 'TRUST MAP · EVERY WAY IN' } },
           ...(M.gcp ? [{ title: 'Between AWS and Google Cloud', hint: 'Where an identity in one cloud can act in the other. Red: any role in the AWS account can use it.',
             full: [{ label: 'Google into AWS: Trust map', href: '#/trust?q=provider:google', count: false, eyebrow: 'TRUST MAP · FROM GOOGLE' },
@@ -804,16 +923,23 @@ export async function spacePage(ctx) {
         actions: [['Trust map', '#/trust', true], ['All roles', '#/identities'], ['All calls', '#/events']] };
     }
     const denied = M.roles.filter((r) => r.denied7).sort((a, b) => b.denied7 - a.denied7);
-    return { eyebrow: `OVERVIEW · ${ENV[M.account.environment]?.name.toUpperCase() || ''}`, title: M.account.name, sub: `${M.account.awsAccountId} · click anything on the map for its details`, swatch: ENV[M.account.environment]?.base || '#2a8a5c', closable: false, tags: [],
-      summary: `${num(M.roleCount)} roles, ${num(M.roles.length)} called this week across ${M.towers.length} services. ${M.sources.length + M.hidden} identities outside your org and ${M.fars.length} of your other accounts connect to it.`,
-      stats: [{ k: 'Roles', v: num(M.roleCount) }, { k: 'Called · 7 d', v: num(M.roles.length) }, { k: 'Never called', v: num(M.rim.length), tone: M.roleCount && M.rim.length / M.roleCount > 0.5 ? 'warn' : null },
-        { k: 'Refused calls', v: num(denied.reduce((n, r) => n + r.denied7, 0)), tone: denied.length ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: 'Other accounts', v: num(M.fars.length) }],
+    return { eyebrow: `OVERVIEW · ${G1 ? 'GOOGLE CLOUD PROJECT · ' : ''}${ENV[M.account.environment]?.name.toUpperCase() || ''}`, title: M.account.name, sub: `${V.idLine} · click anything on the map for its details`, swatch: ENV[M.account.environment]?.base || '#2a8a5c', closable: false, tags: [],
+      summary: usage1 ? `${num(M.roleCount)} ${V.roles}, ${num(M.roles.length)} called this week across ${M.towers.length} services. ${M.sources.length + M.hidden} identities outside your org and ${M.fars.length} of your ${V.others} connect to it.`
+        : `${num(M.roleCount)} service accounts. Calls are not read for this project, so each is placed by the service its roles reach most and towers count service accounts, not calls: turn on role usage from audit logs on its connection. ${M.sources.length + M.hidden} identities outside your org and ${M.fars.length} AWS accounts connect to it.`,
+      stats: [{ k: V.Roles, v: num(M.roleCount) }, { k: 'Called · 7 d', v: usage1 ? num(M.roles.length) : '—' }, { k: 'Never called', v: usage1 ? num(M.rim.length) : '—', tone: usage1 && M.roleCount && M.rim.length / M.roleCount > 0.5 ? 'warn' : null },
+        { k: 'Refused calls', v: usage1 ? num(denied.reduce((n, r) => n + r.denied7, 0)) : '—', tone: denied.length ? 'bad' : null }, { k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }, { k: G1 ? 'AWS accounts' : 'Other accounts', v: num(M.fars.length) },
+        ...(showRes ? [{ k: 'Open resources', v: num(M.resources.length), tone: M.resources.some((r) => r.risk === 'high') ? 'bad' : M.resources.length ? 'warn' : null }] : [])],
       rows: [],
-      lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst trust first.', items: ways, empty: 'No identity outside your org can get in.',
-        full: { label: 'See all in Trust map', href: `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`, eyebrow: `TRUST MAP · ${M.account.name.toUpperCase()}` } },
-        ...(denied.length ? [{ title: 'Roles with refused calls', items: denied.slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.cluster.label, value: num(r.denied7), tone: 'bad', pick: r.id })) }] : []),
-        { title: 'Busiest roles', items: [...M.roles].sort((a, b) => b.calls7 - a.calls7).slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.services.map((x) => x.name).slice(0, 3).join(' · '), value: kfmt(r.calls7), pick: r.id })) }],
-      actions: [['Its calls', `#/events?account=${M.account.id}`, true], ['Track sessions', () => openTrack({ account: M.account.id }, M.account.name)], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`], ['Back to estate', '#/space']] };
+      lists: [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst first: trust into roles, and resource policies.', items: ways, empty: 'No identity outside your org can get in.',
+        full: { label: 'See all in Trust map', href: G1 ? V.trust() : V.trust(`account:${M.account.awsAccountId}`), eyebrow: `TRUST MAP · ${M.account.name.toUpperCase()}` } },
+        ...(M.resources?.length ? [{ title: 'Resources open from outside', hint: `Their own ${G1 ? 'IAM policy lets in anyone, or an identity outside your organization' : 'policy lets in anyone, or an account outside your estate'}. Boxes beside the towers; filled = open to anyone.`,
+          full: { label: 'See all in Resource access', href: V.resources(), eyebrow: `RESOURCE ACCESS · ${M.account.name.toUpperCase()}` },
+          items: M.resources.slice(0, 8).map((r) => ({ label: r.name, icon: 'box', meta: `${SVC[r.service] || r.service} · ${r.exposure === 'public' ? 'anyone' : G1 ? 'outside identities' : 'outside accounts'}`, tone: r.risk === 'high' ? 'bad' : r.risk === 'medium' ? 'warn' : null, pick: r.id })) }] : []),
+        ...(denied.length ? [{ title: `${V.Roles} with refused calls`, items: denied.slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.cluster.label, value: num(r.denied7), tone: 'bad', pick: r.id })) }] : []),
+        usage1 ? { title: `Busiest ${V.roles}`, items: [...M.roles].sort((a, b) => b.calls7 - a.calls7).slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.services.map((x) => x.name).slice(0, 3).join(' · '), value: kfmt(r.calls7), pick: r.id })) }
+          : { title: 'Service accounts that can do the most', items: [...M.roles].sort((a, b) => (b.permissions || 0) - (a.permissions || 0)).slice(0, 6).map((r) => ({ label: pretty(r.name).label, meta: r.services.map((x) => x.name).slice(0, 3).join(' · '), value: num(r.permissions || 0), pick: r.id })) }],
+      actions: G1 ? [['Identities', `#/identities?type=gcp&project=${encodeURIComponent(M.account.projectId)}`, true], ['Trust map', V.trust()], ...(showRes ? [['Resource access', V.resources()]] : []), ['Back to estate', '#/space']]
+        : [['Its calls', `#/events?account=${M.account.id}`, true], ['Track sessions', () => openTrack({ account: M.account.id }, M.account.name)], ['Trust map', `#/trust?q=${encodeURIComponent(`account:${M.account.awsAccountId}`)}`], ['Back to estate', '#/space']] };
   }
   function detail(id) {
     const row = (k, v, tone) => ({ k, v: String(v), tone });
@@ -842,20 +968,25 @@ export async function spacePage(ctx) {
         const fromOut = M.sources.map((x) => ({ x, t: x.targets.find((t) => t.accountId === g.id) })).filter((o) => o.t)
           .sort((a, b) => ({ high: 0, medium: 1 }[a.x.risk] ?? 2) - ({ high: 0, medium: 1 }[b.x.risk] ?? 2) || (b.t.sessions || 0) - (a.t.sessions || 0));
         const ins = M.links.filter((l) => l.to === g.id && chain(l)), outs = M.links.filter((l) => l.from === g.id && chain(l));
+        const toGcp = new Set(M.links.filter((l) => l.from === g.id && /^xcloud/.test(l.kind)).map((l) => l.to)).size;
         const scan = M.scanner?.targets.find((t) => t.accountId === g.id);
         const today = g.hourly.reduce((n, x) => n + x.sessions, 0), risky = fromOut.filter((o) => o.x.risk === 'high').length;
         const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
         return { eyebrow: `ACCOUNT · ${ENV[g.env].name.toUpperCase()}${g.ou ? ` · ${g.ou}` : ''}`, title: g.name, sub: g.awsAccountId, swatch: ENV[g.env].base,
           tags: [...(g.high ? [{ t: `⚠ ${g.high} HIGH-RISK ROLE${g.high === 1 ? '' : 'S'}`, c: RED, href: `#/identities?accounts=${g.id}&risks=High` }] : []), ...(look ? [tag(look.kind, TONE[look.tone] || '#fff')] : [])],
-          summary: `${plural(fromOut.length, 'identity', 'identities')} from outside your org${risky ? ` (${risky} with risky trust)` : ''} and ${ins.length} of your other accounts can get in. It reaches ${plural(outs.length, 'other account')}.`,
+          summary: `${plural(fromOut.length, 'identity', 'identities')} from outside your org${risky ? ` (${risky} with risky trust)` : ''} and ${ins.length} of your other accounts can get in. It reaches ${plural(outs.length, 'other account')}${toGcp ? ` and ${plural(toGcp, 'Google Cloud project')}` : ''}.`,
           stats: [{ k: 'Roles', v: num(g.roles) }, { k: 'Never called', v: num(g.cold), tone: g.roles && g.cold / g.roles > 0.5 ? 'warn' : null, hint: g.roles ? `${Math.round((100 * g.cold) / g.roles)}% of its roles` : '' },
             { k: 'High risk', v: num(g.high), tone: g.high ? 'bad' : null }, { k: 'Calls · 7 d', v: kfmt(g.calls7) }, { k: 'Sessions · 24 h', v: num(today) }, { k: 'Ways in', v: num(fromOut.length + ins.length), tone: risky ? 'bad' : null }],
-          rows: look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : [],
+          rows: [...(look ? [row('Look at', `${look.text} (${hourLabel(look.hour)})`, 'bad')] : []),
+            ...(g.resources ? [row('Resources open', [g.resources.public ? `${g.resources.public} to anyone` : '', g.resources.external ? `${g.resources.external} to outside accounts` : ''].filter(Boolean).join(' · '), g.resources.worst === 'high' ? 'bad' : null)] : [])],
           lists: [
+            ...(fromOut.some((o) => o.t.resources?.length) ? [{ title: 'Who can use its resources · from outside', hint: 'Resource policies that let in anyone, or an account outside your estate: no role to assume.',
+              full: { label: 'See all in Resource access', href: `#/resources?accounts=${g.id}`, eyebrow: `RESOURCE ACCESS · ${g.name.toUpperCase()}` },
+              items: fromOut.filter((o) => o.t.resources?.length).flatMap(({ x, t }) => resItems(t.resources, x.label)) }] : []),
             { title: 'Who can get in · from outside your org', hint: 'Sign-in providers, pipelines, vendors and other AWS accounts that a trust policy here lets in.',
               full: { label: 'See all in Trust map', href: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId}`)}`, eyebrow: `TRUST MAP · ${g.name.toUpperCase()}` },
               items: fromOut.map(({ x, t }) => ({ label: x.label, icon: GLYPH[x.group] || 'account', tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null,
-                meta: [x.sub, plural(t.roles.length, 'role'), t.sessions ? `used ${num(t.sessions)}×` : 'never seen coming in'].join(' · '), pick: x.id,
+                meta: [x.sub, t.roles.length ? plural(t.roles.length, 'role') : null, t.resources?.length ? plural(t.resourceCount || t.resources.length, 'resource') : null, t.roles.length ? (t.sessions ? `used ${num(t.sessions)}×` : 'never seen coming in') : null].filter(Boolean).join(' · '), pick: x.id,
                 window: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} ${trustQ(x)}`)}`, winTitle: `${x.label} → ${g.name}` })), empty: 'No trust policy here lets anyone outside your org in.' },
             { title: 'Who can get in · your other accounts', hint: 'Seen entering a role here in the last 90 days. Click one to replay those sessions. What their trust policies allow, used or not, is on the Trust map.',
               full: { label: 'Allowed by trust: Trust map', href: `#/trust?q=${encodeURIComponent(`account:${g.awsAccountId} source:connected`)}`, count: false, eyebrow: `TRUST MAP · YOUR ACCOUNTS → ${g.name.toUpperCase()}` },
@@ -876,23 +1007,51 @@ export async function spacePage(ctx) {
           actions: [['Zoom in', `#/space?view=account&account=${g.id}${wa}`, true], ['Its calls', `#/events?account=${g.id}`], ['Track sessions', () => openTrack({ account: g.id }, g.name)], ['Account radar', `#/?view=account&account=${g.id}`]] };
       }
     }
+    const rbox = M.view === 'account' ? M.resources?.find((x) => x.id === id) : null;
+    if (rbox) {
+      const who = M.sources.filter((x) => rbox.from.includes(x.id)).map((x) => ({ label: x.label, icon: GLYPH[x.group] || 'account', meta: x.sub, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id }));
+      return { eyebrow: `RESOURCE · ${(SVC[rbox.service] || rbox.service).toUpperCase()}`, title: rbox.name, sub: `${M.account.name} · ${V.idLine}`, swatch: rbox.risk === 'high' ? RED : rbox.risk === 'medium' ? WARN : '#d5dceb',
+        tags: [rbox.exposure === 'public' ? { t: '⚠ OPEN TO ANYONE', c: RED } : { t: 'SHARED OUTSIDE THE ESTATE', c: WARN }],
+        summary: G1 ? `Its own IAM policy lets ${rbox.exposure === 'public' ? 'anyone' : 'an identity outside your organization'} use it directly, with no service account to become.`
+          : `Its resource policy lets ${rbox.exposure === 'public' ? 'anyone' : 'an account outside your estate'} use it directly, with no role to assume. The trust map does not show this way in.`,
+        rows: [], lists: [{ title: 'Who can use it', items: who, empty: 'the outsider is not among those drawn' }],
+        actions: [['Open in Resource access', G1 ? `#/resources?cloud=gcp&q=${encodeURIComponent(rbox.name)}&exposure=all` : `#/resources?q=${encodeURIComponent(rbox.name)}&exposure=all&accounts=${M.account.id}`, true]] };
+    }
     const s = M.sources.find((x) => x.id === id);
     if (s?.gcp) {
-      return { eyebrow: `GOOGLE CLOUD · ${s.group === 'oidc' ? 'FEDERATED' : s.group === 'public' ? 'PUBLIC' : 'OUTSIDE YOUR DOMAIN'}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
-        tags: s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag('OUTSIDE', WARN)] : [], rows: [],
-        lists: [{ title: 'Projects it can get into', items: s.targets.map((t) => ({ label: M.by.get(t.accountId)?.name || t.accountId, meta: `${t.roles.length} identit${t.roles.length === 1 ? 'y' : 'ies'}`, pick: t.accountId })) }],
-        actions: s.principal ? [['Open identity', `#/identities/gcp/${s.principal}`, true]] : [['Federated identities', '#/identities?type=gcp&source=wif', true]] };
+      // the same card as an AWS outsider: the projects it gets into (trust), the resources it can use, both together
+      const withRoles = s.targets.filter((t) => t.roles.length || t.direct?.length), res = s.targets.flatMap((t) => (t.resources || []).map((r) => ({ ...r, accountId: t.accountId })));
+      const both = withRoles.length && res.length, resOnly = !withRoles.length, pl = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+      return { eyebrow: `GOOGLE CLOUD · ${s.group === 'oidc' ? 'FEDERATED' : s.group === 'public' ? 'PUBLIC' : 'OUTSIDE YOUR DOMAIN'}${resOnly ? ' · RESOURCE ACCESS' : ''}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
+        tags: [...(s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag(resOnly ? 'RESOURCE SHARED' : 'OUTSIDE', WARN)] : []), ...(both ? [tag('ROLES AND RESOURCES', '#d5dceb')] : [])],
+        summary: both ? `Two ways in: it can become service accounts or holds roles in ${pl(withRoles.length, 'project')}, and can use ${pl(res.length, 'resource')} directly through their own IAM policy. Review both together.` : null,
+        rows: [...(withRoles.length ? [row('Trust', s.findings.length ? s.findings.join('; ') : 'nothing flagged', s.findings.length ? 'bad' : 'ok')] : [row('Trust', 'it cannot become a service account or hold roles on a project')]),
+          ...(res.length ? [row('Resources', `${res.length} it can use${res.some((r) => !r.expected) ? '' : ' · every one marked expected'}`, res.some((r) => !r.expected && r.severity === 'high') ? 'bad' : null)] : [])],
+        lists: [...(withRoles.length ? [{ title: 'Projects it can get into', items: withRoles.map((t) => ({ label: M.by.get(t.accountId)?.name || t.accountId,
+          meta: [t.roles.length ? pl(t.roles.length, 'service account') : null, t.direct?.length ? `${pl(t.direct.length, 'role')} on the project` : null].filter(Boolean).join(' · '), pick: t.accountId })) }] : []),
+          ...(res.length ? [{ title: 'Resources it can use', hint: 'Through the resource\'s own IAM policy: a bucket, dataset, topic, key, secret, service, function or repository.', items: resItems(res, null).map((it, i) => ({ ...it, meta: `${M.by.get(res[i].accountId)?.name || ''} · ${it.meta}` })) }] : [])],
+        actions: [...(withRoles.length ? [['Trust map', `#/trust?cloud=gcp&q=${encodeURIComponent(s.label)}`, true]] : []), ...(res.length ? [['Resource access', `#/resources?cloud=gcp&q=${encodeURIComponent(s.group === 'public' ? '' : s.label)}&exposure=${s.group === 'public' ? 'public' : 'external'}`, !withRoles.length]] : []),
+          ...(s.principal ? [['Open identity', `#/identities/gcp/${s.principal}`]] : [])] };
     }
     if (s) {
+      const withRoles = s.targets.filter((t) => t.roles.length), res = s.targets.flatMap((t) => (t.resources || []).map((r) => ({ ...r, accountId: t.accountId })));
       const items = M.view === 'estate'
-        ? s.targets.map((t) => ({ label: M.by.get(t.accountId)?.name || 'an account', meta: `${t.roles.length} role${t.roles.length === 1 ? '' : 's'}${t.sessions ? ` · ${num(t.sessions)} sessions` : ''}`, pick: t.accountId }))
-        : roleItems(s.targets.flatMap((t) => t.edges || []), s.targets.flatMap((t) => t.roles));
-      return { eyebrow: `OUTSIDE · ${s.group.toUpperCase()}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
-        tags: s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag('LOOSE TRUST', WARN)] : [],
-        rows: [row('Trust', s.findings.length ? s.findings.join('; ') : 'conditions pinned: nothing to flag', s.findings.length ? 'bad' : 'ok'),
-          row('Seen', s.sessions ? `${num(s.sessions)} sessions · last ${ago(s.lastSeen)}` : 'never seen coming in')],
-        lists: [{ title: M.view === 'estate' ? 'Accounts it can enter' : 'Roles it can enter', items }],
-        actions: [['Trust map', `#/trust?q=${encodeURIComponent(trustQ(s))}`, true]] };
+        ? withRoles.map((t) => ({ label: M.by.get(t.accountId)?.name || 'an account', meta: `${t.roles.length} role${t.roles.length === 1 ? '' : 's'}${t.sessions ? ` · ${num(t.sessions)} sessions` : ''}`, pick: t.accountId }))
+        : roleItems(s.targets.flatMap((t) => t.edges || []), s.targets.flatMap((t) => t.roles).filter((x) => !String(x).startsWith('direct:')));
+      const direct = M.view === 'account' ? s.targets.flatMap((t) => t.direct || []) : [];
+      const both = withRoles.length && res.length, resOnly = !withRoles.length;
+      return { eyebrow: `OUTSIDE · ${s.group.toUpperCase()}${resOnly ? ' · RESOURCE ACCESS' : ''}`, title: s.label, sub: s.sub, swatch: '#d5dceb', round: true,
+        tags: [...(s.risk === 'high' ? [tag('⚠ HIGH', RED)] : s.risk === 'medium' ? [tag(resOnly ? 'RESOURCE SHARED' : 'LOOSE TRUST', WARN)] : []), ...(both ? [tag('ROLES AND RESOURCES', '#d5dceb')] : [])],
+        summary: both ? `Two ways in: it can enter ${withRoles.reduce((n, t) => n + t.roles.length, 0)} role${withRoles.length === 1 && withRoles[0].roles.length === 1 ? '' : 's'} through trust, and use ${res.length} resource${res.length === 1 ? '' : 's'} directly through their policies. Review both together.` : null,
+        rows: [...(withRoles.length ? [row('Trust', s.findings.length ? s.findings.join('; ') : 'conditions pinned: nothing to flag', s.findings.length ? 'bad' : 'ok'),
+          ...(G1 ? [] : [row('Seen', s.sessions ? `${num(s.sessions)} sessions · last ${ago(s.lastSeen)}` : 'never seen coming in')])] : [row('Trust', G1 ? 'it cannot become a service account or hold roles here' : 'no trust policy lets it into a role')]),
+          ...(res.length ? [row('Resources', `${res.length} it can use without a role${res.some((r) => !r.expected) ? '' : ' · every one marked expected'}`, res.some((r) => !r.expected && r.severity === 'high') ? 'bad' : null)] : [])],
+        lists: [...(withRoles.length && items.length ? [{ title: M.view === 'estate' ? 'Accounts it can enter' : G1 ? 'Service accounts it can become' : 'Roles it can enter', items }] : []),
+          ...(direct.length ? [{ title: 'Roles it holds itself', hint: 'Granted to it straight on the project, folder or organization.', items: direct.map((d) => ({ label: d.role, meta: [d.what, d.findings[0]?.title].filter(Boolean).join(' · '), tone: d.worst === 'high' ? 'bad' : d.worst === 'medium' ? 'warn' : null })) }] : []),
+          ...(res.length ? [{ title: 'Resources it can use', hint: 'Through the resource\'s own policy: a bucket, key, queue, topic, secret, function or repository.', items: resItems(res, null).map((it, i) => ({ ...it, meta: M.view === 'estate' ? `${M.by.get(res[i].accountId)?.name || ''} · ${it.meta}` : it.meta })) }] : [])],
+        actions: [...(withRoles.length ? [['Trust map', G1 ? V.trust(s.label) : `#/trust?q=${encodeURIComponent(trustQ(s))}`, true]] : []),
+          ...(res.length && G1 ? [['Resource access', `#/resources?cloud=gcp&q=${encodeURIComponent(s.group === 'public' ? M.account.projectId : s.label)}&exposure=${s.group === 'public' ? 'public' : 'external'}`, !withRoles.length]] : []),
+          ...(res.length && !G1 ? [['Resource access', `#/resources?q=${encodeURIComponent(s.key.startsWith('acct:') ? s.key.slice(5) : s.group === 'public' ? '' : s.label)}&exposure=${s.group === 'public' ? 'public' : 'external'}`, !withRoles.length]] : [])] };
     }
     if (M.view !== 'account') return null;
     const r = M.byRole.get(id);
@@ -902,9 +1061,22 @@ export async function spacePage(ctx) {
       const cmT = M.scanner?.targets.find((t) => t.roleId === r.id);
       if (cmT) callers.unshift({ label: 'Curious Monkey', icon: 'cm', meta: `this portal's scanner · last ${ago(cmT.lastSeen)}`, value: num(cmT.sessions), pick: CM_ID });
       const way = (dir) => M.fars.flatMap((n) => n.links.filter((l) => l.roleId === r.id && l.dir === dir).map((l) => ({ label: `${n.name} · ${l.otherRole}`,
-        meta: [l.sessions ? `used · ${num(l.sessions)} sessions` : 'not used in 7 days', l.allowed ? 'allowed by trust' : 'seen chaining'].join(' · '), value: l.sessions ? num(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: `far:${n.id}` })));
+        meta: G1 ? (dir === 'in' ? 'through workload identity federation' : 'trusts this service account') : [l.sessions ? `used · ${num(l.sessions)} sessions` : 'not used in 7 days', l.allowed ? 'allowed by trust' : 'seen chaining'].join(' · '), value: G1 ? null : l.sessions ? num(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: `far:${n.id}` })));
       const chained = st.dir === 'out' ? [] : way('in'), goes = st.dir === 'in' ? [] : way('out');
       const isUser = r.kind === 'iam-user';
+      if (G1) {
+        // a service account: what it calls (or what its roles reach), who can become it, where it goes in AWS
+        const n = callers.length + chained.length, pl = (k, w) => `${k} ${w}${k === 1 ? '' : 's'}`;
+        return { eyebrow: `SERVICE ACCOUNT · ${r.cluster.label.toUpperCase()}`, title: p.label, sub: r.email || M.account.name, swatch: ENV[r.cluster.env].base, round: true,
+          tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: V.open(r.id) }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : []), ...(r.keys ? [tag(`${r.keys} KEY${r.keys === 1 ? '' : 'S'}`, WARN)] : [])],
+          summary: `${usage1 ? (r.calls7 ? `Called ${kfmt(r.calls7)} times this week into ${pl(r.services.length, 'service')}.` : 'Quiet this week.') : `Its roles reach ${pl(r.services.length, 'service')}; calls are not read for this project.`} ${n} can become it${goes.length ? `; ${pl(goes.length, 'AWS role')} trust${goes.length === 1 ? 's' : ''} it` : ''}.`,
+          stats: [usage1 ? { k: 'Calls · 7 d', v: kfmt(r.calls7) } : { k: 'Permissions', v: num(r.permissions || 0) }, { k: 'Refused', v: usage1 ? num(r.denied7 || 0) : '—', tone: r.denied7 ? 'bad' : null }, { k: 'Can become it', v: num(n), tone: callers.some((c) => c.tone === 'bad') ? 'bad' : null }],
+          rows: [],
+          lists: [{ title: usage1 ? 'Calls into' : 'Its roles reach', items: r.services.map((v) => ({ label: SVC[v.name] || v.name, value: usage1 ? kfmt(v.calls) : `${v.calls} role${v.calls === 1 ? '' : 's'}`, meta: v.denied ? `⚠ ${num(v.denied)} refused` : null, tone: v.denied ? 'bad' : null, pick: `svc:${v.name}` })) },
+            ...(st.dir === 'out' ? [] : [{ title: 'Can become it', items: [...callers, ...chained], empty: 'only identities inside your organization' }]),
+            ...(st.dir === 'in' ? [] : [{ title: 'Into AWS', items: goes, empty: 'no AWS role trusts it' }])],
+          actions: [[V.openLabel, V.open(r.id), true], ...(usage1 ? [['Its usage', `${V.open(r.id)}?tab=usage`]] : []), ['Trust map', V.trust(r.email || p.label)]] };
+      }
       return { eyebrow: `${isUser ? 'IAM USER' : 'ROLE'} · ${r.cluster.label.toUpperCase()}`, title: p.label, sub: p.kind ? `${p.kind} · ${r.name}` : `${M.account.name} · ${M.account.awsAccountId}`, swatch: ENV[r.cluster.env].base, round: true,
         tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: `#/identities/${r.id}` }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : [])],
         summary: `${r.calls7 ? `Called ${kfmt(r.calls7)} times this week into ${r.services.length} service${r.services.length === 1 ? '' : 's'}.` : 'Quiet this week.'} ${callers.length + chained.length} can enter it${goes.length ? `; it can go on to ${goes.length} role${goes.length === 1 ? '' : 's'} elsewhere` : ''}.`,
@@ -920,25 +1092,28 @@ export async function spacePage(ctx) {
     const t = M.towers.find((x) => x.id === id);
     if (t) {
       const users = M.roles.map((x) => ({ x, v: x.services.find((v) => v.name === t.name) })).filter((u) => u.v).sort((a, c) => c.v.calls - a.v.calls);
-      return { eyebrow: 'AWS SERVICE', title: t.name, sub: `${users.length} roles call it`, swatch: '#eef7f2', tags: t.denied ? [tag(`⚠ ${num(t.denied)} REFUSED`, RED)] : [],
-        rows: [row('Calls', `${kfmt(t.calls)} in 7 days`)],
-        lists: [{ title: 'Roles that call it', items: users.map(({ x, v }) => ({ label: pretty(x.name).label, meta: v.denied ? `⚠ ${num(v.denied)} refused` : pretty(x.name).kind || null, value: kfmt(v.calls), tone: v.denied ? 'bad' : null, pick: x.id })) }],
-        actions: [['Its calls', `#/events?account=${M.account.id}&q=${encodeURIComponent(`action:${t.name}:`)}&range=7d`, true]] };
+      const here = (M.resources || []).filter((x) => x.service === t.name);
+      return { eyebrow: V.svc, title: G1 ? SVC[t.name] || t.name : t.name, sub: usage1 ? `${users.length} ${V.roles} call it` : `${users.length} service accounts have roles on it`, swatch: '#eef7f2', tags: t.denied ? [tag(`⚠ ${num(t.denied)} REFUSED`, RED)] : [],
+        rows: [usage1 ? row('Calls', `${kfmt(t.calls)} in 7 days`) : row('Calls', 'not read for this project'), ...(here.length ? [row('Resources open', `${here.length} of its resources here`, here.some((x) => x.risk === 'high') ? 'bad' : null)] : [])],
+        lists: [{ title: usage1 ? `${V.Roles} that call it` : 'Service accounts with roles on it', items: users.map(({ x, v }) => ({ label: pretty(x.name).label, meta: v.denied ? `⚠ ${num(v.denied)} refused` : pretty(x.name).kind || null, value: usage1 ? kfmt(v.calls) : null, tone: v.denied ? 'bad' : null, pick: x.id })) },
+          ...(here.length ? [{ title: 'Resources open from outside', items: here.map((x) => ({ label: x.name, icon: 'box', meta: x.exposure === 'public' ? 'anyone' : 'outside identities', tone: x.risk === 'high' ? 'bad' : 'warn', pick: x.id })) }] : [])],
+        actions: G1 ? (here.length && showRes ? [['Resource access', V.resources(), true]] : []) : [['Its calls', `#/events?account=${M.account.id}&q=${encodeURIComponent(`action:${t.name}:`)}&range=7d`, true]] };
     }
     const n = M.fars.find((x) => `far:${x.id}` === id);
     if (n) {
-      const here = (l) => (l.roleId && M.byRole.get(l.roleId) ? pretty(M.byRole.get(l.roleId).name).label : l.roleId ? 'a role here' : `${M.account.name} (whole account)`);
+      const here = (l) => (l.roleId && M.byRole.get(l.roleId) ? pretty(M.byRole.get(l.roleId).name).label : l.roleId ? `a ${V.role} here` : G1 ? `${M.account.name} (roles held directly)` : `${M.account.name} (whole account)`);
       const item = (l) => ({ label: l.dir === 'in' ? `${l.otherRole || n.name} → ${here(l)}` : `${here(l)} → ${l.otherRole || 'a role there'}`,
-        meta: [l.sessions ? `used · ${num(l.sessions)} sessions in 7 days` : null, l.allowed ? `allowed by ${l.allowed} trust statement${l.allowed === 1 ? '' : 's'}` : 'not in a trust policy (seen chaining)', l.allowed && !l.sessions ? 'not used in 7 days' : null].filter(Boolean).join(' · '),
-        value: l.sessions ? String(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: l.roleId && M.byRole.has(l.roleId) ? l.roleId : null, href: l.roleId && !M.byRole.has(l.roleId) ? `#/identities/${l.roleId}` : null });
+        meta: G1 ? (l.dir === 'in' ? `through workload identity federation${l.worst === 'high' ? ' · no condition on the pool: any role in it' : ''}` : 'an AWS role trusts this service account')
+          : [l.sessions ? `used · ${num(l.sessions)} sessions in 7 days` : null, l.allowed ? `allowed by ${l.allowed} trust statement${l.allowed === 1 ? '' : 's'}` : 'not in a trust policy (seen chaining)', l.allowed && !l.sessions ? 'not used in 7 days' : null].filter(Boolean).join(' · '),
+        value: G1 ? null : l.sessions ? String(l.sessions) : '—', tone: l.worst === 'high' ? 'bad' : null, pick: l.roleId && M.byRole.has(l.roleId) ? l.roleId : null, href: l.roleId && !M.byRole.has(l.roleId) ? V.open(l.roleId) : null });
       const ins = n.links.filter((l) => l.dir === 'in'), outs = n.links.filter((l) => l.dir === 'out');
-      return { eyebrow: 'YOUR OTHER ACCOUNT', title: n.name, sub: `${n.awsAccountId || ''}${n.sessions ? ` · ${num(n.sessions)} chained sessions in 7 days` : ' · no chaining seen in 7 days'}`, swatch: ENV[n.env].base, tags: [], rows: [],
+      return { eyebrow: G1 ? 'YOUR AWS ACCOUNT' : 'YOUR OTHER ACCOUNT', title: n.name, sub: G1 ? `${n.awsAccountId || ''} · paths between the clouds` : `${n.awsAccountId || ''}${n.sessions ? ` · ${num(n.sessions)} chained sessions in 7 days` : ' · no chaining seen in 7 days'}`, swatch: ENV[n.env].base, tags: [], rows: [],
         lists: [
           ...(st.dir !== 'out' ? [{ title: `Can come in · ${ins.length}`, items: ins.map(item), empty: `Nothing in ${n.name} can enter ${M.account.name}.` }] : []),
           ...(st.dir !== 'in' ? [{ title: `Can go out to it · ${outs.length}`, items: outs.map(item), empty: `${M.account.name} cannot enter ${n.name}.` }] : []),
           ...(n.moreLinks ? [{ title: `${n.moreLinks} more not shown`, items: [] }] : []),
         ],
-        actions: [['Open in Space', `#/space?view=account&account=${n.id}`, true], ['Trust map', `#/trust?q=${encodeURIComponent(`from:${n.awsAccountId || ''}`)}`]] };
+        actions: [['Open in Space', `#/space?view=account&account=${n.id}`, true], G1 ? ['Trust map', `#/trust?q=${encodeURIComponent(`account:${n.awsAccountId || ''} provider:google`)}`] : ['Trust map', `#/trust?q=${encodeURIComponent(`from:${n.awsAccountId || ''}`)}`]] };
     }
     return null;
   }
@@ -946,29 +1121,45 @@ export async function spacePage(ctx) {
     for (const g of M.gcp?.projects || []) { const a = g.project.accounts.find((x) => x.id === pid); if (a) return a.email; }
     return 'an identity';
   }
-  // one Google Cloud project: its service accounts, and the paths to and from AWS and outside
+  // one Google Cloud project, card for card like an AWS account: who can use its resources, who can get in from
+  // outside, from AWS and into AWS, its service accounts
   function projectDetail(g) {
+    const row = (k, v, tone) => ({ k, v: String(v), tone });
     const p = g.project, plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`, tag = (t, c) => ({ t, c });
     const ins = M.links.filter((l) => l.to === g.id && l.kind.startsWith('xcloud')), outs = M.links.filter((l) => l.from === g.id && l.kind.startsWith('xcloud'));
-    const fromOut = M.sources.filter((x) => x.gcp && x.targets.some((t) => t.accountId === g.id));
-    const broad = ins.some((l) => l.kind === 'xcloudHigh');
-    const sa = (a) => ({ label: a.email.split('@')[0], meta: [a.reasons[0]?.title, a.keys ? `${a.keys} key${a.keys === 1 ? '' : 's'}` : null, ...(a.sources.aws || []).map((x) => `from ${x}`), `${num(a.permissions)} permissions`].filter(Boolean).join(' · '),
-      tone: a.risk === 'High' ? 'bad' : a.risk === 'Medium' ? 'warn' : null, window: `#/identities/gcp/${a.id}`, winTitle: a.email, winEyebrow: 'GOOGLE CLOUD · SERVICE ACCOUNT' });
+    const fromOut = M.sources.filter((x) => x.gcp).map((x) => ({ x, t: x.targets.find((t) => t.accountId === g.id) })).filter((o) => o.t)
+      .sort((a, b) => ({ high: 0, medium: 1 }[a.x.risk] ?? 2) - ({ high: 0, medium: 1 }[b.x.risk] ?? 2));
+    const trustIn = fromOut.filter((o) => o.t.roles.length || o.t.direct.length), risky = fromOut.filter((o) => o.x.risk === 'high').length;
+    const broad = ins.some((l) => l.kind === 'xcloudHigh'), awsIn = new Set(ins.map((l) => l.from)).size, awsOut = new Set(outs.map((l) => l.to)).size;
+    const sa = (a) => ({ label: a.email.split('@')[0], meta: [a.reasons[0]?.title, a.keys ? `${a.keys} key${a.keys === 1 ? '' : 's'}` : null, ...(a.sources.aws || []).map((x) => `from ${x}`), g.usage ? (a.used ? `${kfmt(a.calls7)} calls · 7 d` : 'never called') : `${num(a.permissions)} permissions`].filter(Boolean).join(' · '),
+      tone: a.risk === 'High' ? 'bad' : a.risk === 'Medium' ? 'warn' : null, value: g.usage ? kfmt(a.calls7) : null, window: `#/identities/gcp/${a.id}`, winTitle: a.email, winEyebrow: 'GOOGLE CLOUD · SERVICE ACCOUNT' });
+    const trustHref = (q = '') => `#/trust?cloud=gcp&project=${encodeURIComponent(p.projectId)}${q ? `&q=${encodeURIComponent(q)}` : ''}`;
     return { eyebrow: `GOOGLE CLOUD PROJECT · ${ENV[g.env].name.toUpperCase()}`, title: p.projectId, sub: p.name !== p.projectId ? p.name : `project ${p.number}`, swatch: ENV[g.env].base,
-      tags: [...(p.risky ? [{ t: `⚠ ${p.risky} HIGH-RISK SERVICE ACCOUNT${p.risky === 1 ? '' : 'S'}`, c: RED, href: `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}` }] : []), ...(broad ? [tag('⚠ ANY AWS ROLE CAN GET IN', RED)] : [])],
-      summary: `${plural(p.accounts.length, 'service account')}${p.keys ? `, ${plural(p.keys, 'user-managed key')}` : ''}. ${ins.length ? `${plural(ins.reduce((n, l) => n + l.pairs.length, 0), 'way')} in from AWS` : 'Nothing from AWS gets in'}${outs.length ? `; it reaches ${plural(outs.length, 'AWS account')}` : ''}${fromOut.length ? `; ${plural(fromOut.length, 'identity', 'identities')} from outside your organization` : ''}.`,
-      stats: [{ k: 'Service accounts', v: num(p.accounts.length) }, { k: 'High risk', v: num(p.risky), tone: p.risky ? 'bad' : null }, { k: 'Keys', v: num(p.keys), tone: p.keys ? 'warn' : null },
-        { k: 'From AWS', v: num(ins.reduce((n, l) => n + l.pairs.length, 0)), tone: broad ? 'bad' : null }, { k: 'Into AWS', v: num(outs.reduce((n, l) => n + l.pairs.length, 0)) }, { k: 'From outside', v: num(fromOut.length), tone: fromOut.some((x) => x.risk === 'high') ? 'bad' : null }],
-      rows: [],
+      tags: [...(p.risky ? [{ t: `⚠ ${p.risky} HIGH-RISK SERVICE ACCOUNT${p.risky === 1 ? '' : 'S'}`, c: RED, href: `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}&risk=High` }] : []), ...(broad ? [tag('⚠ ANY AWS ROLE CAN GET IN', RED)] : [])],
+      summary: `${plural(trustIn.length, 'identity', 'identities')} from outside your organization${risky ? ` (${risky} with risky access)` : ''} and ${plural(awsIn, 'AWS account')} can get in. It reaches ${plural(awsOut, 'AWS account')}.${g.usage ? '' : ' Calls are not read for this project: turn on role usage from audit logs on its connection for heights, never-called service accounts and the hour by hour replay.'}`,
+      stats: [{ k: 'Service accounts', v: num(g.roles) }, { k: 'Never called', v: g.usage ? num(g.cold) : '—', tone: g.usage && g.roles && g.cold / g.roles > 0.5 ? 'warn' : null, hint: g.usage ? `${g.roles ? Math.round((100 * g.cold) / g.roles) : 0}% of its service accounts` : 'usage not read' },
+        { k: 'High risk', v: num(g.high), tone: g.high ? 'bad' : null }, { k: 'Calls · 7 d', v: g.usage ? kfmt(g.calls7) : '—' }, { k: 'Calls · 24 h', v: g.usage ? kfmt(g.calls24h) : '—' },
+        { k: 'Ways in', v: num(trustIn.length + awsIn), tone: risky || broad ? 'bad' : null }],
+      rows: [...(g.resources ? [row('Resources open', [g.resources.public ? `${g.resources.public} to anyone` : '', g.resources.external ? `${g.resources.external} to outside identities` : ''].filter(Boolean).join(' · '), g.resources.worst === 'high' ? 'bad' : null)] : []),
+        ...(p.keys ? [row('Keys', `${plural(p.keys, 'user-managed key')} on its service accounts`, 'warn')] : [])],
       lists: [
-        { title: 'From AWS · into this project', hint: 'AWS roles that can become a service account here, or hold roles here, through workload identity federation.',
-          items: ins.flatMap((l) => l.pairs.map((x) => ({ label: `${x.awsAccountName} · ${x.awsRole || 'any role'}`, meta: `→ ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'holds roles directly'}${x.broad ? ' · no condition on the pool' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
+        ...(fromOut.some((o) => o.t.resources?.length) ? [{ title: 'Who can use its resources · from outside', hint: 'Resource-level IAM that lets in anyone, or an identity outside your organization: no service account to become.',
+          full: { label: 'See all in Resource access', href: `#/resources?cloud=gcp&q=${encodeURIComponent(p.projectId)}`, eyebrow: `RESOURCE ACCESS · ${p.projectId.toUpperCase()}` },
+          items: fromOut.filter((o) => o.t.resources?.length).flatMap(({ x, t }) => resItems(t.resources, x.label)) }] : []),
+        { title: 'Who can get in · from outside your organization', hint: 'Anyone, other domains, service accounts from projects your connections do not read, and federation that is not from AWS.',
+          full: { label: 'See all in Trust map', href: trustHref(), eyebrow: `TRUST MAP · GOOGLE CLOUD · ${p.projectId.toUpperCase()}` },
+          items: trustIn.map(({ x, t }) => ({ label: x.label, icon: x.kind, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id,
+            meta: [x.sub, t.roles.length ? plural(t.roles.length, 'service account') : null, t.direct.length ? plural(t.direct.length, 'role') + ' on the project' : null, t.resources?.length ? plural(t.resourceCount || t.resources.length, 'resource') : null].filter(Boolean).join(' · '),
+            window: trustHref(x.label), winTitle: `${x.label} → ${p.projectId}`, winEyebrow: 'TRUST MAP · GOOGLE CLOUD' })), empty: 'No identity outside your organization can get in.' },
+        { title: 'Who can get in · from AWS', hint: 'AWS roles that can become a service account here, or hold roles here, through workload identity federation.',
+          full: { label: 'Identities from AWS', href: '#/identities?type=gcp&source=aws', count: false, eyebrow: 'GOOGLE CLOUD · REACHABLE FROM AWS' },
+          items: ins.flatMap((l) => l.pairs.map((x) => ({ label: `${x.awsAccountName} · ${x.awsRole || 'any role'}`, icon: 'account', meta: `→ ${x.gcpEmail ? x.gcpEmail.split('@')[0] : 'holds roles directly'}${x.broad ? ' · no condition on the pool' : ''}`, tone: x.broad ? 'bad' : null, pick: l.id,
             window: x.gcpPrincipal ? `#/identities/gcp/${x.gcpPrincipal}` : null, winTitle: x.gcpEmail || x.label, winEyebrow: 'GOOGLE CLOUD · IDENTITY' }))), empty: 'No AWS identity can get in.' },
-        { title: 'Into AWS · from this project', hint: 'AWS roles whose trust policy accepts a service account here.',
-          items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${x.gcpEmail.split('@')[0]} → ${x.awsRole}`, meta: x.awsAccountName, pick: l.id, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
-        ...(fromOut.length ? [{ title: 'From outside your organization', items: fromOut.map((x) => ({ label: x.label, icon: x.kind, meta: x.sub, tone: x.risk === 'high' ? 'bad' : x.risk === 'medium' ? 'warn' : null, pick: x.id })) }] : []),
-        { title: 'Service accounts', hint: 'Riskiest first. Click one for what it can do and who can become it.', items: p.accounts.filter((a) => !a.managed).map(sa), empty: 'None.' }],
-      actions: [['Identities', `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}`, true], ['Connections', '#/accounts?cloud=gcp']] };
+        { title: 'Where it goes · into AWS', hint: 'AWS roles whose trust policy accepts a service account here.',
+          items: outs.flatMap((l) => l.pairs.map((x) => ({ label: `${(x.gcpEmail || '').split('@')[0]} → ${x.awsRole}`, icon: 'account', meta: x.awsAccountName, pick: l.id, window: `#/identities/${x.awsRoleId}`, winTitle: x.awsRole, winEyebrow: 'AWS · ROLE' }))), empty: 'No AWS role trusts a service account here.' },
+        { title: 'Service accounts', hint: g.usage ? 'Busiest first. Click one for what it can do and who can become it.' : 'Riskiest first. Click one for what it can do and who can become it.', items: p.accounts.filter((a) => !a.managed).map(sa), empty: 'None.' }],
+      actions: [['Zoom in', `#/space?view=account&account=${encodeURIComponent(g.id)}${wa}`, true], ['Identities', `#/identities?type=gcp&project=${encodeURIComponent(p.projectId)}`], ['Trust map', trustHref()],
+        ...(showRes ? [['Resource access', `#/resources?cloud=gcp&q=${encodeURIComponent(p.projectId)}`]] : [])] };
   }
   // roles an outside identity can enter, readable: permission-set names, what was flagged, whether it was used
   function roleItems(edges, ids) {
@@ -976,15 +1167,15 @@ export async function spacePage(ctx) {
     for (const e of edges) {
       if (seen.has(e.roleId)) continue; seen.add(e.roleId);
       const p = pretty(e.role), drawn = M.byRole?.get(e.roleId);
-      out.push({ label: p.label, meta: [e.findings.length ? `⚠ ${e.findings[0].title}` : null, e.sessions ? `used ${num(e.sessions)}×, last ${ago(e.lastSeen)}` : 'never used', drawn ? drawn.cluster.label : null].filter(Boolean).join(' · '),
-        tone: e.worst === 'high' ? 'bad' : null, pick: drawn ? e.roleId : null, href: drawn ? null : `#/identities/${e.roleId}` });
+      out.push({ label: p.label, meta: [e.findings.length ? `⚠ ${e.findings[0].title}` : null, G1 ? e.actions?.[0] : e.sessions ? `used ${num(e.sessions)}×, last ${ago(e.lastSeen)}` : 'never used', drawn ? drawn.cluster.label : null].filter(Boolean).join(' · '),
+        tone: e.worst === 'high' ? 'bad' : null, pick: drawn ? e.roleId : null, href: drawn ? null : V.open(e.roleId) });
     }
-    for (const rid of ids) if (!seen.has(rid)) { seen.add(rid); const x = M.byRole?.get(rid); out.push({ label: x ? pretty(x.name).label : 'a role', pick: x ? rid : null, href: x ? null : `#/identities/${rid}` }); }
+    for (const rid of ids) if (!seen.has(rid)) { seen.add(rid); const x = M.byRole?.get(rid); out.push({ label: x ? pretty(x.name).label : `a ${V.role}`, pick: x ? rid : null, href: x ? null : V.open(rid) }); }
     return out.sort((a, b) => (a.tone === 'bad' ? 0 : 1) - (b.tone === 'bad' ? 0 : 1) || a.label.localeCompare(b.label));
   }
   // The right-hand panel, top to bottom: what it is, one sentence on what matters, the numbers, what you can do,
   // then who and what it connects to. A row or button with the window mark opens a window over Space; ◎ finds it on the map.
-  const ICONS = { oidc: 'M6 1.5l4.5 2.6v5.2L6 11.9 1.5 9.3V4.1z', saml: 'M6 1l5 5-5 5-5-5z', account: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0', web: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0M1.5 6h9M6 1.5c2 2 2 7 0 9M6 1.5c-2 2-2 7 0 9', cm: 'M6 6m-4 0a4 4 0 1 0 8 0a4 4 0 1 0-8 0' };
+  const ICONS = { oidc: 'M6 1.5l4.5 2.6v5.2L6 11.9 1.5 9.3V4.1z', saml: 'M6 1l5 5-5 5-5-5z', account: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0', web: 'M6 6m-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0-9 0M1.5 6h9M6 1.5c2 2 2 7 0 9M6 1.5c-2 2-2 7 0 9', cm: 'M6 6m-4 0a4 4 0 1 0 8 0a4 4 0 1 0-8 0', box: 'M2 2h8v8H2z' };
   const icon = (kind) => svg('svg', { class: `sp-ico sp-ico-${kind}`, width: 12, height: 12, viewBox: '0 0 12 12', 'aria-hidden': 'true' }, svg('path', { d: ICONS[kind] || ICONS.account, fill: kind === 'cm' ? CM : 'none', stroke: kind === 'cm' ? CM : 'currentColor', 'stroke-width': 1.2 }));
   function panelEl(b) {
     const list = (L) => {
@@ -1044,8 +1235,8 @@ export async function spacePage(ctx) {
   function findBox() {
     const all = M.view === 'estate'
       ? [...M.groups.filter((g) => !g.planned).map((g) => ({ id: g.id, label: g.name, meta: g.cloud === 'gcp' ? 'Google Cloud project' : 'account' })), ...M.sources.map((x) => ({ id: x.id, label: x.label, meta: 'outside your org' }))]
-      : [...M.roles.map((r) => ({ id: r.id, label: pretty(r.name).label, meta: 'role' })), ...M.sources.map((x) => ({ id: x.id, label: x.label, meta: 'outside your org' }))];
-    const input = h('input', { type: 'search', class: 'sp-find', placeholder: `Find ${M.view === 'estate' ? 'an account' : 'a role'} on the map`, 'aria-label': 'Find on the map', autocomplete: 'off' });
+      : [...M.roles.map((r) => ({ id: r.id, label: pretty(r.name).label, meta: V.role })), ...M.sources.map((x) => ({ id: x.id, label: x.label, meta: 'outside your org' }))];
+    const input = h('input', { type: 'search', class: 'sp-find', placeholder: G1 ? 'Find a service account' : `Find ${M.view === 'estate' ? (M.gcp ? 'an account or project' : 'an account') : 'a role'} on the map`, 'aria-label': 'Find on the map', autocomplete: 'off' });
     const list = h('div', { class: 'sp-find-list', role: 'listbox' });
     const choose = (it) => { input.value = ''; list.replaceChildren(); st.sel = it.id; st.lit = true; st.filter = ''; st.showAll = false; if (!flyTo(it.id)) render(); };
     const draw = () => { const q = input.value.trim().toLowerCase(); const m = q ? all.filter((x) => x.label.toLowerCase().includes(q)).slice(0, 8) : [];
@@ -1064,53 +1255,67 @@ export async function spacePage(ctx) {
       h('span', { class: 'sp-row-body' }, h('span', { class: 'sp-row-name' }, name), h('span', { class: 'sp-row-meta' }, meta)), h('span', { class: 'mono sp-row-val' }, val));
     const views = h('div', { class: 'rtabs', role: 'tablist', 'aria-label': 'Space view' },
       h('button', { role: 'tab', 'aria-selected': String(M.view === 'estate'), onClick: () => go(`#/space${wq}`) }, 'Estate'),
-      h('button', { role: 'tab', 'aria-selected': String(M.view === 'account'), onClick: () => go(`#/space?view=account&account=${accountId}${wa}`) }, 'One account'));
+      h('button', { role: 'tab', 'aria-selected': String(M.view === 'account'), onClick: () => go(`#/space?view=account&account=${encodeURIComponent(accountId)}${wa}`) }, G1 ? 'One project' : 'One account'));
     // who can get in, where it can go, or both
     const picked = M.view === 'estate' && M.by.has(st.sel) ? M.by.get(st.sel) : null;
     const whose = M.view === 'account' ? M.account.name : picked ? picked.name : 'your accounts';
-    const ways = (dir) => (M.view === 'account' || picked ? M.links.filter((l) => dirFilter(dir, M, st.sel).link(l) && /^(ext|extWarn|extHigh|in|out|chain|new)$/.test(l.kind)).length : null);
+    // In / Out count who is at the other end (an outside identity, another account or project), whatever the path: trust,
+    // resource policies, chaining, federation between the clouds. The scanner is left out.
+    const ways = (dir) => {
+      return M.view === 'account' ? wayEnds(M, null, dir) : picked ? wayEnds(M, st.sel, dir) : null;
+    };
     const dirBtn = (dir, label, tip) => { const n = dir === 'both' ? null : ways(dir);
       return h('button', { role: 'radio', 'aria-checked': String(st.dir === dir), title: tip, onClick: () => set({ dir }) }, label, n != null ? h('span', { class: 'mono faint', style: 'margin-left:6px' }, String(n)) : null); };
     const dirs = h('div', { class: 'sp-dir' },
       h('h2', { class: 'eyebrow' }, `Show paths · ${whose}`),
       h('div', { class: 'rtabs', role: 'radiogroup', 'aria-label': 'Direction' },
         dirBtn('both', 'Both', 'Everything in and out'),
-        dirBtn('in', 'In', `Who can get into ${whose}: outside identities, your other accounts, the scanner`),
-        dirBtn('out', 'Out', `Where ${whose} can go: other accounts whose roles trust it, or that it chained into`)),
+        dirBtn('in', 'In', `Who can get into ${whose}: outside identities, your other accounts, the other cloud${picked ? ' (the number counts who, not ways)' : ''}`),
+        dirBtn('out', 'Out', `Where ${whose} can go: other accounts it chained into, and the other cloud through federation${picked ? ' (the number counts where, not ways)' : ''}`)),
       M.view === 'estate' && !picked && st.dir !== 'both' ? h('p', { class: 'faint tiny', style: 'margin:4px 0 0' }, st.dir === 'in' ? 'Into your org from outside. Pick an account for its own.' : 'Between your accounts. Pick an account for its own.') : null);
     const pickWho = (k) => { const p = new URLSearchParams(ctx.params); if (k === 'all') p.delete('who'); else p.set('who', k); go(`#/space?${p}`); };
-    const tabs = h('div', { class: 'stack', style: 'gap:12px' }, views, findBox(), whoControl(who, pickWho), dirs);
+    // the resource access layer: on or off (the address keeps it)
+    const resBox = h('input', { type: 'checkbox', checked: showRes });
+    resBox.addEventListener('change', () => { const p = new URLSearchParams(location.hash.split('?')[1] || ''); if (resBox.checked) p.delete('res'); else p.set('res', '0'); go(`#/space?${p}`); });
+    const resToggle = h('label', { class: 'row small', style: 'gap:6px', title: 'Resources (buckets, keys, queues, topics, secrets, functions, repositories) whose own policy lets in anyone or an account outside your estate' }, resBox, 'Resource access');
+    // roles or IAM users is an AWS choice: a project has service accounts only
+    const tabs = h('div', { class: 'stack', style: 'gap:12px' }, views, findBox(), G1 ? null : whoControl(who, pickWho), resToggle, dirs);
     if (M.view === 'estate') {
       const zones = M.zones.map((z) => {
-        if (z.cloud === 'gcp') return null;
-        const gs = awsGroups().filter((g) => g.env === z.id), roles = gs.reduce((s, g) => s + g.roles, 0), cold = gs.reduce((s, g) => s + g.cold, 0);
-        if (!gs.length) return null;
+        if (z.cloud === 'gcp' && M.zones.some((x) => x.id === z.id && x.cloud !== 'gcp')) return null;   // one card per environment, both clouds
+        const gs = awsGroups().filter((g) => g.env === z.id), ps = (M.gcp?.projects || []).filter((g) => g.env === z.id);
+        const all = [...gs, ...ps.filter((g) => g.usage)], roles = all.reduce((s, g) => s + g.roles, 0), cold = all.reduce((s, g) => s + g.cold, 0);
+        if (!gs.length && !ps.length) return null;
         const planned = gs.filter((g) => g.planned).length;
-        return card(focus === z.id, `background:${ENV[z.id].base}`, ENV[z.id].name, kfmt(gs.reduce((s, g) => s + g.calls7, 0)), `${gs.length - planned} accounts · ${roles ? Math.round((100 * cold) / roles) : 0}% cold${planned ? ` · ${planned} planned` : ''}`, () => set({ zone: focus === z.id ? '' : z.id }));
+        return card(focus === z.id, `background:${ENV[z.id].base}`, ENV[z.id].name, kfmt([...gs, ...ps].reduce((s, g) => s + g.calls7, 0)),
+          [gs.length - planned ? `${gs.length - planned} accounts` : null, ps.length ? `${ps.length} project${ps.length === 1 ? '' : 's'}` : null, `${roles ? Math.round((100 * cold) / roles) : 0}% cold`, planned ? `${planned} planned` : null].filter(Boolean).join(' · '), () => set({ zone: focus === z.id ? '' : z.id }));
       });
       const highs = M.sources.filter((s) => s.risk === 'high').length, loose = M.sources.filter((s) => s.risk === 'medium').length;
       const zcards = zones.filter(Boolean);
       zcards.push(card(focus === 'outer', 'background:#d5dceb;transform:rotate(45deg);width:10px;height:10px;margin:0 1px', 'Outside your org', String(M.sources.length + M.hidden), `${highs} risky · ${loose} loose trust`, () => set({ zone: focus === 'outer' ? '' : 'outer' })));
       const list = awsGroups().filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.calls7 - a.calls7);
-      const projects = (M.gcp?.projects || []).filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.high - a.high || b.roles - a.roles);
+      const projects = (M.gcp?.projects || []).filter((g) => !focus || focus === 'outer' || g.env === focus).sort((a, b) => b.calls7 - a.calls7 || b.high - a.high || b.roles - a.roles);
       left.replaceChildren(tabs, h('h2', { class: 'eyebrow' }, M.gcp ? 'Zones · both clouds · click to focus' : 'Zones · click to focus'), h('div', { class: 'sp-cards' }, ...zcards),
         h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Accounts · 7-day calls'), h('span', { class: 'mono faint' }, String(list.length))),
         h('div', { class: 'sp-list' }, ...list.map((g) => row(st.sel === g.id, g.planned ? `border:1.5px dashed ${ENV[g.env].hot}` : `background:${ENV[g.env].base}`, g.name, g.planned ? `${g.awsAccountId} · planned` : g.awsAccountId, g.planned ? '—' : kfmt(g.calls7), () => set({ sel: st.sel === g.id ? null : g.id })))),
-        ...(M.gcp ? [h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Google Cloud projects · service accounts'), h('span', { class: 'mono faint' }, String(projects.length))),
-          h('div', { class: 'sp-list' }, ...projects.map((g) => row(st.sel === g.id, `background:${ENV[g.env].base};border-radius:2px;outline:1px solid ${GCP}`, g.name, `${ENV[g.env].name}${g.high ? ` · ${g.high} high risk` : ''}`, String(g.roles), () => set({ sel: st.sel === g.id ? null : g.id }))))] : []));
+        ...(M.gcp ? [h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, 'Projects · 7-day calls'), h('span', { class: 'mono faint' }, String(projects.length))),
+          h('div', { class: 'sp-list' }, ...projects.map((g) => row(st.sel === g.id, `background:${ENV[g.env].base};border-radius:2px;outline:1px solid ${GCP}`, g.name, `${num(g.roles)} service accounts${g.high ? ` · ${g.high} high risk` : ''}`, g.usage ? kfmt(g.calls7) : '—', () => set({ sel: st.sel === g.id ? null : g.id }))))] : []));
     } else {
       const cur = selRole?.cluster || M.groups[0];
-      const accounts = h('select', { class: 'sp-select', 'aria-label': 'Account', onChange: (ev) => go(`#/space?view=account&account=${ev.target.value}${wa}`) },
-        ...est.accounts.filter((a) => !a.planned).map((a) => h('option', { value: a.id, selected: a.id === accountId }, a.name)));
-      left.replaceChildren(tabs, accounts, h('h2', { class: 'eyebrow' }, 'Roles by the service they call most'),
-        h('div', { class: 'sp-cards' }, ...M.groups.map((g) => card(cur === g, `border:2px solid ${ENV[g.env].base};border-radius:50%`, g.label, kfmt(g.calls7), `${g.roles.length + g.more} roles`, () => g.roles[0] && set({ sel: g.roles[0].id })))),
-        h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, `${cur ? cur.label : 'Roles'} · roles`), h('span', { class: 'mono faint' }, String(cur ? cur.roles.length : 0))),
-        h('div', { class: 'sp-list' }, ...(cur ? cur.roles : []).map((r) => row(st.sel === r.id, `background:${r.denied7 ? RED : ENV[r.cluster.env].base};border-radius:50%`, pretty(r.name).label, r.services.map((x) => x.name).join(' · ') || 'quiet this week', kfmt(r.calls7), () => set({ sel: st.sel === r.id ? null : r.id })))));
+      const opt = (value, label) => h('option', { value, selected: value === accountId }, label);
+      const awsOpts = est.accounts.filter((a) => !a.planned).map((a) => opt(a.id, a.name)), gOpts = gcpList.map((p) => opt(`gcp:${p.projectId}`, p.projectId));
+      const accounts = h('select', { class: 'sp-select', 'aria-label': gOpts.length ? 'Account or project' : 'Account', onChange: (ev) => go(`#/space?view=account&account=${encodeURIComponent(ev.target.value)}${wa}`) },
+        ...(gOpts.length ? [h('optgroup', { label: 'AWS accounts' }, ...awsOpts), h('optgroup', { label: 'Google Cloud projects' }, ...gOpts)] : awsOpts));
+      const val = (n) => (usage1 ? kfmt(n.calls7) : num(n.permissions || 0));
+      left.replaceChildren(tabs, accounts, h('h2', { class: 'eyebrow' }, usage1 ? `${V.Roles} by the service they call most` : 'Service accounts by the service their roles reach most'),
+        h('div', { class: 'sp-cards' }, ...M.groups.map((g) => card(cur === g, `border:2px solid ${ENV[g.env].base};border-radius:50%`, g.label, usage1 ? kfmt(g.calls7) : '—', `${g.roles.length + g.more} ${V.roles}`, () => g.roles[0] && set({ sel: g.roles[0].id })))),
+        h('div', { class: 'sp-listhead' }, h('h2', { class: 'eyebrow' }, `${cur ? cur.label : V.Roles} · ${V.roles}`), h('span', { class: 'mono faint' }, String(cur ? cur.roles.length : 0))),
+        h('div', { class: 'sp-list' }, ...(cur ? cur.roles : []).map((r) => row(st.sel === r.id, `background:${r.denied7 ? RED : ENV[r.cluster.env].base};border-radius:50%`, pretty(r.name).label, r.services.map((x) => (G1 ? SVC[x.name] || x.name : x.name)).join(' · ') || 'quiet this week', val(r), () => set({ sel: st.sel === r.id ? null : r.id })))));
     }
     const sw = (style) => h('span', { class: 'sp-sw', style });
     const legend = M.view === 'estate' ? [
       [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), M.gcp ? 'The green plane in front is AWS; each ring on it is one account' : 'The green plane is your organization; each ring on it is one account'],
-      ...(M.gcp ? [[sw('width:30px;height:12px;background:linear-gradient(180deg,#030a14,#0a1f3a);border:1px solid #3d7bd6'), 'The blue plane behind is Google Cloud; each ring is a project, each dot a service account, higher the more it can do, red when high risk'],
+      ...(M.gcp ? [[sw('width:30px;height:12px;background:linear-gradient(180deg,#030a14,#0a1f3a);border:1px solid #3d7bd6'), 'The blue plane behind is Google Cloud; each ring is a project, each dot a service account: higher the more it was called in 7 days (or, where calls are not read, the more it can do), red when high risk, grey on the floor when never called'],
         [sw(`width:30px;border-top:2px solid ${GCP}`), 'Blue arc between the planes: an AWS role can act in Google Cloud through federation, or a Google service account can sign in to an AWS role'],
         [sw(`width:30px;border-top:2px solid ${RED}`), 'Red arc between the planes: any role in that AWS account can use it (the pool has no condition)']] : []),
       ...M.zones.map((z) => [sw(`width:12px;height:12px;margin:0 9px;background:${ENV[z.id].base}`), ENV[z.id].name]),
@@ -1121,19 +1326,24 @@ export async function spacePage(ctx) {
       [sw(`width:30px;height:10px;border-radius:50%;background:radial-gradient(${ENV[ORDER[0]].base},transparent 70%)`), 'Glow under a ring: calls in the hour you picked'],
       [sw('width:10px;height:10px;margin:0 10px;background:#d5dceb;transform:rotate(45deg)'), 'White shapes off the plane are outside your org. Close and low = risky trust, far and high = pinned'],
       [sw('width:30px;border-top:2px solid #4b95f0'), 'Path between accounts: a role or user in one entered a role in the other (90 days). Bright in the hours it happened'],
+      ...(showRes ? [[sw(`width:30px;border-top:2px dashed ${WARN}`), 'Dashed path from outside: it can use resources there (a bucket, key, queue, secret…) through their own policy, no role needed. Red: data or admin access'],
+        [sw(`width:10px;height:10px;margin:0 10px;border:1.5px solid ${WARN}`), 'Small box on a ring: how many of its resources are open to anyone or outside accounts']] : []),
       [sw('width:30px;border-top:2px dashed #fff'), 'White dashed path: first seen today'],
       ...(M.scanner ? [[sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;background:${CM}`), 'Curious Monkey: this portal. Its dotted paths are the scanner signing in to each account, kept apart from account-to-account paths']] : []),
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],
     ] : [
-      [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), `The plane is one account: ${M.account.name}`],
-      [sw('width:6px;height:14px;margin:0 12px;background:linear-gradient(#eef7f2 0 4px,#9cc7b4 4px 5px,transparent 5px)'), 'Tower: an AWS service. Taller = more calls into it in 7 days'],
-      [sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;border:2px solid ${ENV[M.account.environment].base}`), 'Ring: roles that call the same service most'],
-      [sw('width:6px;height:6px;margin:0 12px;border-radius:50%;background:#8d9a93'), 'Grey dots round the edge: roles never called'],
-      [sw(`width:30px;border-top:2px solid ${ENV[M.account.environment].base}`), 'Thin paths: which services each ring calls. Click a role for its own'],
-      [sw('width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid #9cc7b4'), 'Rings past the edge: accounts that chain in or out'],
+      G1 ? [sw('width:30px;height:12px;background:linear-gradient(180deg,#030a14,#0a1f3a);border:1px solid #3d7bd6'), `The plane is one Google Cloud project: ${M.account.name}`]
+        : [sw('width:30px;height:12px;background:linear-gradient(180deg,#031009,#0b3a26);border:1px solid #2a8a5c'), `The plane is one account: ${M.account.name}`],
+      [sw('width:6px;height:14px;margin:0 12px;background:linear-gradient(#eef7f2 0 4px,#9cc7b4 4px 5px,transparent 5px)'), usage1 ? `Tower: ${G1 ? 'a Google Cloud service (storage, bigquery…)' : 'an AWS service'}. Taller = more calls into it in 7 days` : 'Tower: a Google Cloud service. Taller = more service accounts whose roles reach it (calls are not read)'],
+      [sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;border:2px solid ${ENV[M.account.environment].base}`), usage1 ? `Ring: ${V.roles} that call the same service most` : 'Ring: service accounts whose roles reach the same service most'],
+      ...(usage1 ? [[sw('width:6px;height:6px;margin:0 12px;border-radius:50%;background:#8d9a93'), `Grey dots round the edge: ${V.roles} never called`]] : []),
+      [sw(`width:30px;border-top:2px solid ${ENV[M.account.environment].base}`), `Thin paths: which services each ring ${usage1 ? 'calls' : 'can use'}. Click a ${V.role} for its own`],
+      [sw('width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid #9cc7b4'), G1 ? 'Rings past the edge: AWS accounts with federation in, or roles that trust a service account here' : 'Rings past the edge: accounts that chain in or out'],
       ...(M.scanner ? [[sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;background:${CM}`), 'Curious Monkey: this portal, signing in to its scanner role here']] : []),
-      [sw('width:10px;height:10px;margin:0 10px;border:1.5px solid #d5dceb;transform:rotate(45deg)'), 'Diamond at the edge: where an identity from outside comes in. The number is how many roles it can enter; click it for the list'],
+      [sw('width:10px;height:10px;margin:0 10px;border:1.5px solid #d5dceb;transform:rotate(45deg)'), `Diamond at the edge: where an identity from outside comes in. The number is how many ${V.roles} it can ${V.enter} (and resources it can use); click it for the list`],
       [sw(`width:12px;height:12px;margin:0 9px;border-radius:50%;border:1.5px solid ${RED}`), 'Red ring on a service: calls to it were refused this week'],
+      ...(showRes ? [[sw(`width:9px;height:9px;margin:0 10px;background:${RED}`), `Box beside a tower: a resource of that service whose ${G1 ? 'IAM policy' : 'policy'} lets outsiders in. Filled = anyone, outlined = ${G1 ? 'an outside identity' : 'an outside account'}. Click it for who`],
+        [sw(`width:30px;border-top:2px dashed ${WARN}`), `Dashed path to a gate: that outsider uses resources here, not ${V.roles}`]] : []),
       [sw(`width:30px;border-top:2px solid ${RED}`), 'Red is always a problem and always carries a ⚠ tag'],
     ];
     const b = (st.sel && detail(st.sel)) || overview();
@@ -1181,12 +1391,12 @@ export async function spacePage(ctx) {
       tl.what.title = tl.what.textContent;
     }
     // the HUD is aria-live: rebuilt only when its words change, or every frame of a drag would be read out again
-    { const next = [h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${M.account.awsAccountId}`} · ${hourLabel(hour)} ${TZ_LABEL}`),
-      h('div', null, M.view === 'estate' ? `${awsGroups().length} ACCOUNTS · ${num(awsGroups().reduce((s, g) => s + g.roles, 0))} ${noun.toUpperCase()} · ${M.sources.filter((x) => !x.gcp).length + M.hidden} OUTSIDE${M.gcp ? ` · GOOGLE CLOUD ${M.gcp.projects.length} PROJECTS · ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} CROSS-CLOUD` : ''}` : `${M.roleCount} ROLES · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES`),
-      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM' : 'TOWER = CALLS INTO A SERVICE · DRAG TO TURN · SHIFT+DRAG TO MOVE · SCROLL TO ZOOM')];
+    { const next = [h('div', { class: 'sp-hud-a' }, `● ${M.view === 'estate' ? 'ESTATE' : `${M.account.name.toUpperCase()} · ${String(V.idLine).toUpperCase()}`} · ${hourLabel(hour)} ${TZ_LABEL}`),
+      h('div', null, M.view === 'estate' ? `${awsGroups().length} ACCOUNTS · ${num(awsGroups().reduce((s, g) => s + g.roles, 0))} ${noun.toUpperCase()} · ${M.sources.filter((x) => !x.gcp).length + M.hidden} OUTSIDE${M.gcp ? ` · GOOGLE CLOUD ${M.gcp.projects.length} PROJECTS · ${M.gcp.xlinks.reduce((n, l) => n + l.pairs.length, 0)} CROSS-CLOUD` : ''}` : (usage1 ? `${M.roleCount} ${V.ROLES} · ${M.roles.length} CALLED THIS WEEK · ${M.towers.length} SERVICES` : `${M.roleCount} ${V.ROLES} · CALLS NOT READ · ${M.towers.length} SERVICES`)),
+      h('div', null, M.view === 'estate' ? 'HEIGHT = CALLS IN 7 DAYS (LOG) · DRAG TO TURN · SHIFT+DRAG OR TWO FINGERS TO MOVE · PINCH OR WHEEL TO ZOOM' : `${usage1 ? 'TOWER = CALLS INTO A SERVICE' : 'TOWER = SERVICE ACCOUNTS ITS ROLES REACH'} · DRAG TO TURN · SHIFT+DRAG OR TWO FINGERS TO MOVE · PINCH OR WHEEL TO ZOOM`)];
       const t = next.map((x) => x.textContent).join('\n'); if (hud.dataset.t !== t) { hud.dataset.t = t; hud.replaceChildren(...next); } }
     const btn = ([icon, label, fn]) => h('button', { 'aria-label': label, title: label, onClick: fn }, icon);
-    const moved = st.px || st.py || st.az !== -14 || st.el !== 33 || st.zoom !== 1.15;
+    const moved = st.px || st.py || st.az !== HOME.az || st.el !== HOME.el || st.zoom !== HOME.zoom;
     if (cam.firstChild) { cam.querySelector('.cam-reset').disabled = !moved; return; }
     cam.replaceChildren(
       h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Move'), ...[['←', 'Move the view left', () => set({ px: clampPan(st.px + 120, W) })], ['→', 'Move the view right', () => set({ px: clampPan(st.px - 120, W) })],
@@ -1195,7 +1405,7 @@ export async function spacePage(ctx) {
         ['▲', 'Look from higher', () => set({ el: Math.min(70, st.el + 8) })], ['▼', 'Look from lower', () => set({ el: Math.max(18, st.el - 8) })]].map(btn)),
       h('div', { class: 'cam-row' }, h('span', { class: 'eyebrow' }, 'Zoom'), ...[['+', 'Zoom in', () => set({ zoom: Math.min(3, st.zoom * 1.25) })], ['−', 'Zoom out', () => set({ zoom: Math.max(0.6, st.zoom / 1.25) })],
           ['⌖', 'Go to what is picked (or press F, or double-click it)', () => { if (st.sel) flyTo(st.sel); }]].map(btn),
-        wall.button, h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ az: -14, el: 33, zoom: 1.15, px: 0, py: 0 }) }, 'Reset')));
+        wall.button, h('button', { class: 'cam-reset', disabled: !moved, title: 'Back to the starting view', onClick: () => set({ ...HOME, px: 0, py: 0 }) }, 'Reset')));
   }
 
   // a change picked in the bell that this scene shows (the last 24 hours) is selected here, at its hour

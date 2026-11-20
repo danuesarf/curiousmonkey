@@ -107,7 +107,7 @@ export async function homePage(ctx) {
     return h('section', { class: 'card' },
       h('div', { class: 'card-h' }, h('h2', null, 'Since you last looked'), h('a', { class: 'small', href: '#/radar?feed=30' }, 'Open the feed on Radar')),
       h('div', { class: 'card-b stack', style: 'gap:6px' },
-        feed.items.length ? feed.items.slice(0, 5).map((c) => changeRow(c, () => go(c.role_id ? `#/identities/${c.role_id}?tab=history` : `#/radar?view=account&account=${c.account_id}`)))
+        feed.items.length ? feed.items.slice(0, 5).map((c) => changeRow(c, () => go(String(c.kind).startsWith('resource-') ? `#/resources?accounts=${c.account_id}` : c.role_id ? `#/identities/${c.role_id}?tab=history` : `#/radar?view=account&account=${c.account_id}`)))
           : h('p', { class: 'small muted', style: 'margin:0' }, 'Nothing new since you last looked.'),
         feed.count > 5 ? h('p', { class: 'tiny muted', style: 'margin:4px 0 0' }, `${num(feed.count - 5)} more on Radar.`) : null));
   }

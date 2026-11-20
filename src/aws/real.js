@@ -16,6 +16,7 @@ import { IdentitystoreClient, DescribeUserCommand, DescribeGroupCommand } from '
 import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, trailRegionsPrefix, fileTimeFromKey } from './trailKeys.js';
+import { resourceReaders } from './resourceReaders.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
   ListEventDataStoresCommand } from '@aws-sdk/client-cloudtrail';
 
@@ -38,6 +39,7 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
     await credentials();                                      // fail fast: a wrong trust policy or ExternalId shows at once
   }
   const iam = new IAMClient({ region: 'us-east-1', credentials });
+  const readers = resourceReaders(account, credentials);
   const trails = new Map();
   let s3client = null;
   // the bucket's region if set, else the account's first region; followRegionRedirects copes with a wrong guess
@@ -117,6 +119,13 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
         }
       }
       return out;
+    },
+    /** The organisation the account is in (any member account may ask). */
+    async organizationId() { return readers.organizationId(); },
+    /** One service's resources with their resource-based policies: s3, kms, dynamodb, sqs, sns, secretsmanager, lambda, ecr. */
+    async listResources(service) {
+      if (!readers[service] || service === 'organizationId') throw new Error(`unknown resource service ${service}`);
+      return readers[service]();
     },
     async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
       const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];

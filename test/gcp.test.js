@@ -146,7 +146,7 @@ test('principals: listed riskiest first, filtered, with where they come from', a
   const all = (await owner.get('/api/gcp/principals?limit=200')).json;
   assert.ok(all.total >= 18);
   assert.equal(all.items[0].risk, 'High');
-  assert.equal(all.facets.kinds.serviceAccount, 9);
+  assert.equal(all.facets.kinds.serviceAccount, 10);        // its 9, and a partner's that publishes to a Pub/Sub topic
   const keys = (await owner.get('/api/gcp/principals?source=key')).json.items.map((x) => x.email).sort();
   assert.deepEqual(keys, ['bq-exporter@acme-payments-prod.iam.gserviceaccount.com', 'terraform@acme-shared-ci.iam.gserviceaccount.com']);
   const fromAws = (await owner.get('/api/gcp/principals?source=aws')).json.items.map((x) => x.email || x.member);
@@ -181,8 +181,20 @@ test('space: projects in their environments, outside identities, and the paths b
   assert.deepEqual(s.projects.map((p) => [p.projectId, p.environment]).sort(), [['acme-data-stg', 'staging'], ['acme-payments-prod', 'production'], ['acme-shared-ci', 'shared']]);
   assert.ok(s.outside.some((o) => /GitHub Actions/.test(o.label)));
   assert.ok(s.outside.some((o) => o.label === 'vendor.dev@gmail.com'));
+  // the same outsiders as the Trust page: another domain, a service account from a project not read. Both only hold
+  // roles on one resource (a dataset, a topic), so in Space they are resource access (dashed), not trust (solid)
+  const partner = s.outside.find((o) => o.key === 'serviceAccount:events@partner-prod-123.iam.gserviceaccount.com');
+  assert.deepEqual([partner?.trustWorst, partner?.worst, partner?.targets.map((t) => t.projectId)], ['none', 'high', ['acme-payments-prod']]);
+  assert.ok(partner.targets.every((t) => !t.principals.length && !t.direct.length));
+  assert.deepEqual(partner.targets[0].resources.map((r) => [r.name, r.service]), [['orders', 'pubsub']]);
+  assert.ok(s.outside.some((o) => o.key === 'domain:partner.example'));
+  // one project, in the shape of one AWS account
+  const one = (await owner.get('/api/space/gcp/project/acme-data-stg')).json;
+  assert.equal(one.account.id, 'gcp:acme-data-stg'); assert.ok(Array.isArray(one.clusters) && Array.isArray(one.neighbours) && one.outside.items);
+  assert.equal((await owner.get('/api/space/gcp/project/no-such-project')).status, 404);
   const into = s.links.awsToGcp.map((l) => `${l.awsAccountName}:${l.awsRole || '*'}->${l.gcpEmail || 'direct'}`).sort();
-  assert.deepEqual(into, ['data-platform-stg:data-etl->lake-sync@acme-data-stg.iam.gserviceaccount.com', 'data-platform-stg:lake-reader->direct', 'payments-prod:*->etl-runner@acme-data-stg.iam.gserviceaccount.com']);
+  // data-etl also uses a Cloud KMS key directly (a resource-level binding)
+  assert.deepEqual(into, ['data-platform-stg:data-etl->direct', 'data-platform-stg:data-etl->lake-sync@acme-data-stg.iam.gserviceaccount.com', 'data-platform-stg:lake-reader->direct', 'payments-prod:*->etl-runner@acme-data-stg.iam.gserviceaccount.com']);
   assert.deepEqual(s.links.gcpToAws.map((l) => `${l.gcpEmail}->${l.awsAccountName}:${l.awsRole}`), ['bq-exporter@acme-payments-prod.iam.gserviceaccount.com->payments-prod:lake-reader']);
   // a project's environment can be set by hand
   await owner.call('PUT', `/api/gcp/connections/${conn}/projects/acme-shared-ci/environment`, { environment: 'production' });
@@ -193,7 +205,7 @@ test('an AWS role page learns where the role reaches in Google Cloud, and who co
   const roles = (await owner.get('/api/roles?limit=100')).json.items;
   const etl = roles.find((r) => r.name === 'data-etl' && r.aws_account_id === '222222222222');
   const into = (await owner.get(`/api/gcp/aws-role/${etl.id}`)).json.into.map((l) => l.gcpEmail);
-  assert.deepEqual(into, ['lake-sync@acme-data-stg.iam.gserviceaccount.com']);
+  assert.deepEqual(into.map((x) => x || 'direct (a Cloud KMS key)').sort(), ['direct (a Cloud KMS key)', 'lake-sync@acme-data-stg.iam.gserviceaccount.com']);
   const any = roles.find((r) => r.name === 'monitoring-reader' && r.aws_account_id === '111111111111');
   assert.ok((await owner.get(`/api/gcp/aws-role/${any.id}`)).json.into.some((l) => l.broad && /etl-runner/.test(l.gcpEmail)));   // a pool open to the whole account
   const lake = roles.find((r) => r.name === 'lake-reader' && r.aws_account_id === '111111111111');

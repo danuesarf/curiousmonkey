@@ -8,7 +8,7 @@ import { scopeSql } from './auth/rbac.js';
 import { toCsv } from './csv.js';
 import { compileIdentityRule } from './identityRules.js';
 
-import { BUILTIN, BY_ID, DOMAINS, SEVERITIES, INBOX, TRUST } from './controlCatalog.js';
+import { BUILTIN, BY_ID, DOMAINS, SEVERITIES, INBOX, TRUST, RESOURCES } from './controlCatalog.js';
 
 export * from './controlCatalog.js';
 
@@ -47,10 +47,14 @@ export async function listControls(user, q = '') {
     query('SELECT c.*, u.name AS by FROM custom_controls c LEFT JOIN users u ON u.id = c.updated_by ORDER BY lower(c.name)'),
     query(`SELECT f.control, count(*)::int n, count(*) FILTER (WHERE d.id IS NULL)::int undecided
              FROM flags f JOIN roles r ON r.id = f.role_id LEFT JOIN review_decisions d ON d.flag_id = f.id
-            WHERE f.status = 'open' AND f.control IS NOT NULL AND r.deleted_at IS NULL AND ${scopeSql(user, 'r.account_id', sp)} GROUP BY 1`, sp),
+            WHERE f.status = 'open' AND f.control IS NOT NULL AND r.deleted_at IS NULL AND ${scopeSql(user, 'r.account_id', sp)} GROUP BY 1
+            UNION ALL
+           SELECT f.control, count(*)::int n, count(*) FILTER (WHERE f.decision IS NULL)::int undecided
+             FROM resource_findings f JOIN resources r ON r.id = f.resource_id
+            WHERE f.status = 'open' AND r.deleted_at IS NULL AND ${scopeSql(user, 'r.account_id', sp)} GROUP BY 1`, sp).catch((e) => { if (e.code === '42P01') return { rows: [] }; throw e; }),
   ]);
   const ov = new Map(over.rows.map((x) => [x.control_id, x])), n = new Map(counts.rows.map((x) => [x.control, x]));
-  const filed = (id, where) => (String(where).startsWith(INBOX) || where === TRUST || id.startsWith('custom.') ? { open: n.get(id)?.n ?? 0, undecided: n.get(id)?.undecided ?? 0 } : { open: null, undecided: null });
+  const filed = (id, where) => (String(where).startsWith(INBOX) || where === TRUST || where === RESOURCES || id.startsWith('custom.') ? { open: n.get(id)?.n ?? 0, undecided: n.get(id)?.undecided ?? 0 } : { open: null, undecided: null });
   const items = [
     ...BUILTIN.map((b) => {
       const o = ov.get(b.id);
@@ -110,8 +114,9 @@ export async function setOverride(user, id, body) {
   [id, next.severity, next.enabled, next.note, user.id]);
   // open findings follow now; a severity that goes back to "varies", and a control turned on again, need the next analysis
   let touched = 0;
-  if (!next.enabled) touched = (await query(`UPDATE flags SET status = 'resolved', updated_at = now() WHERE control = $1 AND status = 'open'`, [id])).rowCount;
-  else if (next.severity || b.severity) touched = (await query(`UPDATE flags SET severity = $2, updated_at = now() WHERE control = $1 AND status = 'open' AND severity <> $2`, [id, next.severity || b.severity])).rowCount;
+  const table = id.startsWith('res.') ? 'resource_findings' : 'flags';    // resource findings: the worker works out exposure and "worst" again within a minute
+  if (!next.enabled) touched = (await query(`UPDATE ${table} SET status = 'resolved', updated_at = now() WHERE control = $1 AND status = 'open'`, [id])).rowCount;
+  else if (next.severity || b.severity) touched = (await query(`UPDATE ${table} SET severity = $2, updated_at = now() WHERE control = $1 AND status = 'open' AND severity <> $2`, [id, next.severity || b.severity])).rowCount;
   return { id, before, after: { severity: next.severity, enabled: next.enabled }, findingsChanged: touched };
 }
 

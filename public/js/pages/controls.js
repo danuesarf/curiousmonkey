@@ -75,7 +75,7 @@ export async function controlsPage(ctx) {
         h('button', { type: 'button', class: 'link-btn tiny', onClick: () => change(x, { severity: null }, `${x.name}: back to the built-in severity.`) }, `Reset to ${x.defaultSeverity ? sevName(x.defaultSeverity).toLowerCase() : 'built-in'}`))),
       h('td', null, sw || h('span', { class: 'small' }, x.enabled ? 'On' : 'Off')),
       h('td', { class: 'num' }, x.open == null ? h('span', { class: 'muted', title: x.where }, '—')
-        : x.open ? h('a', { href: `#/findings?control=${encodeURIComponent(x.id)}&state=all`, title: `${num(x.undecided)} not decided` }, num(x.open)) : h('span', { class: 'muted' }, '0')),
+        : x.open ? h('a', { href: x.domain === 'resource' ? `#/resources?control=${encodeURIComponent(x.id)}&exposure=all&state=open` : `#/findings?control=${encodeURIComponent(x.id)}&state=all`, title: `${num(x.undecided)} not decided` }, num(x.open)) : h('span', { class: 'muted' }, '0')),
       h('td', { class: 'small muted' }, x.where),
       h('td', { class: 'actions-cell' }, custom && d.canEdit ? [h('button', { class: 'btn sm', onClick: () => editor(x) }, 'Edit'), h('button', { class: 'btn sm', onClick: () => remove(x) }, 'Delete')]
         : x.rule && d.canEdit ? h('button', { class: 'btn sm', title: 'Start a custom control from this rule', onClick: () => editor(null, x) }, 'Copy') : null));

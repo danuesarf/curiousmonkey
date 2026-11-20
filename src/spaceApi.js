@@ -12,6 +12,7 @@ import { scopeSql, inScope } from './auth/rbac.js';
 import { trustMap } from './trustmap.js';
 import { environmentOf } from './environments.js';
 import { config } from './config.js';
+import { knownVendor } from './trustmap.js';
 
 const num = (x) => Number(x || 0);
 const OUTSIDE = new Set(['public', 'external-account', 'oidc', 'saml']);
@@ -58,35 +59,85 @@ async function hourlyByRole(accountId, start) {
                   FROM track_sessions WHERE account_id=$1 AND started_at >= ${since(start)} AND started_at < ${until(start)} GROUP BY 1, 2`, [accountId]);
 }
 
-/** Identities outside the org that can enter roles in these accounts, grouped by source, worst trust first. */
-async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12, rows = null } = {}) {
+/**
+ * Resource access in Space: resources whose policy lets in anyone or an account outside the estate (open findings, high
+ * or medium). Each row says who (as the outside identity's key in the trust layer, so one outsider is one node) and what.
+ */
+const RES_CONTROLS = ['res.public', 'res.not-principal', 'res.external-account'];
+async function resourceGrants(accountIds) {
+  if (!accountIds.length) return [];
+  return (await query(
+    `SELECT f.control, f.severity, f.principal, f.principal_account, f.decision, f.title, r.id, r.name, r.service, r.account_id
+       FROM resource_findings f JOIN resources r ON r.id = f.resource_id
+      WHERE f.status = 'open' AND r.deleted_at IS NULL AND r.account_id = ANY($1) AND f.control = ANY($2) AND f.severity IN ('high', 'medium')`,
+    [accountIds, RES_CONTROLS]).catch((e) => { if (e.code === '42P01') return { rows: [] }; throw e; })).rows;
+}
+function resourceSource(x) {
+  if (x.control === 'res.public') return { key: 'public:Anyone (principal "*")', group: 'public', label: 'Anyone (principal "*")', sub: 'anyone · Principal "*"' };
+  if (x.control === 'res.not-principal') return { key: 'public:Everyone except a list (NotPrincipal)', group: 'public', label: 'Everyone except a list (NotPrincipal)', sub: 'anyone · NotPrincipal' };
+  if (x.principal_account) return { key: `acct:${x.principal_account}`, group: 'external-account', label: `Account ${x.principal_account}`, sub: knownVendor(x.principal_account) || 'not in your org' };
+  const short = String(x.principal).replace(/^arn:aws[a-z-]*:iam::/, '');
+  return { key: `res:${x.principal}`, group: 'external-account', label: short.length > 40 ? `${short.slice(0, 39)}…` : short, sub: 'outside your estate' };
+}
+
+/**
+ * Identities outside the org that can enter roles in these accounts (trust), or use resources there (resource
+ * policies), grouped by source, worst first. An expected resource grant (a reviewer accepted it) counts as low.
+ */
+async function outsiders(user, accountIds, roleIds = null, { edgeCap = 12, rows = null, grants = [] } = {}) {
   const m = rows ? { rows } : await trustMap(user, '', { limit: 1e6 });
   const by = new Map();
+  const node = (key, base) => {
+    if (!by.has(key)) by.set(key, { key, ...base, worst: 'none', findings: new Set(), targets: new Map(), sessions: 0, lastSeen: null, resources: 0 });
+    return by.get(key);
+  };
+  const target = (s, accountId) => { const t = s.targets.get(accountId) || { roles: new Set(), sessions: 0, edges: [], res: [], resCount: 0 }; s.targets.set(accountId, t); return t; };
   for (const e of m.rows) {
     if (!OUTSIDE.has(e.group) || !accountIds.has(e.accountId) || (roleIds && !roleIds.has(e.roleId))) continue;
     const key = /account/.test(e.group) ? `acct:${e.principalAccount || e.source}` : `${e.group}:${e.source}`;
-    if (!by.has(key)) by.set(key, { key, group: e.group, label: /account/.test(e.group) ? `Account ${e.principalAccount || e.source}` : e.source,
+    const s = node(key, { group: e.group, label: /account/.test(e.group) ? `Account ${e.principalAccount || e.source}` : e.source,
       sub: e.group === 'public' ? 'anyone · Principal "*"' : e.group === 'external-account' ? (e.principalAccountName || 'not in your org')
-        : e.identityCenter ? `SAML · ${e.identityCenter.managedFrom ? `managed from ${e.identityCenter.managedFrom}` : e.identityCenter.key === 'unknown' ? 'instance not read yet' : e.identityCenter.region}` : e.group.toUpperCase(),
-      worst: 'none', findings: new Set(), targets: new Map(), sessions: 0, lastSeen: null });
-    const s = by.get(key);
+        : e.identityCenter ? `SAML · ${e.identityCenter.managedFrom ? `managed from ${e.identityCenter.managedFrom}` : e.identityCenter.key === 'unknown' ? 'instance not read yet' : e.identityCenter.region}` : e.group.toUpperCase() });
     if ((SEV[e.worst] ?? 4) < (SEV[s.worst] ?? 4)) s.worst = e.worst;
+    if ((SEV[e.worst] ?? 4) < (SEV[s.trustWorst] ?? 4)) s.trustWorst = e.worst;
     for (const f of e.findings) if (f.severity !== 'info') s.findings.add(f.title);
-    const t = s.targets.get(e.accountId) || { roles: new Set(), sessions: 0, edges: [] };
-    t.roles.add(e.roleId); s.targets.set(e.accountId, t);
+    const t = target(s, e.accountId);
+    t.roles.add(e.roleId);
     // what the trust statement says, so a click on the path can explain the warning
     if (t.edges.length < edgeCap) t.edges.push({ roleId: e.roleId, role: e.role, principal: e.principal, actions: e.actions, conditions: e.conditions, worst: e.worst, sid: e.sid || null,
       findings: e.findings.filter((x) => x.severity !== 'info').map((x) => ({ title: x.title, severity: x.severity, detail: x.detail || null })),
       sessions: num(e.sessions), lastSeen: e.lastSeen || null });
     t.sessions += num(e.sessions); s.sessions += num(e.sessions); if (e.lastSeen && (!s.lastSeen || new Date(e.lastSeen) > new Date(s.lastSeen))) s.lastSeen = e.lastSeen;
   }
+  for (const x of grants) {
+    if (!accountIds.has(x.account_id)) continue;
+    const src = resourceSource(x), s = node(src.key, src);
+    const sev = x.decision === 'expected' ? 'low' : x.severity;
+    if ((SEV[sev] ?? 4) < (SEV[s.worst] ?? 4)) s.worst = sev;
+    const t = target(s, x.account_id);
+    if (t.res.some((r) => r.id === x.id)) continue;           // one resource once, however many statements let it in
+    t.resCount++; s.resources++;
+    if (t.res.length < Math.max(edgeCap, 30)) t.res.push({ id: x.id, name: x.name, service: x.service, severity: x.severity, expected: x.decision === 'expected', title: x.title });
+  }
   const all = [...by.values()].sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4) || b.targets.size - a.targets.size || b.sessions - a.sessions);
   return {
     hidden: Math.max(0, all.length - MAX_SOURCES),
     items: all.slice(0, MAX_SOURCES).map((s) => ({ key: s.key, group: s.group, label: s.label, sub: s.sub, worst: s.worst, findings: [...s.findings].slice(0, 3), sessions: s.sessions, lastSeen: s.lastSeen,
+      resources: s.resources, trustWorst: s.trustWorst,
       targets: [...s.targets].map(([accountId, t]) => ({ accountId, roles: [...t.roles], sessions: t.sessions,
-        edges: t.edges.sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4)) })) })),
+        edges: t.edges.sort((a, b) => (SEV[a.worst] ?? 4) - (SEV[b.worst] ?? 4)),
+        resources: t.res.sort((a, b) => (a.expected - b.expected) || (SEV[a.severity] ?? 4) - (SEV[b.severity] ?? 4)), resourceCount: t.resCount })) })),
   };
+}
+
+/** Per account: how many resources are open to anyone or to accounts outside the estate, and the worst finding. */
+async function resourceExposure(ids) {
+  const r = await query(
+    `SELECT account_id, count(*) FILTER (WHERE exposure = 'public')::int AS public, count(*) FILTER (WHERE exposure = 'external')::int AS external,
+            min(CASE worst WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 END) AS w
+       FROM resources WHERE deleted_at IS NULL AND account_id = ANY($1) AND exposure IN ('public', 'external') GROUP BY 1`, [ids])
+    .catch((e) => { if (e.code === '42P01') return { rows: [] }; throw e; });
+  return new Map(r.rows.map((x) => [x.account_id, { public: x.public, external: x.external, worst: ['high', 'medium', 'low'][x.w] || null }]));
 }
 
 /**
@@ -164,7 +215,8 @@ export async function spaceEstate(user, who = 'all', day = 0) {
   for (const hRow of hourly.rows) { const b = byAcct.get(hRow.account_id).hourly[bucketOf(hRow.h, start)]; b.sessions += hRow.sessions; b.calls += num(hRow.calls); b.denied += num(hRow.denied); }
   const per = Math.max(10, Math.floor(MAX_STARS / accts.length));
 
-  const outside = await outsiders(user, new Set(ids));
+  const [grants, exposure] = await Promise.all([resourceGrants(ids), resourceExposure(ids)]);
+  const outside = await outsiders(user, new Set(ids), null, { grants });
   // the caller's account comes from the principal key: role:<account>:<name> or user:arn:aws:iam::<account>:user/<name>
   const byAws = new Map((await query('SELECT id, account_id FROM cloud_accounts')).rows.map((x) => [x.account_id, x.id]));
   const inScope = new Set(ids);
@@ -204,6 +256,8 @@ export async function spaceEstate(user, who = 'all', day = 0) {
         // the busiest roles are drawn one by one; the rest of the active ones are counted
         stars: active.slice(0, per).map((r) => ({ id: r.id, name: r.name, calls7: num(r.calls7), risk: r.risk, kind: r.kind })),
         hourly: x.hourly,
+        // resource access: how many of its resources anyone, or an account outside the estate, can use
+        resources: exposure.get(a.id) || null,
       };
     }),
     chains: [...pairs.values()].map((x) => ({ from: x.from, to: x.to, sessions: x.sessions, today: x.today.reduce((a, b) => a + b, 0),
@@ -281,7 +335,10 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
     trustMap({ ...user, scope_accounts: [a.id] }, '', { limit: 1e6 }),
     trustMap(user, '', { limit: 1e6, mentions: a.account_id }),
   ]);
-  const outside = await outsiders(user, ids, null, { edgeCap: 500, rows: inTrust.rows });
+  const [grants, exposed] = await Promise.all([resourceGrants([a.id]),
+    query(`SELECT id, name, service, exposure, worst FROM resources WHERE account_id = $1 AND deleted_at IS NULL AND exposure IN ('public', 'external')
+            ORDER BY CASE worst WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, name LIMIT 60`, [a.id]).catch((e) => { if (e.code === '42P01') return { rows: [] }; throw e; })]);
+  const outside = await outsiders(user, ids, null, { edgeCap: 500, rows: inTrust.rows, grants });
   const byAws = new Map((await query('SELECT id, account_id, name, environment FROM cloud_accounts')).rows.map((x) => [x.account_id, x]));
   const byId = new Map([...byAws.values()].map((x) => [x.id, x]));
   const roleHere = new Map((await query('SELECT id, name FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [a.id])).rows.map((r) => [r.name, r.id]));
@@ -338,5 +395,7 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort((m, n) => n.calls7 - m.calls7).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
     neighbours: nearest, outside, scanner: (await scannerOf([a.id], start)).item, events: ev,
+    // resources here that anyone, or an account outside the estate, can use (the worst 60)
+    resources: exposed.rows,
   };
 }
