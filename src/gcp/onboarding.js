@@ -8,9 +8,11 @@ export const GCP_READER_PERMISSIONS = [
   'iam.serviceAccounts.get', 'iam.serviceAccounts.list', 'iam.serviceAccounts.getIamPolicy', 'iam.serviceAccountKeys.list',
   'iam.roles.get', 'iam.roles.list',
   'iam.workloadIdentityPools.get', 'iam.workloadIdentityPools.list', 'iam.workloadIdentityPoolProviders.get', 'iam.workloadIdentityPoolProviders.list',
+  // resource-level IAM (Resources page): every service at once through Cloud Asset Inventory, and bucket settings
+  'cloudasset.assets.searchAllIamPolicies', 'storage.buckets.get',
 ];
 // folders cannot hold custom roles: predefined roles that together cover the list above
-export const GCP_READER_PREDEFINED = ['roles/iam.securityReviewer', 'roles/browser', 'roles/iam.workloadIdentityPoolViewer'];
+export const GCP_READER_PREDEFINED = ['roles/iam.securityReviewer', 'roles/browser', 'roles/iam.workloadIdentityPoolViewer', 'roles/cloudasset.viewer'];
 // role usage (optional): read audit log entries. Admin Activity needs logEntries.list; Data Access logs are private logs.
 export const GCP_USAGE_PERMISSIONS = ['logging.logEntries.list'];
 export const GCP_DATA_ACCESS_PERMISSIONS = ['logging.privateLogEntries.list'];

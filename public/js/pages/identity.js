@@ -41,6 +41,10 @@ export function identityShell(ctx, { path, eyebrow, name, badges, sub, actions, 
 }
 export const section = (title, sub, ...kids) => h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('div', null, h('h2', null, title), sub && h('p', { class: 'muted small' }, sub))), h('div', { class: 'card-b stack' }, ...kids));
 
+/** Does a trust policy let a whole account in (Principal arn:aws:iam::<account>:root, or a bare account ID)? */
+export const trustsWholeAccount = (doc) => [].concat(doc?.Statement || []).some((st) => st.Effect === 'Allow' && st.Principal && st.Principal !== '*'
+  && [].concat(st.Principal.AWS || []).some((p) => /^\d{12}$/.test(p) || /^arn:aws[a-z-]*:iam::\d{12}:root$/.test(p)));
+
 /** An IAM role or an IAM user. */
 export async function identityPage(ctx, id) {
   const d = await get(`/roles/${id}`);
@@ -74,7 +78,9 @@ export async function identityPage(ctx, id) {
     actions: [
       h('a', { class: 'btn', href: isUser ? `#/space?view=account&account=${r.account_id}&who=users&sel=${r.id}` : `#/space?view=account&account=${r.account_id}&sel=${r.id}` }, 'In Space'),
       r.kind === 'service-linked' ? h('span', { class: 'alert warn small' }, 'Service-linked: managed by AWS. Report only.')
-        : canRec && h('a', { class: 'btn primary', href: `#/identities/${r.id}/recommendation` }, 'Recommend least-privilege policy')],
+        : canRec && h('a', { class: 'btn primary', href: `#/identities/${r.id}/recommendation` }, 'Recommend least-privilege policy'),
+      // a role that trusts a whole account: name who actually comes in
+      r.kind !== 'service-linked' && trustsWholeAccount(r.trust_policy) && h('a', { class: 'btn', href: `#/identities/${r.id}/trust`, title: 'Its trust policy lets a whole account in (:root). Draft a trust policy naming only the identities seen coming in.' }, 'Suggest specific trust')],
     notices: [
       !hist.complete && h('div', { class: 'provisional' }, h('b', null, `PROVISIONAL · ${hist.progress}% OF HISTORY READ`),
         h('span', null, `Used counts are “at least” and never-called counts “at most” until the rest of CloudTrail history is read${hist.readUpTo ? ` (read back to ${fmtDay(hist.backTo || hist.readUpTo)})` : ''}. Approval waits for it.`)),

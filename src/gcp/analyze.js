@@ -8,6 +8,12 @@
 // (federated identities from AWS, GitHub... and GKE pods), and anyone holding one of its keys.
 import { severityOf } from '../controlCatalog.js';
 
+// resource-level bindings (a bucket, a dataset…): read with the scan when Cloud Asset Inventory (or the services) allow
+const HIERARCHY = new Set(['organization', 'folder', 'project', 'serviceAccount']);
+const RES_LABEL = { bucket: 'Bucket', dataset: 'BigQuery dataset', table: 'BigQuery table', topic: 'Pub/Sub topic', subscription: 'Pub/Sub subscription', cryptoKey: 'KMS key', keyRing: 'KMS key ring',
+  secret: 'Secret', runService: 'Cloud Run service', function: 'Cloud Function', repository: 'Artifact Registry repository' };
+const shortRes = (r) => String(r).replace(/^\/\/[^/]+\//, '').split('/').pop();
+
 const IMPERSONATE = ['iam.serviceAccounts.getAccessToken', 'iam.serviceAccounts.implicitDelegation', 'iam.serviceAccounts.signJwt', 'iam.serviceAccounts.signBlob', 'iam.serviceAccounts.getOpenIdToken'];
 const ACT_AS = 'iam.serviceAccounts.actAs';
 const MINT_KEY = 'iam.serviceAccountKeys.create';
@@ -94,6 +100,7 @@ export function analyzeGcp(s) {
     const p = parseMember(b.member);
     const imp = hasAny(b.role, IMPERSONATE), act = permsOf(b.role).has(ACT_AS), mint = permsOf(b.role).has(MINT_KEY);
     if (!imp && !act && !mint) continue;
+    if (!HIERARCHY.has(b.resource_type)) continue;          // a role on a bucket, a topic… makes no one a service account
     let targets;
     if (b.resource_type === 'serviceAccount') { const email = b.resource.split('/serviceAccounts/')[1]; targets = saByEmail.has(email) ? [saByEmail.get(email)] : []; }
     else { const reach = new Set(reachOf(b)); targets = s.serviceAccounts.filter((x) => reach.has(x.project_id)); }
@@ -121,8 +128,10 @@ export function analyzeGcp(s) {
       roles.push({ role: b.role, resource: b.resource, resourceType: b.resource_type, project: b.project_id || null, permissions: permsOf(b.role).size, reach: r.length,
         condition: b.condition ? (b.condition.title || b.condition.expression || 'conditional') : null, basic: /^roles\/(owner|editor|viewer)$/.test(b.role) });
     }
-    roles.sort((a, c) => ({ organization: 0, folder: 1, project: 2, serviceAccount: 3 }[a.resourceType] - { organization: 0, folder: 1, project: 2, serviceAccount: 3 }[c.resourceType]) || c.permissions - a.permissions);
-    const where = (b) => (b.resourceType === 'organization' ? 'the organization' : b.resourceType === 'folder' ? `folder ${b.resource.split('/')[1]}` : b.project ? `project ${b.project}` : b.resource);
+    const rank = (t) => ({ organization: 0, folder: 1, project: 2, serviceAccount: 3 }[t] ?? 4);
+    roles.sort((a, c) => rank(a.resourceType) - rank(c.resourceType) || c.permissions - a.permissions);
+    const where = (b) => (b.resourceType === 'organization' ? 'the organization' : b.resourceType === 'folder' ? `folder ${b.resource.split('/')[1]}`
+      : RES_LABEL[b.resourceType] ? `${RES_LABEL[b.resourceType]} ${shortRes(b.resource)}` : b.project ? `project ${b.project}` : b.resource);
     const managed = x.kind === 'serviceAccount' && x.managed;
 
     // findings about the identity

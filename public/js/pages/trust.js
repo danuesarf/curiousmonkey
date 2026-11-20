@@ -4,6 +4,8 @@
 // pill; a pick only opens the panel and focuses the map. Everything is in the address, so any view can be shared:
 // #/trust?q=source:external finding:external-no-externalid&tab=ways&sel=...
 import { h, svg, get, post, api, num, ago, loadEnvironments, envName, envs, tile, pager, menu, accountPicker, debounced, poll, modal, toast } from '../lib.js';
+import { gcpTrustPage } from './trustGcp.js';
+import { cloudTabs } from './gcp.js';
 import { session } from '../main.js';
 
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
@@ -50,6 +52,8 @@ function setValues(terms, key, values) {
 }
 
 export async function trustPage(ctx) {
+  // AWS | Google Cloud: Google Cloud has its own view (trustGcp.js)
+  if (ctx.params.get('cloud') === 'gcp') return gcpTrustPage(ctx);
   const params = ctx.params;
   const S = {
     terms: parse(params.get('q') || ''),
@@ -654,22 +658,6 @@ export async function trustPage(ctx) {
     h('span', { class: 'grow' }), h('button', { class: 'btn', onClick: () => bg.remove() }, 'Cancel'), save));
     nameIn.focus();
   }
-  // a tighter trust policy for the role, from what was seen coming in: to review and apply in AWS
-  async function suggestDialog(e) {
-    let r;
-    try { r = await get(`/trust/suggest/${e.roleId}`); } catch (x) { toast(x.message, true); return; }
-    const json = (d) => JSON.stringify(d, null, 2);
-    const copyBtn = h('button', { class: 'btn primary', onClick: async () => { try { await navigator.clipboard.writeText(json(r.after)); toast('Copied'); } catch { toast('Copy failed. Select the text and copy it yourself.', true); } } }, 'Copy the new policy');
-    const bg = modal(`Tighter trust for ${r.role}`, h('div', { class: 'stack' },
-      r.changes.length ? h('ul', { class: 'plain stack', style: 'gap:4px' }, r.changes.map((c) => h('li', { class: 'small' }, h('span', { class: `tm2-chip ${c.kind === 'remove' ? 'bad' : 'warn'}` }, c.kind.toUpperCase()), ' ', c.statement && h('span', { class: 'muted' }, `${c.statement}: `), c.text)))
-        : h('p', { class: 'small' }, 'Nothing to tighten from what was seen: every principal was used and has the guards it needs.'),
-      r.empty && h('p', { class: 'small tm-bad' }, 'Nobody came in at all: the role may not be needed. Removing its trust leaves it unusable.'),
-      r.changes.some((c) => c.placeholder) && h('p', { class: 'small muted' }, 'Replace the placeholder ExternalId with the value the third party sends before applying it.'),
-      h('div', { class: 'tm2-diff' }, h('div', null, h('div', { class: 'tm2-cap' }, 'NOW'), h('pre', { class: 'code' }, json(r.before))), h('div', null, h('div', { class: 'tm2-cap' }, 'SUGGESTED'), h('pre', { class: 'code' }, json(r.after)))),
-      h('p', { class: 'tiny muted', style: 'margin:0' }, 'Worked out from the callers seen in the history read. Nothing is changed in AWS: apply it with your usual change process.')),
-    h('div', { class: 'actions' }, h('button', { class: 'btn', onClick: () => bg.remove() }, 'Close'), r.changes.length ? copyBtn : null));
-    bg.querySelector('.modal')?.classList.add('wide');
-  }
   async function unexpect(id) {
     try { await api('DELETE', `/trust/expected/${id}`); afterReview('No longer expected'); } catch (err) { toast(err.message, true); }
   }
@@ -765,7 +753,7 @@ export async function trustPage(ctx) {
             canDecide() && h('button', { type: 'button', class: 'btn xs ghost', style: 'margin-top:4px', onClick: () => unexpect((e.expected || e.expectedDue).id) }, 'No longer expected')),
           h('div', { class: 'row tm2-way-acts', style: 'gap:8px;margin-top:8px' }, h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=policies` }, 'Open the role'), h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=history` }, 'Its history'),
             !e.expected && e.group !== 'service' && expectBtn({ source: e.sourceKey, sourceLabel: e.source, roles: e.role, accounts: [e.awsAccountId], ways: [e] }),
-            e.group !== 'service' && h('button', { type: 'button', class: 'btn sm', onClick: () => suggestDialog(e) }, 'Tighter trust policy…'))));
+            e.type === 'aws-root' && h('a', { class: 'btn sm', href: `#/identities/${e.roleId}/trust`, title: 'Name the identities seen coming in from this account, with safety checks and approval' }, 'Specific trust draft →'))));
     };
     const total = ways.total;
     const pg = total > PAGE ? pager({ page: S.page + 1, total, size: PAGE, label: `${num(S.page * PAGE + 1)}–${num(Math.min(total, S.page * PAGE + PAGE))} of ${num(total)}`, onPage: (p) => { S.page = p - 1; address(); loadWays(); } }) : null;
@@ -977,7 +965,7 @@ export async function trustPage(ctx) {
   ctx.onLeave(poll(() => { if (!loading) refetch(); }, 3 * 60_000));
 
   if (S.sel && !known(S.sel)) S.sel = null;
-  root.append(header, filterBar, tiles, h('div', { class: 'tm2-viewwrap' }, tabBar, body), live);
+  root.append(cloudTabs('aws', '#/trust'), header, filterBar, tiles, h('div', { class: 'tm2-viewwrap' }, tabBar, body), live);
   address();
   drawAll();
   loadViews();

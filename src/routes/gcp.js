@@ -12,6 +12,10 @@ import { isEnvironment, resolveEnvironment, environmentOf, defaultEnvironment } 
 import { gcpSnippets, awsRoleOf } from '../gcp/onboarding.js';
 import { gcpGateway, hierarchy } from '../gcp/scan.js';
 import { crossLinks } from '../gcp/links.js';
+import { gcpProjects, summarizeSources } from '../gcp/projects.js';
+import { spaceGcp, spaceGcpProject } from '../gcp/space.js';
+import { gcpTrust, gcpTrustCsv, gcpWays } from '../gcp/trust.js';
+import { sendCsv } from '../csv.js';
 import { syncCursors, usageStorage, coverage, LAG_MS, MAX_LOOKBACK_DAYS } from '../gcp/usage.js';
 import { analyzeUsage, principalUsage } from '../gcp/usageAnalysis.js';
 
@@ -65,7 +69,7 @@ const view = (c, counts = {}) => ({
 gcp.get('/gcp/connections', requirePerm('view'), unscoped, wrap(async (req, res) => {
   const [rows, counts] = await Promise.all([
     query('SELECT * FROM gcp_connections ORDER BY name'),
-    query(`SELECT connection_id, count(*) FILTER (WHERE kind='serviceAccount')::int AS sas, count(*) FILTER (WHERE risk='High')::int AS high, count(*)::int AS principals,
+    query(`SELECT connection_id, count(*) FILTER (WHERE kind='serviceAccount' AND unique_id IS NOT NULL)::int AS sas, count(*) FILTER (WHERE risk='High')::int AS high, count(*)::int AS principals,
            (SELECT count(*)::int FROM gcp_projects p WHERE p.connection_id = x.connection_id) AS projects FROM gcp_principals x GROUP BY connection_id`),
   ]);
   const by = new Map(counts.rows.map((r) => [r.connection_id, r]));
@@ -181,17 +185,11 @@ gcp.put('/gcp/connections/:id/projects/:project/environment', requirePerm('accou
 }));
 
 /** Every project with the environment it lands in: chosen here, then its env/environment label, then the connection's. */
-export async function gcpProjects() {
-  const r = await query(`SELECT p.*, c.environment AS default_env, c.name AS connection_name FROM gcp_projects p JOIN gcp_connections c ON c.id = p.connection_id ORDER BY p.project_id`);
-  const seen = new Set();
-  return r.rows.filter((p) => !seen.has(p.project_id) && seen.add(p.project_id)).map((p) => {
-    const label = p.labels?.env || p.labels?.environment || p.labels?.stage || null;
-    const fromLabel = label && isEnvironment(resolveEnvironment(label)) ? resolveEnvironment(label) : null;
-    return { projectId: p.project_id, number: p.number, name: p.name || p.project_id, connection: p.connection_id, connectionName: p.connection_name, parent: p.parent,
-      environment: environmentOf(p.environment || fromLabel || p.default_env), environmentSource: p.environment ? 'set' : fromLabel ? 'label' : 'connection', labels: p.labels };
-  });
-}
 gcp.get('/gcp/projects', requirePerm('view'), unscoped, wrap(async (req, res) => res.json({ items: await gcpProjects() })));
+
+// ---------- trust: who can get in (Trust page, Google Cloud) ----------
+gcp.get('/gcp/trust', requirePerm('view'), unscoped, wrap(async (req, res) => { res.json(await gcpTrust(req.query)); }));
+gcp.get('/gcp/trust.csv', requirePerm('view'), unscoped, wrap(async (req, res) => { sendCsv(res, 'gcp-ways-in', await gcpTrustCsv(req.query)); }));
 
 // ---------- principals ----------
 const KIND_LABEL = { serviceAccount: 'Service account', user: 'User', group: 'Group', domain: 'Domain', public: 'Public', federated: 'Federated identity', gke: 'GKE workload', deleted: 'Deleted', other: 'Other' };
@@ -199,12 +197,6 @@ const row = (p) => ({ id: p.id, member: p.member, kind: p.kind, kindLabel: KIND_
   disabled: p.disabled, managed: p.managed_by === 'google', risk: p.risk, riskScore: p.risk_score, reasons: p.risk_reasons, permissions: p.permissions, reach: p.reach,
   roles: p.roles.length, keys: p.keys.filter((k) => !k.disabled).length, sources: summarizeSources(p.sources), origin: p.origin, connection: p.connection_id,
   usage: p.used_count == null ? null : { used: p.used_count, unused: p.unused_count, unconfirmed: p.unconfirmed_count, lastActivity: p.last_activity_at } });
-function summarizeSources(list) {
-  const by = {};
-  for (const s of list || []) by[s.via] = (by[s.via] || 0) + 1;
-  const aws = (list || []).filter((s) => s.origin?.cloud === 'aws').map((s) => s.origin.label);
-  return { ...by, aws: [...new Set(aws)] };
-}
 
 gcp.get('/gcp/principals', requirePerm('view'), unscoped, wrap(async (req, res) => {
   const q = z.object({ q: z.string().max(200).optional(), kind: z.string().max(40).optional(), risk: z.enum(['High', 'Medium', 'Low']).optional(), project: z.string().max(60).optional(),
@@ -326,50 +318,15 @@ gcp.get('/gcp/aws-role/:id', requirePerm('view'), wrap(async (req, res) => {
   res.json({ into, from: links.gcpToAws.filter((l) => l.awsRoleId === role.id) });
 }));
 
-// ---------- Space: Google Cloud's field and the paths between the clouds ----------
-export async function spaceGcp() {
-  const [projects, principals, wif] = await Promise.all([
-    gcpProjects(),
-    query(`SELECT DISTINCT ON (member) id, member, kind, email, display_name, project_id, reach, permissions, risk, risk_score, risk_reasons, sources, origin, keys, managed_by FROM gcp_principals ORDER BY member, analyzed_at DESC`),
-    query(`SELECT * FROM gcp_wif_providers`),
-  ]);
-  const byProject = new Map(projects.map((p) => [p.projectId, { ...p, accounts: [], risky: 0, keys: 0 }]));
-  const outside = new Map();
-  const out = (key, o) => { if (!outside.has(key)) outside.set(key, { key, ...o, targets: new Map(), worst: 'none' }); return outside.get(key); };
-  const rank = { none: 0, low: 1, medium: 2, high: 3 };
-  for (const p of principals.rows) {
-    if (p.kind === 'serviceAccount' && byProject.has(p.project_id)) {
-      const g = byProject.get(p.project_id);
-      g.accounts.push({ id: p.id, email: p.email, name: p.display_name || p.email.split('@')[0], risk: p.risk, permissions: p.permissions, reach: p.reach.length, keys: p.keys.filter((k) => !k.disabled).length, managed: p.managed_by === 'google',
-        sources: summarizeSources(p.sources), reasons: p.risk_reasons.filter((r) => r.severity !== 'info').slice(0, 3) });
-      if (p.risk === 'High') g.risky++;
-      g.keys += p.keys.filter((k) => !k.disabled).length;
-    }
-    // identities from outside the organization, and federated ones that are not from a connected AWS account
-    const ext = p.risk_reasons.some((r) => ['external', 'public'].includes(r.id));
-    if (ext || p.kind === 'public') {
-      const o = out(p.member, { label: p.email || p.member, sub: p.kind === 'public' ? 'public' : `outside your domain · ${p.kind}`, group: p.kind === 'public' ? 'public' : 'external', principal: p.id });
-      for (const pid of p.reach) o.targets.set(pid, { projectId: pid, principals: [p.id] });
-      o.worst = p.risk === 'High' ? 'high' : 'medium';
-    }
-    for (const s of p.kind === 'federated' && p.origin ? [{ origin: p.origin, member: p.member }] : p.sources.filter((x) => x.via === 'wif' && x.origin)) {
-      if (s.origin.cloud === 'aws') continue;                               // drawn as a path from the AWS field
-      const o = out(`wif:${s.origin.pool}:${s.origin.label}`, { label: s.origin.label, sub: `federated · pool ${s.origin.pool}`, group: 'oidc' });
-      const pid = p.kind === 'federated' ? p.reach[0] : p.project_id;
-      if (pid) { const t = o.targets.get(pid) || { projectId: pid, principals: [] }; t.principals.push(p.id); o.targets.set(pid, t); }
-      const sev = s.origin.broad ? 'high' : 'low';
-      if (rank[sev] > rank[o.worst]) o.worst = sev;
-    }
-  }
-  const links = await crossLinks();
-  return {
-    projects: [...byProject.values()].map((g) => ({ ...g, accounts: g.accounts.sort((a, b) => (a.risk === b.risk ? b.permissions - a.permissions : a.risk === 'High' ? -1 : b.risk === 'High' ? 1 : a.risk === 'Medium' ? -1 : 1)) })),
-    outside: [...outside.values()].map((o) => ({ ...o, targets: [...o.targets.values()] })),
-    providers: wif.rows.map((w) => ({ name: w.name, project: w.project_id, pool: w.pool_id, provider: w.provider_id, type: w.type, awsAccountId: w.aws_account_id, issuer: w.issuer, condition: w.attribute_condition, disabled: w.disabled })),
-    links,
-  };
-}
+// ---------- Space: Google Cloud's field, one project, and the paths between the clouds (src/gcp/space.js) ----------
 gcp.get('/space/gcp', requirePerm('view'), wrap(async (req, res) => {
   if (req.user.scope_accounts) return res.json({ projects: [], outside: [], providers: [], links: { awsToGcp: [], gcpToAws: [] }, hidden: true });
-  res.json(await cachedWarm(`space-gcp:${scopeKey(req.user)}`, () => spaceGcp()));
+  const day = Math.max(0, Math.min(29, Math.floor(Number(req.query.day)) || 0));
+  res.json(await cachedWarm(`space-gcp:${scopeKey(req.user)}:${day}`, () => spaceGcp(day)));
+}));
+// one project, in the shape of one AWS account (GET /api/space/account/:id), so Space draws both the same way
+gcp.get('/space/gcp/project/:projectId', requirePerm('view'), unscoped, wrap(async (req, res) => {
+  const pid = z.string().regex(/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/).parse(req.params.projectId);
+  const day = Math.max(0, Math.min(29, Math.floor(Number(req.query.day)) || 0));
+  const r = await cachedWarm(`space-gcp:project:${pid}:${day}`, () => spaceGcpProject(pid, day)); if (!r) throw NotFound(); res.json(r);
 }));

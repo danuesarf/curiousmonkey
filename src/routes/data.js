@@ -13,7 +13,7 @@ import { listSessions, buildTrack } from '../sessions.js';
 import { historyFor } from '../history.js';
 import { setClause, insertParts } from '../sqlColumns.js';
 import { estate, accountRadar, changeFeed, markSeen, unreadChanges, trail } from '../radarApi.js';
-import { trustMap, trustWays, trustGroups, thirdParties, thirdPartyCsv, toCsv, sourcesCsv, expectedRules, trustIndex, trustChain, suggestTrust } from '../trustmap.js';
+import { trustMap, trustWays, trustGroups, thirdParties, thirdPartyCsv, toCsv, sourcesCsv, expectedRules, trustIndex, trustChain } from '../trustmap.js';
 import { toCsv as toCsvRows, sendCsv } from '../csv.js';
 import { spaceEstate, spaceAccount } from '../spaceApi.js';
 import { searchEvents, eventsCsv } from '../eventsApi.js';
@@ -23,6 +23,7 @@ import { listFindings, waitingCount, decideMany, undecideMany, allowedFor, Decis
 import { cached, cachedWarm, scopeKey } from '../cache.js';
 import { isEnvironment, resolveEnvironment, defaultEnvironment } from '../environments.js';
 import { recommend, latestRecommendation, approve, notifyApproved, toTerraform, loadRoleContext, Refusal } from '../recommender/index.js';
+import { draftTrust, latestTrustDraft, approveTrust, notifyTrustApproved, trustExport } from '../recommender/trust.js';
 
 export const data = Router();
 data.use(requireUser);
@@ -559,6 +560,38 @@ data.get('/recommendations/:id/export', requirePerm('export'), wrap(async (req, 
   res.json({ role: role.name, approved: rec.status === 'approved', policies: rec.policies });
 }));
 
+// ---------- specific trust: a whole-account principal narrowed to the identities seen coming in ----------
+data.post('/roles/:id/trust-recommend', requirePerm('recommend'), wrap(async (req, res) => {
+  const role = await roleFor(req, req.params.id);
+  const b = z.object({ exclude: z.array(z.string().max(600)).max(1000).optional(), style: z.enum(['condition', 'principal']).optional() }).parse(req.body || {});
+  const rec = await draftTrust(role.id, { exclude: b.exclude || [], style: b.style || 'condition', userId: req.user.id });
+  await audit(req, 'trust-recommendation.create', { type: 'role', id: role.id }, { role: role.name, style: rec.style, excluded: rec.excluded.length });
+  res.status(201).json(await latestTrustDraft(role.id));
+}));
+data.get('/roles/:id/trust-recommendation', requirePerm('view'), wrap(async (req, res) => {
+  const role = await roleFor(req, req.params.id);
+  res.json(await latestTrustDraft(role.id));
+}));
+data.post('/trust-recommendations/:id/approve', requirePerm('approve'), wrap(async (req, res) => {
+  const rec = (await query('SELECT role_id FROM trust_recommendations WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
+  if (!rec) throw NotFound();
+  const role = await roleFor(req, rec.role_id);
+  const out = await approveTrust(req.params.id, req.user);
+  await audit(req, 'trust-recommendation.approve', { type: 'trust_recommendation', id: req.params.id }, { role: role.name, team: req.user.team, complete: out.approved });
+  if (out.approved) notifyTrustApproved(req.params.id);
+  res.json(out);
+}));
+data.get('/trust-recommendations/:id/export', requirePerm('export'), wrap(async (req, res) => {
+  const rec = (await query('SELECT * FROM trust_recommendations WHERE id=$1', [uuid.parse(req.params.id)])).rows[0];
+  if (!rec) throw NotFound();
+  const role = await roleFor(req, rec.role_id);
+  const format = ['terraform', 'cli'].includes(req.query.format) ? req.query.format : 'json';
+  await audit(req, 'trust-recommendation.export', { type: 'trust_recommendation', id: rec.id }, { format });
+  const out = trustExport(role, rec, format);
+  if (typeof out === 'string') return res.type('text/plain').send(out);
+  res.json(out);
+}));
+
 // ---------- overview ----------
 // ---- trust map: who can reach each role, and what is wrong with it ----
 const trustQ = (req) => String(req.query.q || '').slice(0, 500);
@@ -586,15 +619,10 @@ data.get('/trust/groups', requirePerm('view'), wrap(async (req, res) => {
   const int = (v, d) => (Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d);
   res.json(await trustGroups(req.user, trustQ(req), { sel: trustSel(req), page: int(req.query.page, 0), size: int(req.query.size, 50) }));
 }));
-// where a source leads next (role chaining), and a tighter trust policy for one role from what was seen
+// where a source leads next (role chaining)
 data.get('/trust/chain', requirePerm('view'), wrap(async (req, res) => {
   const sel = z.string().min(3).max(300).parse(req.query.sel);
   res.json(await trustChain(req.user, sel));
-}));
-data.get('/trust/suggest/:roleId', requirePerm('view'), wrap(async (req, res) => {
-  const r = await suggestTrust(req.user, uuid.parse(req.params.roleId));
-  if (!r) throw NotFound();
-  res.json(r);
 }));
 // third-party access: one row per source from outside your estate, with its name, owner, reach, guards and use
 data.get('/trust/third-parties', requirePerm('view'), wrap(async (req, res) => { res.json({ items: await thirdParties(req.user, trustQ(req)) }); }));

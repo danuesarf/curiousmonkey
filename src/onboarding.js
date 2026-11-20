@@ -19,6 +19,11 @@ export const SCANNER_ALLOW = [
   // IAM users: their policies (and their groups'), access key metadata and last use, console password and MFA
   'iam:ListUsers', 'iam:GetUser', 'iam:ListAccessKeys', 'iam:GetAccessKeyLastUsed', 'iam:ListMFADevices', 'iam:GetLoginProfile', 'iam:ListGroupsForUser',
   'iam:ListUserPolicies', 'iam:GetUserPolicy', 'iam:ListAttachedUserPolicies', 'iam:ListGroupPolicies', 'iam:GetGroupPolicy', 'iam:ListAttachedGroupPolicies',
+  // resource access: resource-based policies and the settings that decide them, never the data (Resource access page)
+  's3:ListAllMyBuckets', 's3:GetBucketLocation', 's3:GetBucketPolicy', 's3:GetBucketPublicAccessBlock', 's3:GetAccountPublicAccessBlock',
+  'kms:ListKeys', 'kms:ListAliases', 'kms:DescribeKey', 'kms:GetKeyPolicy', 'dynamodb:ListTables', 'dynamodb:GetResourcePolicy',
+  'sqs:ListQueues', 'sqs:GetQueueAttributes', 'sns:ListTopics', 'sns:GetTopicAttributes', 'secretsmanager:ListSecrets', 'secretsmanager:GetResourcePolicy',
+  'lambda:ListFunctions', 'lambda:GetPolicy', 'ecr:DescribeRepositories', 'ecr:GetRepositoryPolicy',
 ];
 const DENY_DATA = [
   'dynamodb:GetItem', 'dynamodb:BatchGetItem', 'dynamodb:Query', 'dynamodb:Scan', 'secretsmanager:GetSecretValue',

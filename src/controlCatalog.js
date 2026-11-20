@@ -8,9 +8,10 @@ export const DOMAINS = {
   trust: 'Trust: who can get in',
   credentials: 'IAM user credentials',
   gcp: 'Google Cloud',
+  resource: 'Resource access: who resource policies let in',
   custom: 'Custom',
 };
-export const INBOX = 'Findings inbox', TRUST = 'Trust map; high and medium also in the Findings inbox';
+export const INBOX = 'Findings inbox', TRUST = 'Trust map; high and medium also in the Findings inbox', RESOURCES = 'Resource access';
 const RISK = 'Risk score of the IAM user', GCP = 'Google Cloud page and its risk score';
 const EVIDENCE_SEV = 'Low; medium when the actions that cannot be verified change access (IAM, resource policies, grants, logging), write to every bucket or table, or are iam:PassRole on every role. Never high: nothing was seen to be wrong.';
 
@@ -48,6 +49,17 @@ export const BUILTIN = [
   c('trust.deleted-principal', 'trust', 'Points at a deleted identity', 'The statement holds a unique ID where an ARN was.', 'low', TRUST, 'Remove the statement.'),
   c('trust.broad-action', 'trust', 'sts:* or * in a trust policy', 'More than the sts: actions needed are allowed.', 'low', TRUST, 'Allow sts:AssumeRole and only the sts: actions needed.'),
 
+  c('res.public', 'resource', 'Anyone can use a resource', 'A bucket, key, table, queue, topic, secret, function or repository policy allows principal "*" with no condition that limits who.', null, RESOURCES,
+    'Name the principals, or add aws:PrincipalOrgID or aws:SourceAccount; keep S3 Block Public Access on.', 'High when it reaches the data or can change access; medium for metadata only, or when only a network condition (VPC endpoint, IP) keeps other accounts out; low when S3 Block Public Access already restricts the bucket.'),
+  c('res.not-principal', 'resource', 'Resource policy Allow with NotPrincipal', 'Everyone except a list is let in.', 'high', RESOURCES, 'Replace NotPrincipal with the principals that need it.'),
+  c('res.external-account', 'resource', 'Shared with an account outside your estate', 'A resource policy lets in an AWS account that is neither connected here nor in your organisation (or another organisation, or a service acting for one).', null, RESOURCES,
+    'Confirm the third party still needs it; name its role, not the whole account, and keep the actions to what it uses.', 'High when it reaches the data or can change access; medium for metadata only.'),
+  c('res.service-no-source', 'resource', 'AWS service let in without a source condition', 'A service principal (cloudtrail, sns, events…) is allowed with no aws:SourceAccount, aws:SourceArn or aws:SourceOrgID: any account\'s use of that service could reach it (confused deputy).', null, RESOURCES,
+    'Add aws:SourceAccount or aws:SourceArn.', 'Medium; low when the service can only read settings.'),
+  c('res.cross-account', 'resource', 'Shared with another of your accounts', 'Another connected account, an account of your organisation, or the whole organisation can use the resource.', 'low', RESOURCES, 'Fine when intended. Name the role that needs it rather than the whole account.'),
+  c('res.broad-actions', 'resource', 'Every action of a service granted outside the account', 'A resource policy allows * or service:* to a principal outside the resource\'s account.', 'low', RESOURCES, 'Grant the actions it uses.'),
+  c('res.deleted-principal', 'resource', 'Resource policy names a deleted identity', 'A statement holds a unique ID where an ARN was.', 'low', RESOURCES, 'Remove the statement.'),
+
   c('cred.console-no-mfa', 'credentials', 'Console password without MFA', 'An IAM user can sign in to the console with a password alone.', 'high', RISK, 'Add an MFA device, or remove the password.'),
   c('cred.key-old', 'credentials', 'Access key older than the rotation age', 'An active access key is older than the rotation age set in Configuration.', 'medium', RISK, 'Rotate it, or move the workload to a role.', 'Medium past the rotation age; weighs more past a year.'),
   c('cred.key-unused', 'credentials', 'Access key not used', 'An active key never used, or unused for longer than the age set in Configuration.', 'low', RISK, 'Deactivate it.'),
@@ -66,6 +78,10 @@ export const BUILTIN = [
   c('gcp.key', 'gcp', 'User-managed service account key', 'A service account has keys someone downloaded.', null, GCP, 'Prefer workload identity federation; delete or rotate the key.', 'High for a key that never expires on a powerful account, medium past the rotation age, low otherwise.'),
   c('gcp.external', 'gcp', 'Outside your domain', 'A user or group outside the organisation\'s domain holds a role.', 'medium', GCP, 'Confirm it is expected, or remove the binding.'),
   c('gcp.deleted', 'gcp', 'Bound to a deleted identity', 'The identity is gone but its bindings stay.', 'low', GCP, 'Remove the bindings.'),
+  c('gcp.foreign-sa', 'gcp', 'Service account from outside the connection', 'A service account from a project the connection does not read can become a service account here, or holds roles here.', null, GCP, 'Confirm who owns that project; grant on the one service account it needs.', 'High when it can become a service account; medium for roles held directly.'),
+  c('gcp.domain-impersonator', 'gcp', 'Everyone in a domain can become a service account', 'A domain: member holds Token Creator, Service Account User or similar on a service account.', 'medium', GCP, 'Grant it to a group or the people who need it.'),
+  c('gcp.wide-impersonation', 'gcp', 'Impersonation granted on a whole project, folder or organisation', 'Token Creator, Service Account User or key creation granted above the service account reaches every service account below it.', 'medium', GCP, 'Grant it on the service account that is needed.'),
+  c('gcp.key-create', 'gcp', 'Can mint keys for a service account', 'Holds iam.serviceAccountKeys.create on a service account.', 'medium', GCP, 'Remove it; use impersonation or federation instead of keys.'),
   c('gcp.disabled', 'gcp', 'Disabled but still granted roles', 'A disabled service account keeps its roles.', 'low', GCP, 'Remove the bindings or delete the service account.'),
 
   // ---- built-in controls that are rules: written in the rule language, so they can be read, copied and adapted

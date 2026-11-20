@@ -82,8 +82,46 @@ A finding that only says "use could not be proven" is never high.
 | Outside your domain | medium |
 | User-managed key | high when it never expires on a high-risk account; medium past the rotation age; low otherwise |
 | Bound to a deleted identity; disabled but still granted | low |
+| A service account from a project outside the connection (`gcp.foreign-sa`) | medium; high when it can become a service account |
+| Everyone in your own domain can become a service account (`gcp.domain-impersonator`) | medium |
+| Impersonation or `actAs` granted on a whole project or folder (`gcp.wide-impersonation`; not Owner or Editor, which are their own finding) | medium |
+| Can create keys for a service account (`gcp.key-create`) | medium |
 
-## Radar changes (`src/radarHistory.js`, `src/trustSync.js`)
+### Trust map, Google Cloud (`src/gcp/trust.js`)
+
+The same findings, per way in: public (low when public access prevention is enforced on the bucket), outside your domain, a foreign service account, a federated source with no attribute condition, wide impersonation, key creation and keys by age. Owner or Editor granted on a whole project or folder is informational; conditional bindings and paths across clouds are informational.
+
+### Resource-level policies (`src/gcp/resources.js`)
+
+Buckets, BigQuery datasets and tables, Pub/Sub topics and subscriptions, KMS keys and key rings, Secret Manager secrets, Cloud Run services, Cloud Functions and Artifact Registry repositories. Each role × member is a grant; a role *administers* when it can change access or is `*.admin`, *uses the data* when it reads or writes contents, else it *reads settings*.
+
+| Rule | Severity |
+|---|---|
+| `allUsers` or `allAuthenticatedUsers` (`res.public`) | high for data or administer; medium for settings only; low on a bucket with public access prevention enforced |
+| A user, group or domain outside your domain, or a service account from a project you do not connect (`res.external-account`) | high for data or administer; medium for settings |
+| Another project in your connections, or an AWS account through federation that is connected here (`res.cross-account`) | low (an AWS account that is not connected counts as outside) |
+| Every permission of a service, granted outside the project (`res.broad-actions`) | low |
+| Bound to a deleted identity (`res.deleted-principal`) | low |
+
+Google-managed service agents and convenience members (`projectViewer:` and the like) are never findings.
+
+## Resource access (`src/analyzer/resourcePolicy.js`)
+
+Resource-based policies of S3 buckets, KMS keys (customer managed), DynamoDB tables, SQS queues, SNS topics, Secrets Manager secrets, Lambda functions and ECR repositories. Each Allow statement × principal is a grant; how far it reaches counts its conditions (`aws:PrincipalOrgID`/`OrgPaths`, `aws:PrincipalAccount`, `aws:SourceAccount`, `aws:SourceOwner`, `kms:CallerAccount`, `aws:PrincipalArn`, `aws:SourceArn`) and Deny guards that apply to everyone with exactly one negated condition (`aws:PrincipalIsAWSService = false` exempts services from the guard). Network conditions (`aws:SourceVpce`, `SourceVpc`, `SourceIp`) do not keep other accounts out; they only lower *public*. A grant can *administer* (`*`, `service:*`, NotAction, or anything that changes access), *use the data* (reads data or writes), or *read settings*.
+
+| Rule | Severity |
+|---|---|
+| Anyone (`*`) can use it | high when it reaches the data or can administer; medium for settings only, or when only a network condition limits it; low when S3 Block Public Access (`RestrictPublicBuckets`, bucket or account) already blocks it |
+| Allow with NotPrincipal | high |
+| Shared with an account outside your estate (not connected, not in your organisation; another organisation; a service acting for one) | high for data or administer; medium for settings only |
+| AWS service principal without `aws:SourceAccount` / `aws:SourceArn` / `aws:SourceOrgID` | medium; low for settings only |
+| Shared with another of your accounts or your organisation | low |
+| Every action of a service granted outside the account | low |
+| Names a deleted identity | low |
+
+The resource's own account (the default KMS key policy, say) is never a finding. An account's resources are read with its inventory; everything is worked out again within a minute of an account being onboarded or removed, or a `res.*` control changing.
+
+## Radar changes (`src/radarHistory.js`, `src/trustSync.js`, `src/resourceSync.js`)
 
 | Change | Severity |
 |---|---|
@@ -93,3 +131,4 @@ A finding that only says "use could not be proven" is never high.
 | Role gained permissions; first denied calls | warn |
 | Role idle 90 days; role created; new event name not identified | info |
 | Role trimmed | good |
+| Resource opened to anyone; shared outside the estate (a policy that changed, or a new resource on a later scan) | high, or warn when the finding is medium |

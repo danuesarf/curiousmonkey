@@ -96,6 +96,31 @@ const WIF = {
   ],
 };
 
+// resource-level IAM policies, as Cloud Asset Inventory's searchAllIamPolicies returns them (projects by number)
+const ASSETS = [
+  { assetType: 'storage.googleapis.com/Bucket', resource: '//storage.googleapis.com/acme-public-site', project: 'projects/300000000003', location: 'us',
+    policy: { bindings: [B('roles/storage.objectViewer', ['allUsers']), B('roles/storage.admin', [`serviceAccount:${sa('deployer', 'acme-shared-ci')}`])] } },
+  { assetType: 'storage.googleapis.com/Bucket', resource: '//storage.googleapis.com/acme-payments-exports', project: 'projects/300000000001', location: 'asia-southeast2',
+    policy: { bindings: [B('roles/storage.objectViewer', ['allUsers', `serviceAccount:${sa('bq-exporter', 'acme-payments-prod')}`])] } },
+  { assetType: 'storage.googleapis.com/Bucket', resource: '//storage.googleapis.com/acme-lake-raw', project: 'projects/300000000002', location: 'asia-southeast2',
+    policy: { bindings: [B('roles/storage.objectAdmin', ['user:vendor.dev@gmail.com', `serviceAccount:${sa('lake-sync', 'acme-data-stg')}`]), B('roles/storage.legacyBucketReader', ['projectViewer:acme-data-stg'])] } },
+  { assetType: 'bigquery.googleapis.com/Dataset', resource: '//bigquery.googleapis.com/projects/acme-payments-prod/datasets/finance', project: 'projects/300000000001', location: 'asia-southeast2',
+    policy: { bindings: [B('roles/bigquery.dataViewer', ['domain:partner.example', 'group:secops@acme.example'])] } },
+  { assetType: 'pubsub.googleapis.com/Topic', resource: '//pubsub.googleapis.com/projects/acme-payments-prod/topics/orders', project: 'projects/300000000001',
+    policy: { bindings: [B('roles/pubsub.publisher', ['serviceAccount:events@partner-prod-123.iam.gserviceaccount.com'])] } },
+  { assetType: 'secretmanager.googleapis.com/Secret', resource: '//secretmanager.googleapis.com/projects/300000000001/secrets/db-password', project: 'projects/300000000001',
+    policy: { bindings: [B('roles/secretmanager.secretAccessor', [`serviceAccount:${sa('payments-api', 'acme-payments-prod')}`])] } },
+  { assetType: 'run.googleapis.com/Service', resource: '//run.googleapis.com/projects/acme-shared-ci/locations/asia-southeast2/services/status-page', project: 'projects/300000000003',
+    policy: { bindings: [B('roles/run.invoker', ['allUsers'])] } },
+  { assetType: 'artifactregistry.googleapis.com/Repository', resource: '//artifactregistry.googleapis.com/projects/acme-shared-ci/locations/asia-southeast2/repositories/base-images', project: 'projects/300000000003',
+    policy: { bindings: [B('roles/artifactregistry.reader', ['allAuthenticatedUsers'])] } },
+  { assetType: 'cloudkms.googleapis.com/CryptoKey', resource: '//cloudkms.googleapis.com/projects/acme-data-stg/locations/asia-southeast2/keyRings/lake/cryptoKeys/lake-key', project: 'projects/300000000002',
+    policy: { bindings: [B('roles/cloudkms.cryptoKeyEncrypterDecrypter', [`${POOL('aws-estate')}/attribute.aws_role/arn:aws:sts::222222222222:assumed-role/data-etl`, 'deleted:user:bob.old@acme.example?uid=123'])] } },
+  { assetType: 'cloudfunctions.googleapis.com/CloudFunction', resource: '//cloudfunctions.googleapis.com/projects/acme-data-stg/locations/asia-southeast2/functions/thumbnailer', project: 'projects/300000000002',
+    policy: { bindings: [B('roles/cloudfunctions.invoker', [`serviceAccount:${sa('etl-runner', 'acme-data-stg')}`])] } },
+];
+const PAP = { 'acme-payments-exports': 'enforced', 'acme-public-site': 'inherited', 'acme-lake-raw': 'inherited' };
+
 // what the roles above allow, cut down to a believable size
 const svc = (p, verbs) => verbs.map((v) => `${p}.${v}`);
 const READ = (p, r = ['get', 'list']) => svc(p, r);
@@ -115,6 +140,13 @@ const PERMS = {
   'roles/iam.securityReviewer': ['resourcemanager.organizations.getIamPolicy', 'resourcemanager.folders.getIamPolicy', 'resourcemanager.projects.getIamPolicy', 'iam.roles.list', 'iam.roles.get', 'iam.serviceAccounts.getIamPolicy'],
   'roles/iam.workloadIdentityPoolAdmin': [...svc('iam.workloadIdentityPools', ['create', 'delete', 'get', 'list', 'update']), ...svc('iam.workloadIdentityPoolProviders', ['create', 'delete', 'get', 'list', 'update'])],
   'roles/artifactregistry.writer': ['artifactregistry.repositories.uploadArtifacts', 'artifactregistry.repositories.downloadArtifacts'],
+  'roles/storage.objectAdmin': ['storage.objects.get', 'storage.objects.list', 'storage.objects.create', 'storage.objects.delete', 'storage.objects.update'],
+  'roles/storage.legacyBucketReader': ['storage.buckets.get', 'storage.objects.list'],
+  'roles/pubsub.publisher': ['pubsub.topics.publish'],
+  'roles/run.invoker': ['run.routes.invoke'],
+  'roles/artifactregistry.reader': ['artifactregistry.repositories.downloadArtifacts', 'artifactregistry.repositories.get'],
+  'roles/cloudkms.cryptoKeyEncrypterDecrypter': ['cloudkms.cryptoKeyVersions.useToDecrypt', 'cloudkms.cryptoKeyVersions.useToEncrypt'],
+  'roles/cloudfunctions.invoker': ['cloudfunctions.functions.invoke'],
   'roles/browser': ['resourcemanager.organizations.get', 'resourcemanager.folders.get', 'resourcemanager.folders.list', 'resourcemanager.projects.get', 'resourcemanager.projects.list'],
   [`${ORG}/roles/curiousMonkeyReader`]: ['resourcemanager.organizations.getIamPolicy', 'resourcemanager.folders.getIamPolicy', 'resourcemanager.projects.getIamPolicy', 'iam.serviceAccounts.list', 'iam.serviceAccountKeys.list', 'iam.roles.get'],
 };
@@ -183,6 +215,12 @@ export function demoGcpGateway() {
     async role(name) { return PERMS[name] ? { name, title: TITLES[name] || name.split('/').pop(), includedPermissions: PERMS[name], stage: 'GA' } : null; },
     async wifProviders(projectId) { return WIF[projectId] || []; },
     async logEntries(q) { return demoLogEntries(q); },
+    // DEMO_GCP_ASSET_DENIED=1: Cloud Asset Inventory refused, as when the API is off or the permission is missing
+    async resourcePolicies() {
+      if (process.env.DEMO_GCP_ASSET_DENIED === '1') return { source: 'per-service', items: ASSETS.filter((a) => a.assetType === 'storage.googleapis.com/Bucket'), skipped: ['bigquery', 'pubsub'], assetError: 'cloudasset.googleapis.com is not enabled' };
+      return { source: 'asset', items: ASSETS, skipped: [] };
+    },
+    async bucketPublicAccess(name) { return PAP[name] || 'inherited'; },
     async whoami() { return { email: sa('cm-reader', 'acme-shared-ci') }; },
   };
 }

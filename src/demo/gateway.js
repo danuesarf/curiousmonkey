@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { buildEstate, buildUsers, MANAGED, samlProvidersOf } from './estate.js';
 import { trailDayPrefix } from '../aws/trailKeys.js';
+import { demoResources, DEMO_ORG } from './resources.js';
 
 const h32 = (s) => parseInt(crypto.createHash('sha1').update(s).digest('hex').slice(0, 8), 16);
 const uuid = (s) => { const x = crypto.createHash('sha1').update(s).digest('hex'); return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`; };
@@ -101,6 +102,15 @@ export function demoGateway(account) {
   return {
     mode: 'demo',
     async verify() { return { ok: true, accountId: acct, arn: account.role_arn }; },
+    async organizationId() { return DEMO_ORG; },
+    // DEMO_RESOURCES_DENIED=kms,sqs: answer as AWS does for a scanner role without those reads
+    async listResources(service) {
+      calls++;
+      if ((process.env.DEMO_RESOURCES_DENIED || '').split(',').includes(service)) {
+        throw Object.assign(new Error(`User is not authorized to perform: ${service}:List`), { name: 'AccessDeniedException' });
+      }
+      return demoResources(acct, region0)[service] || [];
+    },
     async listSamlProviders() {
       calls++;
       // DEMO_SAML_DENIED=1: answer as AWS does for a scanner role created before it could read SAML providers

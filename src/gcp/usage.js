@@ -42,17 +42,24 @@ export function checksOf(entry) {
   return out;
 }
 
-/** Add one page of entries to a window's counts, keyed by day, caller and permission. */
-export function addEntries(agg, entries) {
+export const HOURLY_DAYS = 31;                  // hourly counts (for Space) are kept this long, like AWS's
+
+/**
+ * Add one page of entries to a window's counts, keyed by day, caller and permission. Entries from the last
+ * HOURLY_DAYS are also counted by hour and caller, in `agg.hours`.
+ */
+export function addEntries(agg, entries, now = Date.now()) {
   let checks = 0;
+  const hours = agg.hours || (agg.hours = new Map()), recent = now - HOURLY_DAYS * DAY;
   for (const e of entries) {
     const t = Date.parse(e.timestamp || e.receiveTimestamp || '');
     if (!Number.isFinite(t)) continue;
-    const day = iso(t).slice(0, 10);
+    const day = iso(t).slice(0, 10), hour = t >= recent ? iso(Math.floor(t / 36e5) * 36e5) : null;
     for (const c of checksOf(e)) {
       const k = `${day}\u0000${c.member}\u0000${c.permission}`;
       const v = agg.get(k) || agg.set(k, { count: 0, denied: 0 }).get(k);
       if (c.granted) v.count++; else v.denied++;
+      if (hour) { const hk = `${hour}\u0000${c.member}`, x = hours.get(hk) || hours.set(hk, { count: 0, denied: 0 }).get(hk); if (c.granted) x.count++; else x.denied++; }
       checks++;
     }
   }
@@ -159,6 +166,15 @@ export async function commitWindow(cur, w, read) {
               count = s.count + EXCLUDED.count, denied = s.denied + EXCLUDED.denied
             RETURNING (xmax = 0) AS ins`, args)).rows.filter((r) => r.ins).length;
       }
+      // by the hour, for Space: the same callers, recent entries only
+      const hrs = [...(read.agg.hours || [])].map(([k, v]) => { const [hour, member] = k.split('\u0000'); return { hour, member: mid.get(member), ...v }; }).filter((x) => x.member);
+      for (let i = 0; i < hrs.length; i += 5000) {
+        const ch = hrs.slice(i, i + 5000);
+        await c.query(`INSERT INTO gcp_activity_hourly AS h (project_ref, hour, member_id, count, denied)
+            SELECT $1::int, * FROM unnest($2::timestamptz[], $3::int[], $4::int[], $5::int[]) ORDER BY 1, 2
+            ON CONFLICT (project_ref, hour, member_id) DO UPDATE SET count = h.count + EXCLUDED.count, denied = h.denied + EXCLUDED.denied`,
+        [cur.project_ref, ch.map((x) => x.hour), ch.map((x) => x.member), ch.map((x) => x.count), ch.map((x) => x.denied)]);
+      }
       if (addedDaily || addedSummary) await c.query(`UPDATE gcp_usage_projects SET daily_rows = daily_rows + $2, summary_rows = summary_rows + $3 WHERE id=$1`, [cur.project_ref, addedDaily, addedSummary]);
     }
     const edge = w.kind === 'forward' ? 'hi_time' : 'lo_time', to = w.kind === 'forward' ? w.to : w.from;
@@ -193,6 +209,8 @@ const release = (cur, runAfterSec, err = null) => query(`UPDATE gcp_log_cursors 
 export async function usageTick(workerId, { gwFor, analyze = async () => {}, now = () => Date.now(), budgetMs = TICK_BUDGET_MS, log = () => {} } = {}) {
   const cur = await claimCursor(workerId);
   if (!cur) return null;
+  // hourly counts older than they are kept (by index on hour; a few rows an hour)
+  await query(`DELETE FROM gcp_activity_hourly WHERE hour < now() - make_interval(days => $1)`, [HOURLY_DAYS]);
   const conn = (await query('SELECT * FROM gcp_connections WHERE id=$1', [cur.connection_id])).rows[0];
   const gw = gwFor(conn);
   const started = now(), out = { project: cur.project_id, log: cur.log, windows: 0, entries: 0, added: 0 };

@@ -5,6 +5,7 @@ import * as authPages from './pages/auth.js';
 import { identitiesPage } from './pages/overview.js';
 import { identityPage } from './pages/identity.js';
 import { recommendationPage } from './pages/recommendation.js';
+import { trustRecommendationPage } from './pages/trustRecommendation.js';
 import { accountsPage, newAccountPage, editAccountPage } from './pages/accounts.js';
 import { adminPage, adminTabs } from './pages/admin.js';
 import { operationsPage } from './pages/operations.js';
@@ -19,6 +20,7 @@ import { unidentifiedPage } from './pages/unidentified.js';
 import { findingsPage } from './pages/findings.js';
 import { reviewsPage, reviewPage } from './pages/reviews.js';
 import { controlsPage } from './pages/controls.js';
+import { resourcesPage } from './pages/resources.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -32,6 +34,7 @@ const routes = [
   [/^#\/space$/, () => spacePage, 'space', true],
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
+  [/^#\/resources$/, () => resourcesPage, 'resources'],
   [/^#\/findings$/, () => findingsPage, 'findings'],
   [/^#\/policy$/, () => controlsPage, 'policy'],
   [/^#\/admin\/policy$/, () => () => { location.replace(`#/policy${location.hash.includes('?') ? `?${location.hash.split('?')[1]}` : ''}`); return document.createElement('div'); }, 'policy'],
@@ -40,6 +43,7 @@ const routes = [
   [/^#\/identities$/, () => identitiesPage, 'identities'],
   [/^#\/identities\/gcp\/([\w-]+)$/, (m) => (c) => gcpPrincipalPage(c, m[1]), 'identities'],
   [/^#\/identities\/([\w-]+)\/recommendation$/, (m) => (c) => recommendationPage(c, m[1]), 'identities'],
+  [/^#\/identities\/([\w-]+)\/trust$/, (m) => (c) => trustRecommendationPage(c, m[1]), 'identities'],
   [/^#\/identities\/([\w-]+)$/, (m) => (c) => identityPage(c, m[1]), 'identities'],
   [/^#\/accounts\/new$/, () => newAccountPage, 'accounts'],
   [/^#\/gcp\/new$/, () => (c) => gcpConnectPage(c), 'accounts'],
@@ -89,6 +93,7 @@ const ICON = {
   home: 'M4 11.5l8-7 8 7M6.5 10v9.5h11V10M10 19.5v-5.5h4v5.5',
   radar: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M12 12L19 6',
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
+  resources: 'M4 7l8-4 8 4-8 4zM4 12l8 4 8-4M4 17l8 4 8-4M15 3.5l3 1.5',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
   identities: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
@@ -179,7 +184,8 @@ export async function refreshBell() {
 const openChange = (c) => {
   bellOpen = false; picker = null; drawBell();
   if (picker?.(c)) return;
-  go(c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/radar?view=account&account=${c.account_id}`);
+  go(String(c.kind).startsWith('resource-') ? `#/resources?accounts=${c.account_id}&exposure=${c.kind === 'resource-public' ? 'public' : 'external'}`
+    : c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/radar?view=account&account=${c.account_id}`);
 };
 const markAllSeen = async () => { try { await post('/changes/seen'); } catch { /* next refresh tells */ } bellOpen = false; await refreshBell(); };
 function drawBell() {
@@ -279,14 +285,14 @@ const group = (label, ...items) => { const shown = items.filter(Boolean); return
 function shell(active, content, full) {
   const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
-  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', findings: 'Findings', reviews: 'Access reviews', policy: 'Policy', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', resources: 'Resource access', findings: 'Findings', reviews: 'Access reviews', policy: 'Policy', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey home' }, mark()),
       item('home', '#/', 'Home', 'view'),
-      group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view')),
+      group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('resources', '#/resources', 'Resources', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
       group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view'), item('policy', '#/policy', 'Policy', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),

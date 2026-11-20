@@ -143,7 +143,7 @@ test('Bitbucket callers: one per repository (and environment), not one per pipel
   assert.equal((await db.query(`SELECT sum(count)::int n FROM activity_daily WHERE principal_id=$1`, [rows[0].id])).rows[0].n, 10);
 });
 
-test('where a source leads next, a tighter trust policy, and what the scanner read around trust (EKS, organisation, Identity Center)', async () => {
+test('where a source leads next, and what the scanner read around trust (EKS, organisation, Identity Center)', async () => {
   const mk = async (name, trust, acctAws = '111111111111') => (await db.query(`INSERT INTO roles(account_id, arn, name, kind, granted_count, trust_policy) VALUES ($1,$2,$3,'custom',$4,$5) RETURNING id`,
     [A, `arn:aws:iam::${acctAws}:role/${name}`, name, name.endsWith('admin') ? 20000 : 10, JSON.stringify(trust)])).rows[0].id;
   // 555555555555 → hop-1 → hop-2-admin (named), and the whole account trusted by hop-wide (possible)
@@ -152,15 +152,6 @@ test('where a source leads next, a tighter trust policy, and what the scanner re
   const c = await tm.trustChain(owner, 'src:acct:555555555555');
   assert.deepEqual(c.levels.map((l) => l.roles.map((r) => r.role)), [['hop-1'], ['hop-2-admin']]);
   assert.equal(c.admin, 1); assert.equal(c.levels[1].roles[0].from, 'hop-1');
-
-  // tighter trust: the whole account becomes the role that came in; never-used principals go
-  await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen, sessions_count) VALUES ($1,'role:555555555555:deployer','role','role/deployer (555555555555)','sts:AssumeRole',now(),now(),3)`, [hop1]);
-  const s = await tm.suggestTrust(owner, hop1);
-  assert.deepEqual(s.after.Statement[0].Principal, { AWS: 'arn:aws:iam::555555555555:role/deployer' });
-  assert.ok(s.changes.some((x) => x.kind === 'narrow'));
-  assert.ok(s.changes.some((x) => /ExternalId/.test(x.text) && x.placeholder));
-  const ci = await tm.suggestTrust(owner, ciRole);
-  assert.ok(ci, 'a role with a fixed policy still answers');
 
   // the organisation's own account is not a third party; EKS clusters and Identity Center people get names
   await db.query(`INSERT INTO org_accounts(account_id, name) VALUES ('555555555555','shared-tools')`);

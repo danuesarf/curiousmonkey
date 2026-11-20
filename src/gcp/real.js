@@ -4,11 +4,14 @@
 import { GoogleAuth, AwsClient } from 'google-auth-library';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { decrypt } from '../auth/crypto.js';
+import { ASSET_TYPES } from './resources.js';
 
 const SCOPES = ['https://www.googleapis.com/auth/cloud-platform'];
 const CRM = 'https://cloudresourcemanager.googleapis.com/v3';
 const IAM = 'https://iam.googleapis.com/v1';
 const LOGGING = 'https://logging.googleapis.com/v2';
+const ASSET = 'https://cloudasset.googleapis.com/v1', STORAGE = 'https://storage.googleapis.com/storage/v1', BQ = 'https://bigquery.googleapis.com/bigquery/v2';
+const PUBSUB = 'https://pubsub.googleapis.com/v1', SECRETS = 'https://secretmanager.googleapis.com/v1', RUN = 'https://run.googleapis.com/v2', FUNCTIONS = 'https://cloudfunctions.googleapis.com/v2';
 // Partial responses: the `fields` system parameter, which every Google REST API takes
 // (https://cloud.google.com/apis/docs/system-parameters). The reader never falls back to whole entries. The first
 // mask reaches inside protoPayload, a google.protobuf.Any; if that is refused, or the paths get dropped on the way
@@ -131,6 +134,48 @@ export function realGcpGateway(conn, { client: injected } = {}) {
     async logEntries({ projectId, filter, pageToken = '' }) {
       const body = { resourceNames: [`projects/${projectId}`], filter, orderBy: 'timestamp asc', pageSize: 1000, ...(pageToken ? { pageToken } : {}) };
       return readWithMasks((mask) => call('POST', `${LOGGING}/entries:list?fields=${encodeURIComponent(mask)}`, body));
+    },
+    /**
+     * Resource-level IAM policies. Cloud Asset Inventory answers for every service at once (searchAllIamPolicies over
+     * the connection's scope, cloudasset.assets.searchAllIamPolicies). When it is refused (the API is off, or the
+     * permission is missing) the main services are read one by one; a service refused in a project is skipped.
+     */
+    async resourcePolicies({ scope, projects }) {
+      try {
+        const types = Object.keys(ASSET_TYPES).map((t) => `assetTypes=${encodeURIComponent(t)}`).join('&');
+        return { source: 'asset', items: await pages(`${ASSET}/${scope}:searchAllIamPolicies?pageSize=500&${types}`, 'results'), skipped: [] };
+      } catch (e) {
+        if (![400, 403, 404].includes(e.status)) throw e;
+        const items = [], skipped = new Set();
+        const opt = (p, what) => p.catch((x) => { if ([400, 403, 404].includes(x.status)) { skipped.add(what); return null; } throw x; });
+        const policyOf = (url, method = 'GET') => opt(call(method, url, method === 'POST' ? {} : undefined), 'getIamPolicy');
+        await Promise.all(projects.map(async (p) => {
+          const project = `projects/${p.number}`;
+          const add = (assetType, resource, policy, extra = {}) => { if (policy?.bindings?.length) items.push({ assetType, resource, project, policy, ...extra }); };
+          const [buckets, datasets, topics, secrets, services, functions] = await Promise.all([
+            opt(pages(`${STORAGE}/b?project=${p.projectId}&fields=${encodeURIComponent('items(name,location,iamConfiguration/publicAccessPrevention),nextPageToken')}`, 'items'), 'storage'),
+            opt(pages(`${BQ}/projects/${p.projectId}/datasets?all=true`, 'datasets'), 'bigquery'),
+            opt(pages(`${PUBSUB}/projects/${p.projectId}/topics`, 'topics'), 'pubsub'),
+            opt(pages(`${SECRETS}/projects/${p.projectId}/secrets`, 'secrets'), 'secretmanager'),
+            opt(pages(`${RUN}/projects/${p.projectId}/locations/-/services`, 'services'), 'run'),
+            opt(pages(`${FUNCTIONS}/projects/${p.projectId}/locations/-/functions`, 'functions'), 'cloudfunctions'),
+          ]);
+          await Promise.all([
+            ...(buckets || []).map(async (b) => add('storage.googleapis.com/Bucket', `//storage.googleapis.com/${b.name}`, await policyOf(`${STORAGE}/b/${b.name}/iam?optionsRequestedPolicyVersion=3`),
+              { location: b.location, extra: { publicAccessPrevention: b.iamConfiguration?.publicAccessPrevention || null } })),
+            ...(datasets || []).map(async (d) => { const id = d.datasetReference?.datasetId; add('bigquery.googleapis.com/Dataset', `//bigquery.googleapis.com/projects/${p.projectId}/datasets/${id}`, await policyOf(`${BQ}/projects/${p.projectId}/datasets/${id}:getIamPolicy`, 'POST'), { location: d.location }); }),
+            ...(topics || []).map(async (t) => add('pubsub.googleapis.com/Topic', `//pubsub.googleapis.com/${t.name}`, await policyOf(`${PUBSUB}/${t.name}:getIamPolicy`))),
+            ...(secrets || []).map(async (x) => add('secretmanager.googleapis.com/Secret', `//secretmanager.googleapis.com/${x.name}`, await policyOf(`${SECRETS}/${x.name}:getIamPolicy`))),
+            ...(services || []).map(async (x) => add('run.googleapis.com/Service', `//run.googleapis.com/${x.name}`, await policyOf(`${RUN}/${x.name}:getIamPolicy`))),
+            ...(functions || []).map(async (x) => add('cloudfunctions.googleapis.com/CloudFunction', `//cloudfunctions.googleapis.com/${x.name}`, await policyOf(`${FUNCTIONS}/${x.name}:getIamPolicy`))),
+          ]);
+        }));
+        return { source: 'per-service', items, skipped: [...skipped], assetError: e.message };
+      }
+    },
+    /** A bucket's public access prevention ('enforced' refuses allUsers and allAuthenticatedUsers whatever IAM says). */
+    async bucketPublicAccess(name) {
+      return optional(call('GET', `${STORAGE}/b/${encodeURIComponent(name)}?fields=iamConfiguration`).then((b) => b.iamConfiguration?.publicAccessPrevention || null), null);
     },
     async whoami() {
       clientP ||= gcpClient(conn);

@@ -9,6 +9,8 @@ import { demoGcpGateway } from './demo.js';
 import { realGcpGateway } from './real.js';
 import { syncCursors } from './usage.js';
 import { analyzeUsage } from './usageAnalysis.js';
+import { normalizeAsset, assetBindings } from './resources.js';
+import { saveGcpResources } from '../resourceSync.js';
 
 export const gcpGateway = (conn) => (config.awsMode === 'demo' ? demoGcpGateway(conn) : realGcpGateway(conn));
 const PREDEFINED_TTL_DAYS = 7;
@@ -77,6 +79,29 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
   }));
   if (orgName) custom.push(...await gw.customRoles(orgName).catch(() => []));
 
+  // resource-level IAM policies (buckets, datasets, topics, keys, secrets, services…): optional. Their bindings join
+  // the principals' roles; the resources go to the Resources page. A refusal leaves the rest of the scan standing.
+  let resources = [], resourceRead = null;
+  if (gw.resourcePolicies) {
+    await progress({ stage: 'resources' });
+    try {
+      const scope = conn.scope_type === 'organization' ? `organizations/${conn.scope_id}` : conn.scope_type === 'folder' ? `folders/${conn.scope_id}` : `projects/${conn.scope_id}`;
+      const r = await gw.resourcePolicies({ scope, projects });
+      const numbers = new Map(projects.map((p) => [String(p.number), p.projectId]));
+      const inScope = new Set(projects.map((p) => p.projectId));
+      resources = r.items.map((a) => normalizeAsset(a, numbers)).filter((x) => x && (!x.project_id || inScope.has(x.project_id)));
+      // a public bucket: is public access prevention on? (asset search does not say)
+      await Promise.all(resources.filter((x) => x.service === 'gcs' && !x.extra.publicAccessPrevention && x.policy?.bindings.some((b) => (b.members || []).some((m) => /^all(Authenticated)?Users$/.test(m))))
+        .map(async (x) => { x.extra.publicAccessPrevention = await gw.bucketPublicAccess?.(x.name).catch(() => null) || null; }));
+      resourceRead = { source: r.source, resources: resources.length, skipped: r.skipped || [], ...(r.assetError ? { assetError: String(r.assetError).slice(0, 300) } : {}) };
+      if (r.assetError) log(`Cloud Asset Inventory refused (${r.assetError}); read the main services one by one instead`);
+    } catch (e) {
+      resourceRead = { error: String(e.message).slice(0, 300) };
+      log(`resource-level policies not read: ${e.message}`);
+    }
+  }
+  bindings.push(...assetBindings(resources));
+
   // role definitions: custom ones from the listings, predefined ones cached for a week
   await progress({ stage: 'roles' });
   const roleDefs = new Map(custom.map((r) => [r.name, r.includedPermissions || []]));
@@ -94,12 +119,12 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
   await progress({ stage: 'analysis' });
   const snap = { org: { domain: org?.displayName || null }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
   const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays, policy: await loadPolicy() });
-  return { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result };
+  return { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs };
 }
 
 export async function scanGcpConnection(conn, opts = {}) {
   const started = Date.now();
-  const { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result } = await collectGcp(conn, opts);
+  const { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs } = await collectGcp(conn, opts);
   const log = opts.log || (() => {});
   await tx(async (c) => {
     const keep = new Map((await c.query('SELECT project_id, environment FROM gcp_projects WHERE connection_id=$1 AND environment IS NOT NULL', [conn.id])).rows.map((r) => [r.project_id, r.environment]));
@@ -132,8 +157,13 @@ export async function scanGcpConnection(conn, opts = {}) {
         JSON.stringify(sa?.keys || []), JSON.stringify(x.roles), x.permissions, x.reach, JSON.stringify(x.sources), x.origin ? JSON.stringify(x.origin) : null, x.risk, x.risk_score, JSON.stringify(x.reasons)]);
     }
   });
+  // the Resources page: stored after the snapshot, so a failure here never undoes the IAM scan
+  if (resourceRead && !resourceRead.error) {
+    try { Object.assign(resourceRead, await saveGcpResources(conn, resources, { domain: org?.displayName || null, providers, roleDefs })); }
+    catch (e) { resourceRead.error = String(e.message).slice(0, 300); log(`resource-level policies not stored: ${e.message}`); }
+  }
   const summary = { projects: projects.length, folders: folders.length, serviceAccounts: serviceAccounts.length, principals: result.size, bindings: bindings.length, providers: providers.length,
-    skipped, domain: org?.displayName || null, seconds: Math.round((Date.now() - started) / 1000) };
+    skipped, domain: org?.displayName || null, resources: resourceRead, seconds: Math.round((Date.now() - started) / 1000) };
   log(`read ${summary.projects} projects, ${summary.serviceAccounts} service accounts, ${summary.bindings} bindings in ${summary.seconds}s`);
   return summary;
 }

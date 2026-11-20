@@ -17,7 +17,10 @@ const VIA_HELP = {
 };
 const can = (p) => session.user.permissions.includes(p);
 const shortRole = (r) => String(r).replace(/^roles\//, '').replace(/^(projects|organizations)\/[^/]+\/roles\//, 'custom: ');
-const where = (r) => (r.resourceType === 'organization' ? 'Organization' : r.resourceType === 'folder' ? `Folder ${r.resource.split('/')[1]}` : r.resourceType === 'project' ? `Project ${r.project}` : 'This service account');
+const RES_LABEL = { bucket: 'Bucket', dataset: 'BigQuery dataset', table: 'BigQuery table', topic: 'Pub/Sub topic', subscription: 'Pub/Sub subscription', cryptoKey: 'KMS key', keyRing: 'KMS key ring',
+  secret: 'Secret', runService: 'Cloud Run service', function: 'Cloud Function', repository: 'Artifact Registry repository' };
+const where = (r) => (r.resourceType === 'organization' ? 'Organization' : r.resourceType === 'folder' ? `Folder ${r.resource.split('/')[1]}` : r.resourceType === 'project' ? `Project ${r.project}`
+  : RES_LABEL[r.resourceType] ? `${RES_LABEL[r.resourceType]} ${String(r.resource).replace(/^\/\/[^/]+\//, '').split('/').pop()}` : 'This service account');
 const nameOf = (x) => x.email || x.origin?.label || x.member;
 
 /** AWS | Google Cloud, above the Roles and Accounts pages. */
@@ -413,7 +416,7 @@ export async function gcpPrincipalPage(ctx, id) {
     badges: [riskBadge(p.risk), p.project && h('span', { class: 'badge b-neutral' }, p.project), p.environment && h('span', { class: 'badge b-neutral' }, envName(p.environment)),
       p.uniqueId && h('span', { class: 'small muted mono', title: 'The ID AWS trust policies use for this service account' }, `unique ID ${p.uniqueId}`), p.managed && h('span', { class: 'badge b-neutral' }, 'Google-managed'), p.disabled && h('span', { class: 'badge b-high' }, 'disabled')],
     sub: [p.name && h('p', { class: 'muted' }, p.name), p.kind !== 'serviceAccount' && p.kind !== 'federated' && h('p', { class: 'mono small muted break' }, p.member)],
-    actions: [h('a', { class: 'btn', href: '#/space' }, 'In Space')],
+    actions: [h('a', { class: 'btn', href: p.kind === 'serviceAccount' && p.project ? `#/space?view=account&account=${encodeURIComponent(`gcp:${p.project}`)}&sel=${p.id}` : '#/space' }, 'In Space')],
     notices: [u.enabled ? usageNotice(u) : h('p', { class: 'small muted' }, 'Read from IAM policies. Role usage is off for this connection, so nothing here says what was actually used.')],
     tabs: [
       ['overview', 'Overview', () => h('div', { class: 'stack-lg' },
