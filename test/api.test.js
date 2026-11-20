@@ -35,13 +35,13 @@ const owner = new Client();
 
 test('first visit says setup is needed; the first sign-up becomes the owner and creates the workspace', async () => {
   assert.equal((await owner.get('/api/auth/state')).json.needsSetup, true);
-  const r = await owner.post('/api/auth/signup', { name: 'Dhimas', email: 'dhimas@kbi.id', password: PW, workspaceName: 'KBI' });
+  const r = await owner.post('/api/auth/signup', { name: 'Dana', email: 'dana@acme.example', password: PW, workspaceName: 'Acme' });
   assert.equal(r.status, 201); assert.equal(r.json.user.role, 'owner');
   assert.equal((await owner.get('/api/auth/state')).json.needsSetup, false);
 });
 
 test('weak passwords are refused', async () => {
-  const r = await new Client().post('/api/auth/signup', { name: 'x', email: 'x@kbi.id', password: 'short' });
+  const r = await new Client().post('/api/auth/signup', { name: 'x', email: 'x@acme.example', password: 'short' });
   assert.equal(r.status, 400);               // validation runs before the closed-sign-up check
 });
 
@@ -63,34 +63,34 @@ test('state-changing requests without the CSRF token are rejected', async () => 
 
 test('sign-in needs the authenticator code; wrong passwords and codes are refused', async () => {
   const c = new Client();
-  assert.equal((await c.post('/api/auth/signin', { email: 'dhimas@kbi.id', password: 'nope-nope-nope' })).status, 401);
-  const need = await c.post('/api/auth/signin', { email: 'dhimas@kbi.id', password: PW });
+  assert.equal((await c.post('/api/auth/signin', { email: 'dana@acme.example', password: 'nope-nope-nope' })).status, 401);
+  const need = await c.post('/api/auth/signin', { email: 'dana@acme.example', password: PW });
   assert.equal(need.json.error, 'mfa_required');
-  assert.equal((await c.post('/api/auth/signin', { email: 'dhimas@kbi.id', password: PW, code: '123456' })).json.error, 'bad_code');
-  const ok = await c.post('/api/auth/signin', { email: 'dhimas@kbi.id', password: PW, code: totp.code(owner.secret) });
+  assert.equal((await c.post('/api/auth/signin', { email: 'dana@acme.example', password: PW, code: '123456' })).json.error, 'bad_code');
+  const ok = await c.post('/api/auth/signin', { email: 'dana@acme.example', password: PW, code: totp.code(owner.secret) });
   assert.equal(ok.status, 200);
 });
 
 test('repeated failures lock the sign-in for that address', async () => {
   const c = new Client(); let last;
-  for (let i = 0; i < 11; i++) last = await c.post('/api/auth/signin', { email: 'victim@kbi.id', password: 'wrong-wrong-wrong' });
+  for (let i = 0; i < 11; i++) last = await c.post('/api/auth/signin', { email: 'victim@acme.example', password: 'wrong-wrong-wrong' });
   assert.equal(last.status, 429);
 });
 
 test('after setup, open sign-up is closed; invites work once', async () => {
   const stranger = new Client();
   assert.equal((await stranger.post('/api/auth/signup', { name: 'Eve', email: 'eve@evil.io', password: PW })).json.error, 'invite_required');
-  const inv = await owner.post('/api/members/invite', { email: 'sari@kbi.id', role: 'reviewer' });
+  const inv = await owner.post('/api/members/invite', { email: 'sari@acme.example', role: 'reviewer' });
   assert.equal(inv.status, 400);                                   // reviewers need a team
-  const inv2 = await owner.post('/api/members/invite', { email: 'sari@kbi.id', role: 'reviewer', team: 'infosec' });
+  const inv2 = await owner.post('/api/members/invite', { email: 'sari@acme.example', role: 'reviewer', team: 'infosec' });
   assert.equal(inv2.status, 201);
   const token = inv2.json.link.split('invite=')[1];
-  assert.equal((await new Client().get(`/api/auth/invite/${token}`)).json.email, 'sari@kbi.id');
-  assert.equal((await new Client().post('/api/auth/signup', { name: 'X', email: 'other@kbi.id', password: PW, invite: token })).status, 403);   // wrong email
+  assert.equal((await new Client().get(`/api/auth/invite/${token}`)).json.email, 'sari@acme.example');
+  assert.equal((await new Client().post('/api/auth/signup', { name: 'X', email: 'other@acme.example', password: PW, invite: token })).status, 403);   // wrong email
   const ok = new Client();
-  const r = await ok.post('/api/auth/signup', { name: 'Sari', email: 'sari@kbi.id', password: PW, invite: token });
+  const r = await ok.post('/api/auth/signup', { name: 'Sari', email: 'sari@acme.example', password: PW, invite: token });
   assert.equal(r.status, 201); assert.equal(r.json.user.team, 'infosec');
-  assert.equal((await new Client().post('/api/auth/signup', { name: 'Sari', email: 'sari@kbi.id', password: PW, invite: token })).status, 403);  // used
+  assert.equal((await new Client().post('/api/auth/signup', { name: 'Sari', email: 'sari@acme.example', password: PW, invite: token })).status, 403);  // used
 });
 
 let accA, accB;
@@ -188,13 +188,13 @@ test('RBAC: an auditor can read but not change anything; a scoped account owner 
     await c.post('/api/auth/signup', { name: email, email, password: PW, invite: inv.json.link.split('invite=')[1] });
     return c;
   };
-  const auditor = await mk('aud@kbi.id', 'auditor'); auditorClient = auditor;
+  const auditor = await mk('aud@acme.example', 'auditor'); auditorClient = auditor;
   assert.equal((await auditor.get('/api/roles')).json.total, 20);
   assert.equal((await auditor.post('/api/accounts', { name: 'x', accountId: '999999999999' })).status, 403);
   assert.equal((await auditor.post(`/api/accounts/${accA}/scan`)).status, 403);
   assert.equal((await auditor.get('/api/audit')).status, 200);
   assert.equal((await auditor.get('/api/members')).status, 403);
-  const scoped = await mk('squad@kbi.id', 'account_owner', { scope_accounts: [accB] }); scopedClient = scoped;
+  const scoped = await mk('squad@acme.example', 'account_owner', { scope_accounts: [accB] }); scopedClient = scoped;
   const mine = (await scoped.get('/api/roles?limit=100')).json;
   assert.equal(mine.total, 10); assert.ok(mine.items.every((r) => r.account_id === accB));
   const other = (await owner.get(`/api/roles?accounts=${accA}&q=payments`)).json.items[0].id;
@@ -214,7 +214,7 @@ test('RBAC: an auditor can read but not change anything; a scoped account owner 
     assert.equal((await scoped.get(`/api/accounts/${accA}/coverage`)).status, 404);
     assert.equal((await new Client().get('/api/coverage')).status, 401);
   } finally { await db.query(`DELETE FROM unmapped_events WHERE raw_action LIKE 'estate:%'`); }
-  reviewerClient = await mk('rev@kbi.id', 'reviewer', { team: 'infrasec' });
+  reviewerClient = await mk('rev@acme.example', 'reviewer', { team: 'infrasec' });
 });
 
 test('the reviewer is forced to set up two-factor like everyone with decision power', async () => {
@@ -231,7 +231,7 @@ test('decisions: only valid choices per finding type; recorded with the reviewer
   assert.equal((await owner.post(`/api/flags/${dataFlag.id}/decision`, { decision: 'accept' })).status, 400);
   assert.equal((await owner.post(`/api/flags/${dataFlag.id}/decision`, { decision: 'keep_scoped', resources: ['arn:aws:s3:::acme-payments-docs/*'], note: 'ok' })).status, 200);
   const after = (await owner.get(`/api/roles/${id}`)).json.flags.find((f) => f.id === dataFlag.id);
-  assert.equal(after.decision, 'keep_scoped'); assert.equal(after.decided_by, 'Dhimas');
+  assert.equal(after.decision, 'keep_scoped'); assert.equal(after.decided_by, 'Dana');
   const log = (await owner.get('/api/audit?action=flag.decide')).json;
   assert.ok(log.items.length >= 1);
 });
@@ -339,7 +339,7 @@ test('recommend, then both teams approve a High-risk role; the export reflects a
   assert.equal(a1.json.approved, false); assert.deepEqual(a1.json.waitingFor, ['infosec']);
   // sari (infosec) approves; she has not enrolled MFA, so give her a session through the DB-free path: sign in then enroll
   const sari = new Client();
-  await sari.post('/api/auth/signin', { email: 'sari@kbi.id', password: PW });
+  await sari.post('/api/auth/signin', { email: 'sari@acme.example', password: PW });
   const s = await sari.post('/api/auth/mfa/start'); await sari.post('/api/auth/mfa/confirm', { code: totp.code(s.json.secret) });
   const a2 = await sari.post(`/api/recommendations/${rec.json.id}/approve`);
   assert.equal(a2.json.approved, true);
@@ -368,27 +368,27 @@ test('monitoring: run detail, job log, retry and cancel are available and audite
 });
 
 test('the last owner cannot be demoted or disabled', async () => {
-  const me = (await owner.get('/api/members')).json.members.find((m) => m.email === 'dhimas@kbi.id');
+  const me = (await owner.get('/api/members')).json.members.find((m) => m.email === 'dana@acme.example');
   assert.equal((await owner.call('PATCH', `/api/members/${me.id}`, { role: 'admin' })).json.error, 'last_owner');
   assert.equal((await owner.call('PATCH', `/api/members/${me.id}`, { disabled: true })).status, 409);
 });
 
 test('disabling a member ends their sessions at once', async () => {
-  const m = (await owner.get('/api/members')).json.members.find((x) => x.email === 'aud@kbi.id');
+  const m = (await owner.get('/api/members')).json.members.find((x) => x.email === 'aud@acme.example');
   assert.equal((await owner.call('PATCH', `/api/members/${m.id}`, { disabled: true })).status, 200);
-  const c = new Client(); const r = await c.post('/api/auth/signin', { email: 'aud@kbi.id', password: PW });
+  const c = new Client(); const r = await c.post('/api/auth/signin', { email: 'aud@acme.example', password: PW });
   assert.equal(r.status, 401);
 });
 
 test('password reset: only an owner makes the link; it works once, signs the member out, and can reset two-factor', async () => {
   const NEW = 'brand-new-password-42';
   const members = async () => (await owner.get('/api/members')).json.members;
-  const squad = (await members()).find((x) => x.email === 'squad@kbi.id');
-  const squadSession = new Client(); assert.equal((await squadSession.post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 200);
+  const squad = (await members()).find((x) => x.email === 'squad@acme.example');
+  const squadSession = new Client(); assert.equal((await squadSession.post('/api/auth/signin', { email: 'squad@acme.example', password: PW })).status, 200);
 
   // an admin can manage members but cannot reset passwords
-  const inv = await owner.post('/api/members/invite', { email: 'adm@kbi.id', role: 'admin' });
-  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm', email: 'adm@kbi.id', password: PW, invite: inv.json.link.split('invite=')[1] });
+  const inv = await owner.post('/api/members/invite', { email: 'adm@acme.example', role: 'admin' });
+  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm', email: 'adm@acme.example', password: PW, invite: inv.json.link.split('invite=')[1] });
   const s = await adm.post('/api/auth/mfa/start'); await adm.post('/api/auth/mfa/confirm', { code: totp.code(s.json.secret) });
   const denied = await adm.post(`/api/members/${squad.id}/reset-password`, {});
   assert.equal(denied.status, 403); assert.match(denied.json.message, /owner/);
@@ -401,38 +401,38 @@ test('password reset: only an owner makes the link; it works once, signs the mem
   assert.match(made.json.link, /#\/reset\?token=/);                                    // after the #: never sent to the server
   const anon = new Client();
   assert.equal((await anon.get(`/api/auth/reset/${first.link.split('token=')[1]}`)).status, 404);
-  assert.equal((await anon.get(`/api/auth/reset/${token}`)).json.email, 'squad@kbi.id');
+  assert.equal((await anon.get(`/api/auth/reset/${token}`)).json.email, 'squad@acme.example');
 
   // the link alone changes nothing; the old password still works until it is used
-  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 200);
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@acme.example', password: PW })).status, 200);
   assert.equal((await anon.post('/api/auth/reset', { token, password: 'short' })).status, 400);
   assert.equal((await anon.post('/api/auth/reset', { token, password: PW })).json.error, 'same_password');
   const done = await anon.post('/api/auth/reset', { token, password: NEW });
-  assert.equal(done.status, 200); assert.equal(done.json.email, 'squad@kbi.id');
+  assert.equal(done.status, 200); assert.equal(done.json.email, 'squad@acme.example');
   assert.equal((await squadSession.get('/api/roles')).status, 401);                     // signed out everywhere
-  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: PW })).status, 401);
-  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@kbi.id', password: NEW })).status, 200);
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@acme.example', password: PW })).status, 401);
+  assert.equal((await new Client().post('/api/auth/signin', { email: 'squad@acme.example', password: NEW })).status, 200);
   assert.equal((await anon.post('/api/auth/reset', { token, password: 'another-password-77' })).status, 404);   // once only
 
   // resetting two-factor: the admin signs in with no code and is asked to set it up again
-  const rev = (await members()).find((x) => x.email === 'adm@kbi.id');
+  const rev = (await members()).find((x) => x.email === 'adm@acme.example');
   assert.equal(rev.totp_confirmed, true);
   const t2 = (await owner.post(`/api/members/${rev.id}/reset-password`, { resetMfa: true })).json.link.split('token=')[1];
   assert.equal((await anon.get(`/api/auth/reset/${t2}`)).json.resetMfa, true);
   assert.equal((await anon.post('/api/auth/reset', { token: t2, password: NEW })).status, 200);
-  const back = new Client(); const r = await back.post('/api/auth/signin', { email: 'adm@kbi.id', password: NEW });
+  const back = new Client(); const r = await back.post('/api/auth/signin', { email: 'adm@acme.example', password: NEW });
   assert.equal(r.status, 200); assert.equal(r.json.user.needsMfaSetup, true);
 
   // disabled members get no link; every step is in the audit log
-  const aud = (await members()).find((x) => x.email === 'aud@kbi.id');
+  const aud = (await members()).find((x) => x.email === 'aud@acme.example');
   assert.equal((await owner.post(`/api/members/${aud.id}/reset-password`, {})).json.error, 'disabled');
   const log = (await owner.get('/api/audit?action=')).json.items.map((i) => i.action);
   assert.ok(log.includes('member.password_reset_link') && log.includes('auth.password_reset'));
 });
 
 test('single sign-on: only owners set it; the secret is stored encrypted and never returned; the sign-in page follows', async () => {
-  const inv = await owner.post('/api/members/invite', { email: 'adm2@kbi.id', role: 'admin' });
-  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm2', email: 'adm2@kbi.id', password: PW, invite: inv.json.link.split('invite=')[1] });
+  const inv = await owner.post('/api/members/invite', { email: 'adm2@acme.example', role: 'admin' });
+  const adm = new Client(); await adm.post('/api/auth/signup', { name: 'Adm2', email: 'adm2@acme.example', password: PW, invite: inv.json.link.split('invite=')[1] });
   const s = await adm.post('/api/auth/mfa/start'); await adm.post('/api/auth/mfa/confirm', { code: totp.code(s.json.secret) });
   assert.equal((await adm.get('/api/settings')).status, 200);                           // admins configure the rest
   assert.equal((await adm.get('/api/settings/sso')).status, 403);
@@ -502,7 +502,7 @@ test('configuration: owners change Bedrock and lookback limits; others cannot; l
   assert.equal((await owner.get('/api/settings/limits')).json.maxLookbackDays, 180);
 
   // an account cannot ask for more than the workspace maximum
-  r = await owner.post('/api/accounts', { accountId: '999999999990', name: 'too-far', eventSource: 's3', s3: { bucket: 'kbi-org-trail' }, lookbackDays: 365 });
+  r = await owner.post('/api/accounts', { accountId: '999999999990', name: 'too-far', eventSource: 's3', s3: { bucket: 'acme-org-trail' }, lookbackDays: 365 });
   assert.equal(r.status, 400, JSON.stringify(r.json)); assert.equal(r.json.field, 'lookbackDays', JSON.stringify(r.json));
 
   // reset to default, audited
@@ -886,7 +886,7 @@ test('CSV: the Roles and IAM users lists download with their filters, scoped, fo
   const high = parseCsv((await owner.call('GET', '/api/roles.csv?risks=High')).text);
   assert.ok(high.slice(1).every((r) => r[rows[0].indexOf('Risk')] === 'High')); assert.ok(high.length < rows.length);
   // a member limited to account B gets only B
-  const scoped = parseCsv((await (await memberOfB('csv-b@kbi.id')).call('GET', '/api/roles.csv')).text);
+  const scoped = parseCsv((await (await memberOfB('csv-b@acme.example')).call('GET', '/api/roles.csv')).text);
   assert.ok(scoped.length > 1 && scoped.slice(1).every((r) => r[1] === '222222222222'));
   // IAM users: one line per key
   const u = parseCsv((await owner.call('GET', '/api/iam-users.csv')).text);
@@ -904,7 +904,7 @@ test('access reviews: a frozen snapshot, filtered and exported; both teams sign 
   assert.equal((await owner.post('/api/reviews', { name: 'x', accounts: [accA], from, to: '2999-01-01' })).status, 400);
   assert.equal((await owner.post('/api/reviews', { name: 'x', accounts: [], from, to })).status, 400);
   assert.equal((await reviewerClient.post('/api/reviews', { name: 'x', accounts: ['00000000-0000-4000-8000-000000000000'], from, to })).status, 400);
-  const onlyB = await memberOfB('review-b@kbi.id');
+  const onlyB = await memberOfB('review-b@acme.example');
   assert.equal((await onlyB.post('/api/reviews', { name: 'x', accounts: [accA], from, to })).status, 403, 'an account owner cannot create reviews');
   const c = await owner.post('/api/reviews', { name: 'Q4 2026 access review', accounts: [accA, accB], from, to });
   assert.equal(c.status, 201, c.text);
@@ -1001,7 +1001,7 @@ test('change feed: the bell counts what is new by when it was recorded, Radar sh
     assert.equal((await owner.get('/api/changes/unread')).json.count, 0);
     assert.ok((await reviewerClient.get('/api/changes/unread')).json.count >= 2);
     // a member limited to account B does not see A's changes
-    const onlyB = await memberOfB('feed-b@kbi.id');
+    const onlyB = await memberOfB('feed-b@acme.example');
     assert.ok(!(await onlyB.get('/api/changes/unread')).json.items.some((x) => x.title.startsWith('feed test')));
     assert.equal((await owner.get('/api/space/flags')).status, 404, 'the old bell endpoint is gone');
   } finally { await db.query(`DELETE FROM changes WHERE dedupe LIKE 'feedtest:%'`); }
@@ -1036,7 +1036,7 @@ test('home: what to do first, ranked, only what the member can act on; drafts wa
   } finally { await db.query('DELETE FROM recommendations WHERE id = $1', [rec.json.id]); }
 
   // what a scoped account owner sees: hygiene in their account, nothing to approve, no setup they cannot do
-  const onlyB = await memberOfB('home-b@kbi.id');
+  const onlyB = await memberOfB('home-b@acme.example');
   const b = (await onlyB.get('/api/home')).json;
   assert.ok(!b.actions.some((a) => a.tier === 'setup' || a.key === 'drafts' || a.key.startsWith('review:') || a.key === 'findings-high'), JSON.stringify(b.actions.map((a) => a.key)));
   assert.equal(b.queue.drafts, 0);

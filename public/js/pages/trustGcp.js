@@ -5,8 +5,8 @@ import { h, get, num, ago, tile, pager, searchBox, syncUrl, urlSet } from '../li
 import { cloudTabs, GCP_CONNECTIONS } from './gcp.js';
 
 const SEV = { high: 'b-high', medium: 'b-medium', low: 'b-low', info: 'b-neutral' };
-const FROM_BADGE = { public: 'b-high', external: 'b-medium', 'other-org': 'b-medium', aws: 'b-amber', oidc: 'b-amber', gke: 'b-neutral', key: 'b-neutral', org: 'b-green', deleted: 'b-neutral' };
-const TILES = ['public', 'external', 'other-org', 'aws', 'oidc', 'gke', 'key'];
+const FROM_BADGE = { public: 'b-high', external: 'b-medium', 'other-org': 'b-medium', aws: 'b-amber', oidc: 'b-amber', gke: 'b-neutral', key: 'b-neutral', org: 'b-green', own: 'b-green', deleted: 'b-neutral' };
+const TILES = ['public', 'external', 'other-org', 'own', 'aws', 'oidc', 'gke', 'key'];
 const shortRole = (r) => String(r || '').replace(/^roles\//, '').replace(/^(projects|organizations)\/[^/]+\/roles\//, 'custom: ');
 // federated members run to 150 characters: the start and the end say which pool and which identity
 const clip = (t, n = 56) => (String(t).length > n ? `${String(t).slice(0, 22)}…${String(t).slice(-(n - 23))}` : String(t));
@@ -76,6 +76,9 @@ export async function gcpTrustPage(ctx) {
       h('td', null, sevBadge(w.worst)),
       h('td', null, w.target.kind === 'serviceAccount'
         ? [h('a', { href: `#/identities/gcp/${w.target.id}` }, w.target.label), h('div', { class: 'tiny muted' }, `${w.target.project || ''}${w.target.env ? ` · ${w.target.env}` : ''}`)]
+        // one grant on a whole project, folder or organization: every service account below it, listed on demand
+        : w.target.kind === 'scope' ? h('details', null, h('summary', null, w.target.label),
+          h('ul', { class: 'plain tiny', style: 'margin:4px 0 0;max-height:220px;overflow:auto' }, w.target.members.map((m) => h('li', null, h('a', { href: `#/identities/gcp/${m.id}` }, m.label), m.risk === 'High' ? h('span', { class: 'badge b-high', style: 'margin-left:6px' }, 'high risk') : null))))
         : [h('div', null, w.target.label), h('div', { class: 'tiny muted' }, 'directly, no service account')]),
       h('td', null, h('span', { class: `badge ${FROM_BADGE[w.from]}` }, d.labels.from[w.from]), h('div', { class: 'small' }, w.principalId ? h('a', { href: `#/identities/gcp/${w.principalId}` }, w.label) : w.label),
         w.member && w.member !== w.label && memberLine(w.member), w.awsRoleId && h('a', { class: 'tiny', href: `#/identities/${w.awsRoleId}` }, 'The AWS role →')),
@@ -97,7 +100,11 @@ export async function gcpTrustPage(ctx) {
     return h('div', { class: 'stack-lg tm2' }, cloudTabs('gcp', '#/trust'), head, h('div', { class: 'card empty' }, 'No Google Cloud connected. ', h('a', { href: GCP_CONNECTIONS }, 'Connect an organization, folder or project'), ' to see who can get in.'));
   }
   await load();
-  return h('div', { class: 'stack-lg tm2' }, cloudTabs('gcp', '#/trust'), head, tilesEl,
+  // a connection whose organization cannot be read has no domain: nobody there can be told to be outside it
+  const noDomain = d.noDomain?.length ? h('div', { class: 'card card-b small', role: 'note' }, h('b', null, 'Your domain is not known for ', d.noDomain.join(', '), '. '),
+    'Its reader cannot read the organization (a connection on a folder or a project), so users, groups and domains there are not checked against it. ',
+    h('a', { href: '#/admin/config' }, 'Add your domains'), ' under Configuration → Google Cloud.') : null;
+  return h('div', { class: 'stack-lg tm2' }, cloudTabs('gcp', '#/trust'), head, noDomain, tilesEl,
     h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Who comes in from outside'), h('p', { class: 'small muted' }, 'One row per identity from outside your organisation, with everything it reaches.'))), h('div', { class: 'card-b' }, sourcesEl)),
     h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Every way in'), count),
       h('div', { class: 'card-b stack' }, h('div', { class: 'filters' }, search, selects), waysEl)));

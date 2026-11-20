@@ -17,7 +17,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   tm = await import('../src/trustmap.js'); sync = await import('../src/trustSync.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
   // this file is about the Trust map's own findings: the built-in rules of Manage policy are turned off
   for (const b of (await import('../src/controlCatalog.js')).BUILTIN.filter((x) => x.rule)) await db.query(`INSERT INTO control_overrides(control_id, enabled) VALUES ($1, false)`, [b.id]);
   A = (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ('111111111111','payments-prod','production','arn:x','{us-east-1}','connected') RETURNING id`)).rows[0].id;
@@ -63,7 +63,7 @@ test('trust findings are filed once, with the Trust map\'s severity, and resolve
 
   // fixed: the sub and aud conditions added
   await db.query(`UPDATE roles SET trust_policy=$2 WHERE id=$1`, [ciRole, JSON.stringify({ Statement: [{ Effect: 'Allow', Principal: { Federated: GH }, Action: 'sts:AssumeRoleWithWebIdentity',
-    Condition: { StringEquals: { 'token.actions.githubusercontent.com:sub': 'repo:krom/app:ref:refs/heads/main', 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } }] })]);
+    Condition: { StringEquals: { 'token.actions.githubusercontent.com:sub': 'repo:acme/app:ref:refs/heads/main', 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } }] })]);
   const fixed = await sync.trustTick({ force: true });
   assert.equal(fixed.resolved, 1);
 });

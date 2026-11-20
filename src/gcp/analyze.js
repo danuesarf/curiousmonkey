@@ -19,6 +19,16 @@ const ACT_AS = 'iam.serviceAccounts.actAs';
 const MINT_KEY = 'iam.serviceAccountKeys.create';
 const SET_IAM = /^resourcemanager\.(organizations|folders|projects)\.setIamPolicy$/;
 
+// Service accounts Google creates and runs, in projects Google owns: service agents (service-NUMBER@..., gcp-sa-*),
+// Cloud Build and Google APIs, and those Firebase adds when a product is linked to BigQuery (documented at
+// https://firebase.google.com/support/guides/service-accounts). Their roles are expected: never an outsider.
+export const GOOGLE_OWNED = new RegExp([
+  '^service-\\d+@', '@gcp-sa-[\\w-]+\\.iam\\.gserviceaccount\\.com$', '@(cloudbuild|cloudservices)\\.gserviceaccount\\.com$',
+  '@(cloudservices|cloudbuild|container-engine-robot|compute-system|dataflow-service-producer-prod|bigquery-encryption|gs-project-accounts|gcf-admin-robot|serverless-robot-prod|firebase-rules)\\.iam\\.gserviceaccount\\.com$',
+  '^crashlytics-exporter@crashlytics-bigquery-prod\\.', '^exporter@(fcm-bq-export-prod|performance-bq-export-prod)\\.', '^firebase-service-account@firebase-sa-management\\.',
+  '@system\\.gserviceaccount\\.com$', '\\.google\\.com\\.iam\\.gserviceaccount\\.com$',
+].join('|'));
+
 /** What kind of identity an IAM member string names, and what is known about it from the string alone. */
 export function parseMember(member) {
   const m = String(member);
@@ -31,10 +41,12 @@ export function parseMember(member) {
   if (fed) return { kind: 'federated', set: !!fed[1], projectNumber: fed[2], pool: fed[3], rest: fed[4], label: `${fed[3]} · ${fed[4]}` };
   const [type, rest] = m.split(/:(.*)/s);
   if (type === 'serviceAccount') {
-    const managed = /@(gcp-sa-[\w-]+|cloudservices|cloudbuild|container-engine-robot|compute-system|dataflow-service-producer-prod)\.iam\.gserviceaccount\.com$|@(cloudbuild|cloudservices)\.gserviceaccount\.com$|^service-\d+@/.test(rest);
-    const project = rest.match(/@([\w-]+)\.iam\.gserviceaccount\.com$/)?.[1] || null;
+    const managed = GOOGLE_OWNED.test(rest);
+    // the project it lives in: name@PROJECT.iam..., PROJECT@appspot...; NUMBER-compute@developer... names it by number
+    const project = rest.match(/@([\w-]+)\.iam\.gserviceaccount\.com$/)?.[1] || rest.match(/^([\w-]+)@appspot\.gserviceaccount\.com$/)?.[1] || null;
+    const projectNumber = rest.match(/^(\d+)-compute@developer\.gserviceaccount\.com$/)?.[1] || null;
     const isDefault = /-compute@developer\.gserviceaccount\.com$|@appspot\.gserviceaccount\.com$/.test(rest);
-    return { kind: 'serviceAccount', email: rest, label: rest, project, managed, isDefault };
+    return { kind: 'serviceAccount', email: rest, label: rest, project, projectNumber, managed, isDefault };
   }
   if (type === 'user' || type === 'group') return { kind: type, email: rest, label: rest };
   if (type === 'domain') return { kind: 'domain', email: rest, label: `Everyone at ${rest}` };
@@ -114,8 +126,10 @@ export function analyzeGcp(s) {
     }
   }
 
-  const domain = String(s.org?.domain || '').toLowerCase();
-  const external = (email) => { const d = String(email || '').split('@')[1]?.toLowerCase(); return !!domain && !!d && d !== domain && !d.endsWith(`.${domain}`) && !/gserviceaccount\.com$/.test(d); };
+  // your domains: the organization's, and the workspace's list (Configuration). None known: nobody is called outside
+  const domains = [...new Set([s.org?.domain, ...(s.org?.domains || [])].map((d) => String(d || '').toLowerCase()).filter(Boolean))];
+  const domain = domains.join(', ');
+  const external = (email) => { const d = String(email || '').split('@')[1]?.toLowerCase(); return domains.length > 0 && !!d && !/gserviceaccount\.com$/.test(d) && !domains.some((x) => d === x || d.endsWith(`.${x}`)); };
 
   for (const x of out.values()) {
     // the workspace's policy (Manage policy): a control turned off is not reported; one given a severity gets it

@@ -29,6 +29,8 @@ const DEFS = {
   'risk.keyUnusedDays':       [z.number().int().min(7).max(730), ['risk', 'keyUnusedDays']],
   'alerts.keepDays':          [z.number().int().min(7).max(3650), ['alerts', 'keepDays']],
   'gcp.usageReadsPerMinute':  [z.number().int().min(1).max(600), ['gcp', 'usageReadsPerMinute']],
+  'gcp.ownProjects':          [z.array(z.string().trim().toLowerCase().regex(/^(\d{6,20}|[a-z*][a-z0-9*-]{0,62})$/, 'Use project IDs (with * as a wildcard) or project numbers.')).max(300), ['gcp', 'ownProjects']],
+  'gcp.ownDomains':           [z.array(z.string().trim().toLowerCase().regex(/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/, 'Use domains such as example.com.')).max(50), ['gcp', 'ownDomains']],
 };
 const at = (path) => path.reduce((o, k) => o?.[k], config);
 const put = (path, v) => { const o = path.slice(0, -1).reduce((x, k) => x[k], config); o[path.at(-1)] = v; };

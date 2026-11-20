@@ -15,7 +15,7 @@ before(async () => {
   ({ principalFromCallerArn } = await import('../src/aws/credentials.js'));
   ({ scannerPolicy, scannerSnippets } = await import('../src/onboarding.js'));
   await q.registerWorker();
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-123')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-123')`);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 

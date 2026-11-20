@@ -87,8 +87,13 @@ export function analyzeGcpResource(resource, estate = {}, policy = DEFAULT_POLIC
   const noun = GCP_SERVICES[resource.service]?.noun || 'resource';
   const pap = resource.extra?.publicAccessPrevention === 'enforced';
   const grants = [], findings = [];
-  const inDomain = (email) => { const d = String(email || '').split('@')[1]?.toLowerCase() || String(email || '').toLowerCase(); return !!domain && (d === domain || d.endsWith(`.${domain}`)); };
-  const projectReach = (p) => (!p ? 'external' : mine.has(p) ? 'same' : others.has(p) ? 'connected' : 'external');
+  // whose: estate.own (src/gcp/ownership.js) when given; a domain that cannot be known counts as yours (no finding)
+  const own = estate.own || null;
+  const inDomain = (email) => {
+    if (own) return own.inDomain(email) !== false;
+    const d = String(email || '').split('@')[1]?.toLowerCase() || String(email || '').toLowerCase(); return !domain || d === domain || d.endsWith(`.${domain}`);
+  };
+  const projectReach = (p) => { const id = own?.idOf(p) || p; return !id ? 'external' : mine.has(id) ? 'same' : others.has(id) || (own && own.project(p)) ? 'connected' : 'external'; };
 
   (resource.policy.bindings || []).forEach((b, i) => {
     const access = roleAccess(b.role, estate.roleDefs?.get(b.role));
@@ -100,7 +105,7 @@ export function analyzeGcpResource(resource, estate = {}, policy = DEFAULT_POLIC
       if (p.kind === 'public') reach = 'public';
       else if (conv) { reach = projectReach(conv[2]); g.account = conv[2]; g.kind = 'project-role'; }
       else if (p.kind === 'deleted') reach = 'same';
-      else if (p.kind === 'serviceAccount') reach = p.managed ? 'service' : p.project ? projectReach(p.project) : /gserviceaccount\.com$/.test(p.email) ? 'service' : 'external';
+      else if (p.kind === 'serviceAccount') reach = p.managed ? 'service' : p.project || p.projectNumber ? projectReach(p.project || p.projectNumber) : /gserviceaccount\.com$/.test(p.email) ? 'service' : 'external';
       else if (p.kind === 'gke') reach = projectReach(p.project);
       else if (p.kind === 'federated') {
         const o = federatedOrigin(p, estate.providers || []);
@@ -127,7 +132,7 @@ export function analyzeGcpResource(resource, estate = {}, policy = DEFAULT_POLIC
           pap ? `${who} is granted ${b.role}, but public access prevention is enforced on the bucket: it is refused today, and turning prevention off would open it.` : `${who} (${member}) can ${what}.`,
           'Remove the binding, or grant it to the identities that need it. For buckets, enforce public access prevention.');
       } else if (reach === 'external' && p.kind !== 'deleted') {
-        const who = p.kind === 'serviceAccount' ? `service account ${p.email}, from a project outside your connections` : p.kind === 'domain' ? `everyone at ${p.email}` : p.kind === 'federated' ? `${g.accountName}` : conv ? `the ${conv[1].toLowerCase()}s of project ${conv[2]}` : `${p.email || member}`;
+        const who = p.kind === 'serviceAccount' ? `service account ${p.email}, from a project that is not yours` : p.kind === 'domain' ? `everyone at ${p.email}` : p.kind === 'federated' ? `${g.accountName}` : conv ? `the ${conv[1].toLowerCase()}s of project ${conv[2]}` : `${p.email || member}`;
         f('res.external-account', access === 'read' ? 'medium' : 'high', `Shared outside your organisation: ${p.email || g.accountName || member}`,
           `${who[0].toUpperCase()}${who.slice(1)} is not in ${domain || 'your organisation'} and can ${what}.`, 'Confirm it is still needed; grant the narrowest role.');
       } else if (reach === 'connected') {

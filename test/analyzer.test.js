@@ -89,7 +89,7 @@ const TRUST = { Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Princip
   Condition: { StringEquals: { 'sts:ExternalId': 'abc' }, Bool: { 'aws:MultiFactorAuthPresent': 'true' } } }] };
 
 test('trust match reports the conditions the caller met', () => {
-  const m = matchTrust(TRUST, { accountId: '222222222222', arn: 'arn:aws:iam::222222222222:user/dhimas', type: 'IAMUser' });
+  const m = matchTrust(TRUST, { accountId: '222222222222', arn: 'arn:aws:iam::222222222222:user/dana', type: 'IAMUser' });
   assert.ok(m.matched);
   assert.deepEqual(m.conditions, ['sts:ExternalId StringEquals abc', 'aws:MultiFactorAuthPresent Bool true']);
   assert.ok(!matchTrust(TRUST, { accountId: '999999999999', arn: 'arn:aws:iam::999999999999:user/x' }).matched);

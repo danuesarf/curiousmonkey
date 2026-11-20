@@ -160,10 +160,25 @@ export async function settingsPage(ctx) {
           saveBar(['gcp.usageReadsPerMinute'])),
         h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'At 50 reads a minute a connection reads up to about 3 million audit entries an hour. The first backfill is the slow part; after it, only new entries are read.'))));
 
+    // ---- Google Cloud: what is yours ----
+    const lines = (v) => String(v).split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);
+    const ownProjects = bind(h('textarea', { rows: 4, spellcheck: 'false', placeholder: 'my-company-*\nshared-tools-prod\n123456789012' }, (draft['gcp.ownProjects'] || []).join('\n')), 'gcp.ownProjects', lines);
+    const ownDomains = bind(h('textarea', { rows: 2, spellcheck: 'false', placeholder: 'example.com' }, (draft['gcp.ownDomains'] || []).join('\n')), 'gcp.ownDomains', lines);
+    const gcpOwn = h('section', { class: 'card' },
+      h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'Google Cloud: what is yours'), h('p', { class: 'muted small' }, 'Who counts as an outsider on the Trust map, Resource access and Space.'))),
+      h('div', { class: 'card-b settings-grid' },
+        h('div', { class: 'stack' },
+          h('div', { class: 'field' }, h('label', null, 'Your projects that no connection reads', ownProjects),
+            h('span', { class: 'hint' }, 'One per line: project IDs, with * as a wildcard, or project numbers. A service account from one of them is yours, not an outsider. Projects your connections read, and projects their readers can see under your organizations, already count.'), origin('gcp.ownProjects')),
+          h('div', { class: 'field' }, h('label', null, 'Your domains', ownDomains),
+            h('span', { class: 'hint' }, 'One per line. Needed when a connection is on a folder or a project and cannot read the organization: without a domain, users and groups cannot be told to be outside it. Subdomains count.'), origin('gcp.ownDomains')),
+          saveBar(['gcp.ownProjects', 'gcp.ownDomains'])),
+        h('div', { class: 'stack' }, h('p', { class: 'small muted' }, 'The Trust map and Space follow at once. Resource access is worked out again within a minute; the Google Cloud identities\' own findings follow at their connection\'s next scan.'))));
+
     root.replaceChildren(
       h('header', { class: 'head' }, h('div', null, h('div', { class: 'eyebrow' }, 'CONFIGURATION'), h('h1', null, 'Configuration'),
         h('p', { class: 'muted' }, `Settings saved here override the environment variables. Changes are recorded in the audit log.${d.awsMode === 'demo' ? ' Demo mode: AWS is not called.' : ''}`))),
-      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, gcpUsage, risk, clock, environmentsCard(d.environments, load));
+      d.sso && ssoCard(d.sso, d.ssoMappings, load), bedrock, history, gcpUsage, gcpOwn, risk, clock, environmentsCard(d.environments, load));
     refreshSave();
   }
 

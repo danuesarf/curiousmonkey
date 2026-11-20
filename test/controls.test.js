@@ -17,8 +17,8 @@ before(async () => {
   ctl = await import('../src/controls.js'); sync = await import('../src/policySync.js'); tm = await import('../src/trustmap.js');
   tsync = await import('../src/trustSync.js'); job = await import('../src/scanner/analyzeJob.js');
   idr = await import('../src/identityRules.js'); lang = await import('../src/ruleLang.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
-  owner.id = (await db.query(`INSERT INTO users(email, name, role, password_hash) VALUES ('o@kbi.id','Owner','owner','x') RETURNING id`)).rows[0].id;
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
+  owner.id = (await db.query(`INSERT INTO users(email, name, role, password_hash) VALUES ('o@acme.example','Owner','owner','x') RETURNING id`)).rows[0].id;
   A = (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ('111111111111','payments-prod','production','arn:x','{us-east-1}','connected') RETURNING id`)).rows[0].id;
   const role = async (name, { kind = 'custom', trust = { Statement: [{ Effect: 'Allow', Principal: { Service: 'ec2.amazonaws.com' }, Action: 'sts:AssumeRole' }] }, used = 'now()', doc = null, tags = {} } = {}) => {
     const id = (await db.query(`INSERT INTO roles(account_id, arn, name, kind, trust_policy, last_used_at, tags) VALUES ($1,$2,$3,$4,$5,${used},$6) RETURNING id`,

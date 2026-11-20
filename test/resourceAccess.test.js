@@ -92,7 +92,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   sync = await import('../src/resourceSync.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
   const acct = async (id, name) => (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ($1,$2,'production','arn:x','{us-east-1}','connected') RETURNING *`, [id, name])).rows[0];
   A = await acct(OWN, 'payments-prod'); B = await acct(STG, 'data-stg');
 });
@@ -193,7 +193,7 @@ test('the list: shared beyond the account by default, with facets, search, a con
 
 test('decisions: expected needs a reason, and leaves "needs attention"; a resolved finding takes none', async () => {
   const api = await import('../src/resourcesApi.js');
-  const user = (await db.query(`INSERT INTO users(email, name, role, password_hash) VALUES ('r@kbi.id','Rina','reviewer','x') RETURNING *`)).rows[0];
+  const user = (await db.query(`INSERT INTO users(email, name, role, password_hash) VALUES ('r@acme.example','Rina','reviewer','x') RETURNING *`)).rows[0];
   const [f] = (await findings('vendor/api-key')).filter((x) => x.status === 'open');
   const before = (await api.listResources({ scope_accounts: null }, { state: 'attention' })).items.map((x) => x.name);
   assert.ok(before.includes('vendor/api-key'));

@@ -11,7 +11,7 @@ before(async () => {
   await (await import('../src/migrate.js')).migrate(() => {});
   q = await import('../src/queue.js'); w = await import('../src/worker.js'); demo = await import('../src/demo/gateway.js');
   await q.registerWorker();
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-123')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-123')`);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 

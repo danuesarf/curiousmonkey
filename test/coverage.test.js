@@ -16,7 +16,7 @@ before(async () => {
   ev = await import('../src/analyzer/events.js'); sev = await import('../src/scanner/events.js'); an = await import('../src/scanner/analyzeJob.js');
   rec = await import('../src/recommender/index.js'); em = await import('../src/recommender/eventMap.js'); checks = await import('../src/recommender/checks.js');
   await q.registerWorker();
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-123')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-123')`);
   A = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status) VALUES ('111111111111','prod','arn:aws:iam::111111111111:role/CuriousMonkeyScanner','{ap-southeast-3}','connected') RETURNING id`)).rows[0].id;
   await q.enqueueRun(A, { trigger: 'manual' });
   for (let j; (j = await q.claimJob());) { try { await w.runJob(j); } catch (e) { await q.failJob(j, e); } }

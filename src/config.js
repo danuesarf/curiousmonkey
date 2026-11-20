@@ -55,6 +55,10 @@ export const config = {
   gcp: {
     // entries.list read requests per minute, per connection, shared by every worker (the API allows 60 by default)
     usageReadsPerMinute: Number(env.GCP_USAGE_READS_PER_MINUTE || 50),
+    // projects that are yours though no connection reads them (IDs, * wildcards, or numbers), and your domains when
+    // the organization cannot be read (a connection on a folder or project): who counts as an outsider
+    ownProjects: String(env.GCP_OWN_PROJECTS || '').split(',').map((x) => x.trim()).filter(Boolean),
+    ownDomains: String(env.GCP_OWN_DOMAINS || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean),
   },
 
   schedule: {

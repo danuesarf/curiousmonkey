@@ -11,7 +11,7 @@ before(async () => {
   q = await import('../src/queue.js'); w = await import('../src/worker.js');
   rec = await import('../src/recommender/index.js'); ai = await import('../src/recommender/ai.js');
   await q.registerWorker();
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','x')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','x')`);
   acct = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status) VALUES ('111111111111','prod','arn:aws:iam::111111111111:role/s','{ap-southeast-3}','connected') RETURNING id`)).rows[0].id;
   await q.enqueueRun(acct);
   for (let j; (j = await q.claimJob());) { try { await w.runJob(j); } catch (e) { await q.failJob(j, e); } }

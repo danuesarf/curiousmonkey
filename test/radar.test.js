@@ -14,7 +14,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   rh = await import('../src/radarHistory.js'); api = await import('../src/radarApi.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
   const acct = async (aws, name, env) => (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ($1,$2,$3,'arn:x',$4,'connected') RETURNING id`,
     [aws, name, env, ['us-east-1']])).rows[0].id;
   A = await acct('111111111111', 'payments-prod', 'production'); B = await acct('222222222222', 'data-stg', 'staging');

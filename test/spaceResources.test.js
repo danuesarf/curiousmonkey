@@ -56,7 +56,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   space = await import('../src/spaceApi.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
   const acct = (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ($1,'payments-prod','production','arn:x','{us-east-1}','connected') RETURNING *`, [OWN])).rows[0];
   A = acct.id;
   // an outside account that can both assume a role and read a bucket

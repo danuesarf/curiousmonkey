@@ -8,11 +8,13 @@ import { analyzeResource, worstOf, SERVICES } from './analyzer/resourcePolicy.js
 import { docHash } from './analyzer/policy.js';
 import { loadPolicy } from './controls.js';
 import { knownVendor } from './trustmap.js';
+import { config } from './config.js';
+import { loadOwnership } from './gcp/ownership.js';
 import { analyzeGcpResource } from './gcp/resources.js';
 
 export const RESOURCE_SERVICES = Object.keys(SERVICES);
 const LOCK = 727013;
-const VERSION = 1;              // bump when the analysis itself changes, so stored results are worked out again
+const VERSION = 2;              // bump when the analysis itself changes, so stored results are worked out again
 const CHUNK = 500;
 const READS = {
   s3: 's3:ListAllMyBuckets, s3:GetBucketPolicy, s3:GetBucketPublicAccessBlock, s3:GetBucketLocation and s3:GetAccountPublicAccessBlock',
@@ -28,16 +30,19 @@ const denied = (e) => /AccessDenied|not authorized|UnauthorizedOperation|Authori
 
 /** Which accounts are yours, your organisations, known vendors; the workspace's policy; and a signature of all of it. */
 export async function estateFor() {
-  const [accounts, org, policy, gproj] = await Promise.all([
+  const [accounts, org, policy, gproj, seen] = await Promise.all([
     query('SELECT account_id, name, aws_org_id FROM cloud_accounts').then((r) => r.rows),
     query('SELECT account_id, name FROM org_accounts').then((r) => r.rows).catch(() => []),
     loadPolicy(),
     query(`SELECT p.connection_id, p.project_id, c.status_detail->>'domain' AS domain FROM gcp_projects p JOIN gcp_connections c ON c.id = p.connection_id`).then((r) => r.rows).catch(() => []),
+    query(`SELECT md5(string_agg(project_id || ':' || coalesce(organization, ''), ',' ORDER BY project_id)) AS h FROM gcp_seen_projects`).then((r) => r.rows[0]?.h || '', () => ''),
   ]);
   const estate = { connected: new Map(accounts.map((a) => [a.account_id, a.name])), org: new Map(org.map((x) => [x.account_id, x.name])),
     orgIds: new Set(accounts.map((a) => a.aws_org_id).filter(Boolean)), vendor: knownVendor };
   const sig = docHash({ v: VERSION, c: [...estate.connected.keys()].sort(), o: [...estate.org.keys()].sort(), i: [...estate.orgIds].sort(), p: policy.sig,
-    g: gproj.map((x) => `${x.connection_id}:${x.project_id}:${x.domain || ''}`).sort() });
+    g: gproj.map((x) => `${x.connection_id}:${x.project_id}:${x.domain || ''}`).sort(),
+    // whose projects and domains are yours (Configuration, and the projects the readers can see)
+    w: [config.gcp.ownProjects || [], config.gcp.ownDomains || [], seen] });
   return { estate, policy, sig };
 }
 
@@ -185,7 +190,7 @@ async function gcpEstate(connId, { domain, providers, roleDefs } = {}) {
     providers ? Promise.resolve(providers) : query('SELECT * FROM gcp_wif_providers WHERE connection_id = $1', [connId]).then((r) => r.rows),
     query('SELECT account_id, name FROM cloud_accounts').then((r) => r.rows),
   ]);
-  return { domain: conn, providers: prov, roleDefs: roleDefs || null, awsAccounts: new Map(accounts.map((a) => [a.account_id, a.name])),
+  return { domain: conn, own: await loadOwnership({ domains: [conn] }), providers: prov, roleDefs: roleDefs || null, awsAccounts: new Map(accounts.map((a) => [a.account_id, a.name])),
     projects: new Set(projects.filter((p) => p.connection_id === connId).map((p) => p.project_id)),
     otherProjects: new Set(projects.filter((p) => p.connection_id !== connId).map((p) => p.project_id)) };
 }
