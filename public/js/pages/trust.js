@@ -1,37 +1,42 @@
-// Trust map: who can get into your AWS, read from role trust policies.
+// Trust map: who can get into your AWS and Google Cloud, one map for both. AWS from role trust policies; Google Cloud from
+// IAM (federation, GKE, impersonation, actAs, keys, roles held by outsiders), with projects as accounts and what a way in
+// reaches (a service account, or every one below a grant on a whole project or folder) as roles.
 // Three rows above the view, each with one job: the filter (search, menus, pills), the summary (tiles that filter), and
 // the view (Map | Sources | Ways in) with a panel for whatever is picked. A filter narrows everything and shows as a
 // pill; a pick only opens the panel and focuses the map. Everything is in the address, so any view can be shared:
 // #/trust?q=source:external finding:external-no-externalid&tab=ways&sel=...
 import { h, svg, get, post, api, num, ago, loadEnvironments, envName, envs, tile, pager, menu, accountPicker, debounced, poll, modal, toast } from '../lib.js';
-import { gcpTrustPage } from './trustGcp.js';
-import { cloudTabs } from './gcp.js';
 import { session } from '../main.js';
 
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
 const ATTENTION = new Set(['high', 'medium']);
 // where a way in comes from, in the map's left column
-const KINDS = [['public', 'Anyone'], ['external-account', 'Outside AWS accounts'], ['oidc', 'CI and web identity'], ['saml', 'Identity Center and SAML'], ['unknown', 'Deleted identities']];
+const KINDS = [['public', 'Anyone'], ['external-account', 'Outside accounts'], ['oidc', 'CI and web identity'], ['saml', 'Identity Center and SAML'], ['unknown', 'Deleted identities']];
 const KIND_NAME = Object.fromEntries(KINDS);
-const GROUP_NAME = { ...KIND_NAME, 'connected-account': 'Your other accounts', 'same-account': 'The same account', service: 'AWS services' };
+const GROUP_NAME = { ...KIND_NAME, 'connected-account': 'Your other accounts', 'same-account': 'The same account', service: 'Cloud services' };
 const SHORT = { public: 'Anyone', 'external-account': 'Outside', oidc: 'OIDC', saml: 'SAML', 'connected-account': 'Your account', 'same-account': 'Same account', service: 'Service', unknown: 'Deleted' };
 // the From menu: kinds of source, then kinds of identity provider (both are source: values)
-const FROM = [['Anyone', 'public'], ['Outside AWS accounts', 'external'], ['Your other accounts', 'connected'], ['CI and web identity', 'oidc'], ['Identity Center and SAML', 'saml'],
-  ['The same account', 'same'], ['AWS services', 'service'], ['Deleted identities', 'unknown'],
-  null, ['GitHub Actions', 'github'], ['Bitbucket Pipelines', 'bitbucket'], ['GitLab', 'gitlab'], ['EKS clusters', 'eks'], ['Terraform Cloud', 'terraform'], ['Google', 'google'],
+const FROM = [['Anyone', 'public'], ['Outside accounts', 'external'], ['Your other accounts', 'connected'], ['CI and web identity', 'oidc'], ['Identity Center and SAML', 'saml'],
+  ['The same account', 'same'], ['Cloud services', 'service'], ['Deleted identities', 'unknown'],
+  null, ['GitHub Actions', 'github'], ['Bitbucket Pipelines', 'bitbucket'], ['GitLab', 'gitlab'], ['EKS clusters', 'eks'], ['GKE workloads', 'gke'], ['Terraform Cloud', 'terraform'], ['Google (into AWS)', 'google'], ['AWS (into Google Cloud)', 'aws'],
   ['Cognito identity pools', 'cognito'], ['IAM Identity Center', 'identity-center']];
 const FROM_NAME = Object.fromEntries(FROM.filter(Boolean).map(([l, v]) => [v, l]));
-const USED = [['A sign-in came through it', 'yes'], ['IAM says used, no sign-in tied to it', 'iam'], ['Never used', 'no']];
+const USED = [['A sign-in came through it', 'yes'], ['IAM says used, no sign-in tied to it', 'iam'], ['Never used', 'no'], ['Not known (Google Cloud without usage)', 'unknown']];
 const USED_NAME = Object.fromEntries(USED.map(([l, v]) => [v, l]));
 const USAGE_FINDINGS = new Set(['never-used', 'used-per-iam', 'used-unnamed', 'used-unattributed']);
 const KEY_NAME = { fromenv: 'From environment', account: 'Account', env: 'Environment', source: 'From', finding: 'Finding', used: 'Used', severity: 'Severity', provider: 'Provider', from: 'From account',
-  role: 'Role', roleid: 'Role', type: 'Principal', cond: 'Condition', has: 'Has', no: 'Without', text: 'Text', attention: 'Needs attention', expected: 'Expected', decided: 'Decided', new: 'New' };
-const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv'];
+  role: 'Role', roleid: 'Role', type: 'Principal', cond: 'Condition', has: 'Has', no: 'Without', text: 'Text', attention: 'Needs attention', expected: 'Expected', decided: 'Decided', new: 'New', cloud: 'Cloud' };
+const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv', 'cloud'];
+// Google Cloud: what a way in reaches is a service account, or every one below a grant (no page of its own: the project's)
+const isGcp = (x) => String(x?.roleId || x?.id || '').startsWith('gcp:') || x?.cloud === 'gcp';
+const roleHref = (x, tab = 'policies') => (!isGcp(x) ? `#/identities/${x.roleId}?tab=${tab}` : x.gcpId ? `#/identities/gcp/${x.gcpId}`
+  : `#/identities?type=gcp&project=${encodeURIComponent(x.account || x.awsAccountId || '')}`);
+const whatIsIt = (x) => (isGcp(x) ? 'service account' : 'role');
 const PAGE = 50;
 const plural = (n, w, ws = `${w}s`) => `${num(n)} ${n === 1 ? w : ws}`;
 const cut = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1)}…` : String(s));
 const sevBadge = (s) => s && s !== 'none' && h('span', { class: `badge b-${s === 'info' ? 'neutral' : s}` }, s);
-const usedText = (x) => (x.sessions ? `${plural(x.sessions, 'session')}${x.lastSeen ? ` · last ${ago(x.lastSeen)}` : ''}` : x.iamUsed || x.lastUsed ? 'IAM says used, no sign-in tied to it' : 'never used');
+const usedText = (x) => (x.sessions ? `${plural(x.sessions, 'session')}${x.lastSeen ? ` · last ${ago(x.lastSeen)}` : ''}` : x.iamUsed || x.lastUsed ? 'IAM says used, no sign-in tied to it' : x.useUnknown ? 'use not known' : 'never used');
 
 // ---------------------------------------------------------------- the query, as a list of terms
 // The same grammar as the server: key:value (comma = either), -key:value excludes, "quoted values", free text.
@@ -52,11 +57,11 @@ function setValues(terms, key, values) {
 }
 
 export async function trustPage(ctx) {
-  // AWS | Google Cloud: Google Cloud has its own view (trustGcp.js)
-  if (ctx.params.get('cloud') === 'gcp') return gcpTrustPage(ctx);
   const params = ctx.params;
+  // an old link to the Google Cloud tab (?cloud=gcp) opens the one map, filtered to Google Cloud
+  const legacy = `${['gcp', 'aws'].includes(params.get('cloud')) && !/\bcloud:/.test(params.get('q') || '') ? ` cloud:${params.get('cloud')}` : ''}${/^[a-z][a-z0-9-]{4,61}$/.test(params.get('project') || '') ? ` account:${params.get('project')}` : ''}`;
   const S = {
-    terms: parse(params.get('q') || ''),
+    terms: parse(`${params.get('q') || ''}${legacy}`),
     sel: params.get('sel') || null,
     tab: ['map', 'grid', 'sources', 'ways'].includes(params.get('tab')) ? params.get('tab') : 'map',
     show: params.get('show') || null,                     // attention | all; null: decided by the size of the map
@@ -136,11 +141,20 @@ export async function trustPage(ctx) {
   const headActions = h('div', { class: 'row', style: 'gap:8px;align-items:center' });
   const asOf = h('span', { class: 'small muted' });
   const header = h('header', { class: 'head' },
-    h('div', null, h('div', { class: 'eyebrow' }, 'TRUST MAP'), h('h1', null, 'Who can get into your AWS'),
-      h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'Read from role trust policies: outside accounts, CI and identity providers, SAML, anyone, and your accounts trusting each other. ',
-        'IAM users\' keys and resource policies are not part of it; ', h('a', { href: '#/identities?type=users' }, 'IAM users'), ' have their own list.')),
+    h('div', null, h('div', { class: 'eyebrow' }, 'TRUST MAP'), h('h1', null, m.clouds?.includes('gcp') ? 'Who can get into your cloud' : 'Who can get into your AWS'),
+      h('p', { class: 'muted small', style: 'margin:4px 0 0' }, 'AWS from role trust policies: outside accounts, CI and identity providers, SAML, anyone, and your accounts trusting each other. ',
+        m.clouds?.includes('gcp') ? 'Google Cloud from IAM: federation, GKE workloads, impersonation, actAs, keys, and roles held by identities from outside; a project is an account, a service account a role. ' : '',
+        'IAM users\' keys and resource policies are not part of it (', h('a', { href: '#/identities?type=users' }, 'IAM users'), ' and ', h('a', { href: '#/resources' }, 'Resource access'), ' have their own lists).')),
     headActions);
-  const drawHeader = () => { asOf.textContent = `as of ${ago(m.builtAt)}`; headActions.replaceChildren(asOf, exportMenu()); };
+  // which cloud: both, AWS or Google Cloud (a cloud: term, so it is a filter like the others)
+  const cloudSeg = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Cloud' });
+  const drawCloud = () => {
+    const cur = valuesOf(S.terms, 'cloud')[0] || '';
+    cloudSeg.replaceChildren(...[['', 'Both clouds'], ['aws', 'AWS'], ['gcp', 'Google Cloud']].map(([v, l]) => h('button', { type: 'button', role: 'radio', 'aria-checked': String(cur === v),
+      onClick: () => { if (cur !== v) changeTerms(setValues(S.terms, 'cloud', v ? [v] : [])); } }, l)));
+    cloudSeg.hidden = !m.clouds?.includes('gcp');
+  };
+  const drawHeader = () => { asOf.textContent = `as of ${ago(m.builtAt)}`; headActions.replaceChildren(cloudSeg, asOf, exportMenu()); drawCloud(); };
 
   // ---------------------------------------------------------------- filter bar
   const search = h('input', { type: 'search', class: 'tm2-search', 'aria-label': 'Filter by account, source, role or finding', list: 'tm2-keys',
@@ -268,7 +282,7 @@ export async function trustPage(ctx) {
       (R.expected || R.expectedDue) ? tile('Expected', plural(R.expected, 'way in', 'ways in'), R.expectedDue ? `${num(R.expectedDue)} due for another look` : 'reviewed and accepted as they are',
         { bad: R.expectedDue > 0, pressed: has('expected', R.expectedDue ? 'due' : 'yes'), onClick: only('expected', R.expectedDue ? 'due' : 'yes') }) : null,
       anyone && tile('Anyone can assume', plural(anyone.roles, 'role'), 'principal "*"', { bad: anyone.worst === 'high', pressed: has('source', 'public'), onClick: only('source', 'public') }),
-      tile('From outside', plural(outside.length, 'account'), `${num(outside.filter((s) => !s.vendor).length)} without ExternalId on every statement`, { pressed: has('source', 'external'), onClick: only('source', 'external') }),
+      tile('From outside', plural(outside.length, 'account'), `${num(outside.filter((s) => !s.vendor && s.cloud !== 'gcp').length)} without ExternalId on every statement${outside.some((s) => s.cloud === 'gcp') ? ` · ${num(outside.filter((s) => s.cloud === 'gcp').length)} in Google Cloud` : ''}`, { pressed: has('source', 'external'), onClick: only('source', 'external') }),
       tile('CI and web identity', plural(ci.length, 'provider'), clusters ? `+ ${plural(clusters, 'EKS cluster')}, counted on their accounts` : 'GitHub, Bitbucket, Google, Cognito…', { pressed: has('source', 'oidc'), onClick: only('source', 'oidc') }),
       tile('Between your accounts', plural(between, 'line'), hubs.size ? `+ ${plural(hubs.size, 'hub')} reaching ${num(hubThreshold())}+ accounts` : 'one account trusting another', { pressed: has('source', 'connected'), onClick: only('source', 'connected') }),
       tile('Never used', plural(m.usage.no, 'way in', 'ways in'), `${num(m.usage.iam)} more only IAM says are used`, { pressed: has('used', 'no'), onClick: only('used', 'no') }));
@@ -440,11 +454,11 @@ export async function trustPage(ctx) {
       else if (n.env) { label = n.name; sub = `${plural(n.n, 'account')}${n.high ? ` · ${num(n.high)} high` : ''}${n.medium ? ` · ${num(n.medium)} medium` : ''}`; kind = 'group'; chevron = n.open ? '▾' : '▸'; color = n.color; }
       else if (n.src) {
         const x = n.src; label = x.label; worst = x.worst; kind = 'source';
-        sub = [x.group === 'external-account' ? (x.vendor ? 'ExternalId' : 'no ExternalId') : SHORT[x.group], plural(x.roles, 'role'), plural(x.accounts, 'account'), x.highRiskRoles ? `${num(x.highRiskRoles)} high-risk` : null].filter(Boolean).join(' · ');
+        sub = [x.group === 'external-account' ? (x.cloud === 'gcp' ? 'outside your organization' : x.vendor ? 'ExternalId' : 'no ExternalId') : SHORT[x.group], plural(x.roles, x.cloud === 'gcp' ? 'way in' : 'role'), plural(x.accounts, x.cloud === 'gcp' ? 'project' : 'account'), x.highRiskRoles ? `${num(x.highRiskRoles)} high-risk` : null].filter(Boolean).join(' · ');
       } else {
         const a = n.acc; label = a.name; kind = 'account'; color = ENV_COLOR[a.env] || null; dashed = !a.inScope || a.planned;
         sub = a.planned ? `${a.aws} · planned, not scanned` : !a.inScope ? `${a.aws} · not in your scope`
-          : `${a.aws} · ${a.inbound.high ? `${num(a.inbound.high)} high · ` : ''}${a.inbound.medium ? `${num(a.inbound.medium)} medium · ` : ''}${plural(a.inbound.roles, 'role')} reachable${a.clusterSources ? ` · ${plural(a.clusterSources, 'cluster')}` : ''}`;
+          : `${a.cloud === 'gcp' ? 'Google Cloud' : a.aws} · ${a.inbound.high ? `${num(a.inbound.high)} high · ` : ''}${a.inbound.medium ? `${num(a.inbound.medium)} medium · ` : ''}${plural(a.inbound.roles, a.cloud === 'gcp' ? 'service account' : 'role')} reachable${a.clusterSources ? ` · ${plural(a.clusterSources, 'cluster')}` : ''}`;
         if (hubs.has(a.id)) sub = `${a.aws} · hub: reaches ${num(M.links.filter((l) => l.from === a.id).length)} accounts`;
       }
       const isSel = S.sel === n.id;
@@ -689,7 +703,7 @@ export async function trustPage(ctx) {
           h('span', { class: 'tm2-c-risk tiny' }, g.attention ? h('b', { class: 'tm-bad' }, `${num(g.attention)} need attention`) : '', g.admin ? h('span', { class: 'tm2-chip bad', title: 'Ways in that reach an administrator role' }, `ADMIN ×${num(g.admin)}`) : null)),
         open && h('div', { class: 'tm2-way-more tm2-grp-more' },
           h('div', null, h('div', { class: 'tm2-cap' }, `ACCOUNTS${g.members.length < g.ways ? ` · THE FIRST ${g.members.length}` : ''}`),
-            h('div', { class: 'tm2-grp-list' }, g.members.map((x) => h('a', { class: 'tm2-grp-acct', href: `#/identities/${x.roleId}?tab=policies` },
+            h('div', { class: 'tm2-grp-list' }, g.members.map((x) => h('a', { class: 'tm2-grp-acct', href: roleHref(x) },
               h('span', { class: `tm2-dot tm2-dot-${x.attention ? x.worst : 'none'}` }), h('span', null, x.account), h('span', { class: 'tiny muted' }, `${envName(x.env) || ''}${x.sessions ? ` · ${num(x.sessions)} sessions` : ''}${x.expected ? ' · expected' : x.accepted ? ' · accepted' : ''}`))))),
           h('div', null, h('div', { class: 'tm2-cap' }, 'CONDITIONS'), g.conditions.length ? g.conditions.map((c) => h('code', { class: 'cond-line' }, c)) : h('p', { class: 'small muted' }, 'None: the principal alone is enough.'),
             h('div', { class: 'tm2-cap', style: 'margin-top:8px' }, 'REVIEW'),
@@ -726,7 +740,7 @@ export async function trustPage(ctx) {
       return h('div', { class: `tm2-way${open ? ' open' : ''}`, role: 'row' },
         h('button', { type: 'button', class: 'tm2-way-main', 'aria-expanded': String(open), onClick: () => { open ? S.expanded.delete(id) : S.expanded.add(id); drawWays(); } },
           h('span', { class: `tm2-dot tm2-dot-${e.attention || e.worst === 'low' || e.worst === 'info' || e.worst === 'none' ? e.worst : 'none'}`, title: e.attention ? e.worst : `${e.worst}${e.expected ? ', expected' : e.accepted ? ', accepted' : ''}` }),
-          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, e.role, ...reviewChips(e)), h('span', { class: 'tiny muted' }, `${e.account} · ${e.awsAccountId} · ${e.sid || `statement ${e.statement + 1}`}`)),
+          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, e.role, ...reviewChips(e)), h('span', { class: 'tiny muted' }, `${isGcp(e) ? `project ${e.account}` : `${e.account} · ${e.awsAccountId}`} · ${e.sid || `statement ${e.statement + 1}`}`)),
           h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${e.group}` }, e.pkind === 'eks' ? 'EKS' : SHORT[e.group] || e.group), h('span', { class: 'tm-ell' }, e.named?.name || e.source)),
             h('span', { class: 'mono tiny muted tm-ell' }, e.named ? `${e.principalAccount || e.source} · ${e.principal}` : e.principal)),
           h('span', { class: 'tm2-c-guard' }, e.conditions.length ? [...g.map((t) => h('span', { class: 'tm2-guard' }, t)), g.length < e.conditions.length ? h('span', { class: 'tiny muted' }, `+${e.conditions.length - g.length}`) : null]
@@ -751,7 +765,7 @@ export async function trustPage(ctx) {
             h('p', { class: 'small', style: 'margin:0' }, (e.expected || e.expectedDue).note),
             h('p', { class: 'tiny muted', style: 'margin:2px 0 0' }, [e.expected?.by, e.expected?.at && ago(e.expected.at), (e.expected || e.expectedDue).reviewBy && `look again by ${String((e.expected || e.expectedDue).reviewBy).slice(0, 10)}`].filter(Boolean).join(' · ')),
             canDecide() && h('button', { type: 'button', class: 'btn xs ghost', style: 'margin-top:4px', onClick: () => unexpect((e.expected || e.expectedDue).id) }, 'No longer expected')),
-          h('div', { class: 'row tm2-way-acts', style: 'gap:8px;margin-top:8px' }, h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=policies` }, 'Open the role'), h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=history` }, 'Its history'),
+          h('div', { class: 'row tm2-way-acts', style: 'gap:8px;margin-top:8px' }, h('a', { class: 'btn sm', href: roleHref(e) }, isGcp(e) ? (e.gcpId ? 'Open the service account' : 'Its project\'s identities') : 'Open the role'), !isGcp(e) && h('a', { class: 'btn sm', href: `#/identities/${e.roleId}?tab=history` }, 'Its history'),
             !e.expected && e.group !== 'service' && expectBtn({ source: e.sourceKey, sourceLabel: e.source, roles: e.role, accounts: [e.awsAccountId], ways: [e] }),
             e.type === 'aws-root' && h('a', { class: 'btn sm', href: `#/identities/${e.roleId}/trust`, title: 'Name the identities seen coming in from this account, with safety checks and approval' }, 'Specific trust draft →'))));
     };
@@ -833,7 +847,7 @@ export async function trustPage(ctx) {
       rolesBox,
       h('div', { class: 'tm-actions' }, filterTo(l.query), waysBtn(), expectBtn({ source: l.from, sourceLabel: nameOf(l.from), accounts: [to?.aws].filter(Boolean), sel: l.id })));
       const key = `${q()}|${l.id}`;
-      const fill = (r) => rolesBox.replaceChildren(listOf('Roles behind it', groupRoles(r.rows).map((x) => item({ label: x.role, worst: x.worst, href: `#/identities/${x.roleId}?tab=policies`,
+      const fill = (r) => rolesBox.replaceChildren(listOf(r.rows.some(isGcp) ? 'What it reaches' : 'Roles behind it', groupRoles(r.rows).map((x) => item({ label: x.role, worst: x.worst, href: roleHref(x),
         meta: [x.findings.slice(0, 2).join(' · ') || (x.conditions ? plural(x.conditions, 'condition') : 'no conditions'), usedText(x), x.risk ? `${x.risk} risk role` : null].filter(Boolean).join(' · ') }))),
       r.total > r.rows.length && h('p', { class: 'tiny muted' }, `The first ${num(r.rows.length)} of ${num(r.total)} statements; the rest under Its ways in.`));
       if (lineKey === key && lineRoles) fill(lineRoles);
@@ -842,7 +856,8 @@ export async function trustPage(ctx) {
       const out = M.links.filter((x) => x.from === s.id);
       const chainBox = h('div', { class: 'tm-sect' });
       panel.replaceChildren(headOf(s.named?.inOrg ? 'YOUR ORGANISATION · NOT ONBOARDED' : (KIND_NAME[s.group] || s.group).toUpperCase(), s.label,
-        s.group === 'external-account' ? `${s.named ? `${s.aws} · ` : ''}AWS account not connected here · ${s.vendor ? 'every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : null, s.worst),
+        s.group === 'external-account' && s.cloud === 'gcp' ? `${s.aws || ''} · ${s.named?.inOrg ? 'your project, no connection reads it' : 'outside your organization (Google Cloud)'}`
+          : s.group === 'external-account' ? `${s.named ? `${s.aws} · ` : ''}AWS account not connected here · ${s.vendor ? 'every statement requires sts:ExternalId' : 'at least one statement has no sts:ExternalId'}` : null, s.worst),
       s.named && h('div', { class: 'tm-named' }, s.named.purpose && h('p', { class: 'small', style: 'margin:0' }, s.named.purpose),
         h('p', { class: 'tiny muted', style: 'margin:2px 0 0' }, [s.named.owner && `owner: ${s.named.owner}`, s.named.reviewBy && `review by ${String(s.named.reviewBy).slice(0, 10)}`,
           s.named.vendor && (s.named.name === s.named.vendor ? 'named from the public list of known AWS accounts (fwd:cloudsec)' : `known as ${s.named.vendor} in fwd:cloudsec's list`)].filter(Boolean).join(' · '))),
@@ -853,21 +868,23 @@ export async function trustPage(ctx) {
       listOf('Accounts it can get into', out.sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst]).map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) }))),
       chainBox,
       h('div', { class: 'tm-actions' }, filterTo(s.query), waysBtn(), expectBtn({ source: s.id, sourceLabel: s.label, sel: s.id }), nameBtn(s),
-        s.named?.inOrg && session.user.permissions.includes('accounts') && h('button', { type: 'button', class: 'btn sm', onClick: () => addPlanned(s) }, 'Add as planned')));
+        s.named?.inOrg && s.cloud !== 'gcp' && session.user.permissions.includes('accounts') && h('button', { type: 'button', class: 'btn sm', onClick: () => addPlanned(s) }, 'Add as planned')));
       loadChain(s.id, chainBox);
     } else if (a) {
       acctChain = h('div', { class: 'tm-sect' });
       const inn = M.links.filter((x) => x.to === a.id), out = M.links.filter((x) => x.from === a.id);
-      panel.replaceChildren(headOf(a.planned ? 'PLANNED · NOT ONBOARDED' : `${(envName(a.env) || 'account').toUpperCase()} ACCOUNT${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
+      const gp = a.cloud === 'gcp';
+      panel.replaceChildren(headOf(a.planned ? 'PLANNED · NOT ONBOARDED' : `${(envName(a.env) || 'account').toUpperCase()} ${gp ? 'GOOGLE CLOUD PROJECT' : 'ACCOUNT'}${a.inScope ? '' : ' · NOT IN YOUR SCOPE'}`, a.name, a.planned ? `${a.aws} · not scanned yet` : a.aws, a.inbound.worst),
         a.planned ? facts([['Who can get in', 'Not known until it is onboarded.', 'warn'], ['It can get into', out.length ? plural(out.length, 'account') : 'nothing seen']])
-          : facts([['From outside it', a.inbound.roles ? `${plural(a.inbound.roles, 'role')}${a.inbound.high ? ` · ${num(a.inbound.high)} high` : ''}${a.inbound.medium ? ` · ${num(a.inbound.medium)} medium` : ''}` : 'no role', a.inbound.high ? 'bad' : null],
-            ['Inside it', `${plural(a.own, 'role')} trust the account itself · ${plural(a.services, 'role')} AWS services${a.clusters ? ` · ${plural(a.clusters, 'role')} its ${plural(a.clusterSources, 'EKS cluster')}` : ''}`]]),
+          : facts([['From outside it', a.inbound.roles ? `${plural(a.inbound.roles, gp ? 'service account' : 'role')}${a.inbound.high ? ` · ${num(a.inbound.high)} high` : ''}${a.inbound.medium ? ` · ${num(a.inbound.medium)} medium` : ''}` : gp ? 'nothing' : 'no role', a.inbound.high ? 'bad' : null],
+            ['Inside it', gp ? `${plural(a.own, 'service account')} reached from inside the project (its own identities, key holders) · ${plural(a.services, 'service account')} Google service agents${a.clusters ? ` · ${plural(a.clusters, 'service account')} its ${plural(a.clusterSources, 'GKE workload')}` : ''}`
+              : `${plural(a.own, 'role')} trust the account itself · ${plural(a.services, 'role')} AWS services${a.clusters ? ` · ${plural(a.clusters, 'role')} its ${plural(a.clusterSources, 'EKS cluster')}` : ''}`]]),
         !a.planned && listOf('Who can get in', inn.sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst]).map((x) => item({ label: nameOf(x.from), worst: x.worst,
           meta: `${x.kind === 'account' ? 'your account' : SHORT[M.sources.find((y) => y.id === x.from)?.group] || ''} · ${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) })), 'nothing from outside this account'),
         out.length > 0 && listOf('It can get into', out.map((x) => item({ label: nameOf(x.to), worst: x.worst, meta: `${plural(x.roles, 'role')} · ${usedText(x)}`, onClick: () => pick(x.id) }))),
         out.length > 0 && acctChain,
         h('div', { class: 'tm-actions' }, a.planned ? (session.user.permissions.includes('accounts') ? h('a', { class: 'btn sm primary', href: `#/accounts/new?from=${a.id}` }, 'Onboard it') : null)
-          : [filterTo(`account:${a.aws}`), waysBtn(), h('a', { class: 'btn sm', href: `#/space?view=account&account=${a.id}` }, 'Open in Space')]));
+          : [filterTo(`account:${a.aws}`), waysBtn(), h('a', { class: 'btn sm', href: `#/space?view=account&account=${encodeURIComponent(a.id)}` }, 'Open in Space')]));
     } else {
       // nothing picked: what needs attention most, and how to read the map
       const worst = [...M.sources].filter((x) => ATTENTION.has(x.worst)).sort((x, y) => SEV_ORDER[x.worst] - SEV_ORDER[y.worst] || y.roles - x.roles).slice(0, 6);
@@ -912,7 +929,7 @@ export async function trustPage(ctx) {
       box.replaceChildren(h('div', { class: 'tm-sect-h' }, h('span', null, 'Where it leads next'), h('span', { class: 'mono' }, num(c.roles))),
         h('p', { class: 'tiny', style: 'margin:4px 0' }, `Through the ${plural(c.levels[0].total, 'role')} it gets into: ${plural(sure.length, 'more role')} named in their trust${maybe.length ? `, ${num(maybe.length)} more possible (a whole account trusted)` : ''}`,
           c.moreAccounts ? `, in ${plural(c.moreAccounts, 'more account')}` : '', c.admin ? h('b', { class: 'tm-bad' }, ` · ${plural(c.admin, 'administrator role')} on the way`) : '', '.'),
-        h('div', { class: 'tm-list' }, [...sure, ...maybe].slice(0, 8).map((r) => item({ label: r.role, worst: r.admin ? 'high' : 'none', href: `#/identities/${r.roleId}?tab=policies`,
+        h('div', { class: 'tm-list' }, [...sure, ...maybe].slice(0, 8).map((r) => item({ label: r.role, worst: r.admin ? 'high' : 'none', href: roleHref(r),
           meta: `${r.account} · from ${r.from}${r.sure ? '' : ' · possible'}${r.admin ? ' · admin' : ''}` }))),
         sure.length + maybe.length > 8 && h('p', { class: 'tiny muted' }, `and ${num(sure.length + maybe.length - 8)} more`));
     } catch { box.replaceChildren(); }
@@ -965,7 +982,7 @@ export async function trustPage(ctx) {
   ctx.onLeave(poll(() => { if (!loading) refetch(); }, 3 * 60_000));
 
   if (S.sel && !known(S.sel)) S.sel = null;
-  root.append(cloudTabs('aws', '#/trust'), header, filterBar, tiles, h('div', { class: 'tm2-viewwrap' }, tabBar, body), live);
+  root.append(header, filterBar, tiles, h('div', { class: 'tm2-viewwrap' }, tabBar, body), live);
   address();
   drawAll();
   loadViews();

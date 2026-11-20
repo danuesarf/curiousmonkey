@@ -4,6 +4,7 @@
 // High and medium findings are filed; low ones (a Bitbucket step wildcard, your own account with MFA) stay on the map.
 // Runs in the worker every minute; an advisory lock lets one worker at a time do it, and it only writes when the ways
 // in were worked out again since the last run.
+import { syncGcpWaysSeen } from './gcp/trustEdges.js';
 import { query, pool } from './db.js';
 import { trustIndex, flagKey } from './trustmap.js';
 
@@ -37,7 +38,7 @@ export async function trustTick({ log = () => {}, force = false } = {}) {
     try {
       const ix = await trustIndex();
       if (!force && ix.at.getTime() <= lastSynced) return null;
-      const out = { ...(await fileFindings(ix)), ...(await feedChanges(ix)) };
+      const out = { ...(await fileFindings(ix)), ...(await feedChanges(ix)), gcpWays: await syncGcpWaysSeen(ix.edges) };
       lastSynced = ix.at.getTime();
       if (out.opened || out.resolved || out.changes) log('info', 'trust findings filed', out);
       return out;
@@ -46,16 +47,21 @@ export async function trustTick({ log = () => {}, force = false } = {}) {
 }
 
 async function fileFindings(ix) {
-  const rows = [];
+  const rows = [], grows = [];
   for (const e of ix.edges) {
     if (e.expected) continue;                                 // expected trust: its findings are not filed
     for (const f of e.findings) {
       if (f.severity !== 'high' && f.severity !== 'medium') continue;   // low ones stay on the map, out of the inbox
-      rows.push({ role: e.roleId, key: flagKey(e, f.id), title: f.title, severity: f.severity, reason: f.detail || f.title,
-        evidence: `${e.source} → ${e.role} (${e.account}), statement ${e.sid || e.statement + 1}: ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`.slice(0, 2000),
-        suggestion: f.fix || SUGGEST[f.id] || null, control: f.rule ? f.id : `trust.${f.id}` });
+      const r = { role: e.roleId, key: flagKey(e, f.id), title: f.title, severity: f.severity, reason: f.detail || f.title,
+        evidence: (e.cloud === 'gcp'
+          ? `${e.source} → ${e.role} (project ${e.account}), ${e.sid || e.type}${e.grantedOn ? ` on ${e.grantedOn}` : ''}: ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`
+          : `${e.source} → ${e.role} (${e.account}), statement ${e.sid || e.statement + 1}: ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`).slice(0, 2000),
+        suggestion: f.fix || SUGGEST[f.id] || null, control: f.rule ? f.id : e.cloud === 'gcp' ? `gcp.${f.id}` : `trust.${f.id}` };
+      // Google Cloud: no AWS role; the subject is what the way in reaches, which outlives a scan
+      if (e.cloud === 'gcp') grows.push({ ...r, label: e.role, project: e.account }); else rows.push(r);
     }
   }
+  const g = await fileGcpFindings(grows);
   const cols = (k) => rows.map((r) => r[k]);
   // new or changed findings; an unchanged one is left alone, so alerts and "updated" stay meaningful
   const up = await query(
@@ -71,8 +77,28 @@ async function fileFindings(ix) {
   // gone from the trust policy, or now expected: resolved (a decision stays with it, should it come back)
   const res = await query(
     `UPDATE flags f SET status='resolved', updated_at=now()
-      WHERE f.category = 'trust' AND f.status = 'open'
+      WHERE f.category = 'trust' AND f.status = 'open' AND f.role_id IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM unnest($1::uuid[], $2::text[]) AS x(r, k) WHERE x.r = f.role_id AND x.k = f.key)`, [cols('role'), cols('key')]);
+  return { opened: up.rows.filter((r) => r.inserted).length + g.opened, updated: up.rows.filter((r) => !r.inserted).length + g.updated, resolved: res.rowCount + g.resolved };
+}
+
+/** The same for Google Cloud ways in: flags with a gcp_subject instead of a role. */
+async function fileGcpFindings(rows) {
+  const cols = (k) => rows.map((r) => r[k]);
+  const up = rows.length ? await query(
+    `INSERT INTO flags(gcp_subject, gcp_label, gcp_project, category, key, title, actions, resources, reason, evidence, suggestion, suggested_resources, severity, control, status, updated_at)
+     SELECT s, l, p, 'trust', k, t, '{}', '{}', re, ev, sg, '{}', sv, ct, 'open', now()
+       FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS x(s, l, p, k, t, re, ev, sg, sv, ct)
+     ON CONFLICT (gcp_subject, category, key) WHERE gcp_subject IS NOT NULL DO UPDATE SET title=EXCLUDED.title, reason=EXCLUDED.reason, evidence=EXCLUDED.evidence, suggestion=EXCLUDED.suggestion,
+       severity=EXCLUDED.severity, control=EXCLUDED.control, gcp_label=EXCLUDED.gcp_label, gcp_project=EXCLUDED.gcp_project, status='open', updated_at=now()
+       WHERE (flags.title, flags.reason, flags.evidence, coalesce(flags.suggestion, ''), flags.severity, flags.status, coalesce(flags.control, ''))
+          IS DISTINCT FROM (EXCLUDED.title, EXCLUDED.reason, EXCLUDED.evidence, coalesce(EXCLUDED.suggestion, ''), EXCLUDED.severity, 'open', EXCLUDED.control)
+     RETURNING (xmax = 0) AS inserted`,
+    [cols('role'), cols('label'), cols('project'), cols('key'), cols('title'), cols('reason'), cols('evidence'), cols('suggestion'), cols('severity'), cols('control')]) : { rows: [] };
+  const res = await query(
+    `UPDATE flags f SET status='resolved', updated_at=now()
+      WHERE f.category = 'trust' AND f.status = 'open' AND f.gcp_subject IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM unnest($1::text[], $2::text[]) AS x(s, k) WHERE x.s = f.gcp_subject AND x.k = f.key)`, [cols('role'), cols('key')]);
   return { opened: up.rows.filter((r) => r.inserted).length, updated: up.rows.filter((r) => !r.inserted).length, resolved: res.rowCount };
 }
 
@@ -85,18 +111,20 @@ async function feedChanges(ix) {
     if (!c || e.group === 'service' || new Date(c.at).getTime() < cutoff) continue;
     const weakened = c.kind === 'weakened';
     const sev = e.worst === 'high' ? 'high' : e.worst === 'medium' || weakened ? 'warn' : 'info';
-    rows.push({ account: e.accountId, role: e.roleId, kind: weakened ? 'trust-weakened' : 'new-trust', severity: sev,
-      title: weakened ? `${c.guards.join(', ')} taken off ${e.role}'s trust in ${e.source}` : `${e.source} can now get into ${e.role}`,
+    const gcp = e.cloud === 'gcp';
+    rows.push({ account: gcp ? null : e.accountId, role: gcp ? null : e.roleId, project: gcp ? e.account : null, kind: weakened ? 'trust-weakened' : 'new-trust', severity: sev,
+      title: weakened ? (gcp ? `The IAM condition was taken off ${e.source}'s way into ${e.role}` : `${c.guards.join(', ')} taken off ${e.role}'s trust in ${e.source}`)
+        : gcp ? `${e.source} can now get into ${e.role} (Google Cloud)` : `${e.source} can now get into ${e.role}`,
       detail: `${e.account} · statement ${e.sid || e.statement + 1} · ${e.principal}${e.conditions.length ? ` · ${e.conditions.join('; ')}` : ' · no conditions'}`.slice(0, 1000),
       dedupe: `trust:${weakened ? 'w' : 'n'}:${e.roleId}:${e.statement}:${e.principal}:${new Date(c.at).toISOString()}`.slice(0, 500), at: c.at });
   }
   if (!rows.length) return { changes: 0 };
   const cols = (k) => rows.map((r) => r[k]);
   const r = await query(
-    `INSERT INTO changes(account_id, role_id, kind, severity, title, detail, dedupe, at)
-     SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::timestamptz[])
+    `INSERT INTO changes(account_id, role_id, gcp_project, kind, severity, title, detail, dedupe, at)
+     SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::timestamptz[])
      ON CONFLICT (dedupe) DO NOTHING`,
-    [cols('account'), cols('role'), cols('kind'), cols('severity'), cols('title'), cols('detail'), cols('dedupe'), cols('at')]);
+    [cols('account'), cols('role'), cols('project'), cols('kind'), cols('severity'), cols('title'), cols('detail'), cols('dedupe'), cols('at')]);
   return { changes: r.rowCount };
 }
 
