@@ -11,6 +11,11 @@ import { normalizeStatements, arr } from './analyzer/policy.js';
 import { isIdentityCenter, instanceKey, instanceLabel, instanceOf, identityCenters } from './identityCenter.js';
 import { toCsv as toCsvRows } from './csv.js';
 
+// the titles of Google Cloud's findings (src/gcp/trust.js wayFindings), for the Finding menu
+const GCP_FINDING_TITLES = { public: 'Granted to everyone', 'public-impersonator': 'Anyone can become it', external: 'Outside your domain', 'external-impersonator': 'Someone outside your domain can become it',
+  'foreign-sa': 'A service account from outside your organisation', 'unread-project': 'From your project that no connection reads', 'wif-broad': 'Any identity from a federated source',
+  'domain-impersonator': 'Everyone in a domain can become it', 'basic-role': 'Through Owner or Editor', 'wide-impersonation': 'Granted on a whole project, folder or organization', 'key-create': 'Can mint keys for it', key: 'User-managed keys',
+  conditional: 'Conditional binding', 'cross-cloud': 'Across clouds' };
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };   // 'none' must be ranked, or nothing ever beats it
 export const FINDINGS = {
   public: 'Anyone can assume it (principal "*")',
@@ -287,9 +292,11 @@ function matchesSeen(e, s, subs = []) {
 // ---------------------------------------------------------------- query language
 // key:value terms, all of which must match; a comma inside a value means either (finding:public,account-root), a
 // leading - excludes, quotes keep spaces, anything else is free text
-export const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv'];
+export const KEYS = ['account', 'from', 'source', 'type', 'provider', 'finding', 'severity', 'role', 'roleid', 'cond', 'has', 'no', 'used', 'env', 'attention', 'expected', 'decided', 'new', 'fromenv', 'cloud'];
 // source: also takes the kind of identity provider
-export const PROVIDER_KINDS = ['github', 'bitbucket', 'gitlab', 'eks', 'terraform', 'circleci', 'azure', 'buildkite', 'google', 'cognito', 'facebook', 'amazon', 'identity-center'];
+export const PROVIDER_KINDS = ['github', 'bitbucket', 'gitlab', 'eks', 'gke', 'terraform', 'circleci', 'azure', 'buildkite', 'google', 'cognito', 'facebook', 'amazon', 'identity-center'];
+// counted on the account (project) it is in, not drawn as a line: the account's own Kubernetes clusters
+const ON_ACCOUNT = new Set(['eks', 'gke']);
 export function parseQuery(q) {
   const terms = [];
   const re = /(-?)(\w+):("([^"]*)"|\S+)|"([^"]*)"|(\S+)/g; let m;
@@ -306,6 +313,8 @@ const yes = (v) => !['no', 'false', '0'].includes(v);
 function valueMatches(e, key, v) {
   switch (key) {
     case 'account': return lc(e.account).includes(v) || e.awsAccountId === v || e.accountId === v;
+    // which cloud the way in is into: aws, or gcp (google)
+    case 'cloud': return v === 'gcp' || v === 'google' ? e.cloud === 'gcp' : v === 'aws' ? e.cloud !== 'gcp' : false;
     case 'from': return e.principalAccount === v || lc(e.principalAccountName).includes(v) || lc(e.source).includes(v) || lc(e.named?.name).includes(v);
     case 'source': return PROVIDER_KINDS.includes(v) ? e.pkind === v
       : lc(e.group).startsWith(v) || (v === 'aws' && /account/.test(e.group)) || (v === 'external' && e.group === 'external-account') || (v === 'connected' && e.group === 'connected-account') || (v === 'same' && e.group === 'same-account');
@@ -314,7 +323,7 @@ function valueMatches(e, key, v) {
     case 'finding': return e.findings.some((f) => f.id === v || f.id.startsWith(v));
     case 'severity': return e.findings.some((f) => f.severity === v);
     case 'role': return lc(e.role).includes(v);
-    case 'roleid': return String(e.roleId) === v; // one role exactly, for links from its page
+    case 'roleid': return lc(e.roleId) === v; // one role exactly, for links from its page (Google Cloud subjects have capitals)
     case 'cond': return e.conditions.some((c) => lc(c).includes(v));
     case 'env': return lc(e.environment).startsWith(v);
     // the environment of the account it comes from, when that is one of yours
@@ -324,7 +333,9 @@ function valueMatches(e, key, v) {
     case 'no': if (v === 'admin') return !e.admin; if (v === 'name') return !e.named;
       return v === 'conditions' ? e.conditions.length === 0 : v === 'findings' ? !e.findings.some((f) => f.severity !== 'info') : v === 'seen' ? e.seen.length === 0 : false;
     // yes: a sign-in came through it · iam: none did, but IAM says the role is used · no: neither
-    case 'used': return v === 'yes' || v === 'true' ? e.seen.length > 0 : v === 'iam' ? !e.seen.length && !!e.lastUsed : !e.seen.length && !e.lastUsed;
+    // unknown: Google Cloud with no audit-log usage read for the project (or a way in the logs cannot tell)
+    case 'used': return v === 'yes' || v === 'true' ? e.seen.length > 0 : v === 'iam' ? !e.seen.length && !!e.lastUsed : v === 'unknown' ? !!e.useUnknown && !e.seen.length
+      : !e.seen.length && !e.lastUsed && !e.useUnknown;
     // review state: needs attention (an open high or medium finding), expected, every finding decided
     case 'attention': return yes(v) === !!e.attention;
     case 'expected': return v === 'due' ? !!e.expectedDue : yes(v) === !!e.expected;
@@ -483,9 +494,9 @@ async function annotate(edges, roles, byAws, custom = []) {
     changes.set(r.id, m);
   }
   const rules = (await query(`SELECT e.*, u.name AS created_by_name FROM trust_expected e LEFT JOIN users u ON u.id = e.created_by`).catch(() => ({ rows: [] }))).rows;
-  const flags = new Map((await query(`SELECT f.id, f.role_id, f.key, f.status, d.decision, d.note, d.decided_at, u.name AS decided_by
+  const flags = new Map((await query(`SELECT f.id, f.role_id, f.gcp_subject, f.key, f.status, d.decision, d.note, d.decided_at, u.name AS decided_by
       FROM flags f LEFT JOIN review_decisions d ON d.flag_id = f.id LEFT JOIN users u ON u.id = d.decided_by WHERE f.category = 'trust'`).catch(() => ({ rows: [] }))).rows
-    .map((f) => [`${f.role_id}|${f.key}`, f]));
+    .map((f) => [`${f.role_id || f.gcp_subject}|${f.key}`, f]));
   for (const e of edges) {
     const c = changes.get(e.roleId)?.get(e.principal);
     if (c) e.change = c;
@@ -504,7 +515,7 @@ async function annotate(edges, roles, byAws, custom = []) {
       const who = ps ? idc.get(`${e.awsAccountId}|${ps}`) : null;
       if (who) e.idc = { permissionSet: ps, count: who.length, who: who.slice(0, 12) };
     }
-    e.admin = Number(e.granted || 0) >= ADMIN_AT;
+    e.admin = e.cloud === 'gcp' ? !!e.gcpAdmin : Number(e.granted || 0) >= ADMIN_AT;
     e.fromEnv = byAws.get(e.principalAccount)?.environment || null;
     for (const cc of custom) {
       if (e.group === 'service' || !cc.test(e)) continue;
@@ -552,6 +563,13 @@ const SIGNATURE = `SELECT concat_ws('|',
     (SELECT count(*) || ':' || coalesce(max(seen_at)::text, '') FROM idc_assignments),
     (SELECT count(*) || ':' || coalesce(max(updated_at)::text, '') || ':' || coalesce(sum(hashtext(control_id || coalesce(severity, '') || enabled::text))::bigint, 0) FROM control_overrides),
     (SELECT count(*) || ':' || coalesce(max(updated_at)::text, '') FROM custom_controls),
+    (SELECT count(*) || ':' || coalesce(max(analyzed_at)::text, '') FROM gcp_principals),
+    (SELECT count(*) || ':' || coalesce(max(first_seen)::text, '') || ':' || count(weakened_at) FROM gcp_ways_seen),
+    (SELECT coalesce(max(last_day)::text, '') FROM gcp_usage_summary),
+    (SELECT count(*) || ':' || coalesce(string_agg(project_id || coalesce(environment, ''), ',' ORDER BY project_id), '') FROM gcp_projects),
+    (SELECT count(*) FROM gcp_seen_projects),
+    (SELECT coalesce(max(updated_at)::text, '') FROM app_settings),
+    (SELECT count(*) || ':' || coalesce(max(seen_at)::text, '') || ':' || coalesce(sum(hashtext(coalesce(extra->>'publicAccessPrevention', '')))::bigint, 0) FROM resources WHERE cloud = 'gcp'),
     to_char(now(), 'YYYY-MM-DD HH24')) AS sig`;
 let index = null, pending = null;
 
@@ -576,16 +594,20 @@ async function buildIndex(sig) {
   const edges = roles.flatMap((r) => edgesOf(r, ctx));
   // the workspace's policy (Manage policy): a control turned off is not a finding; one given a severity gets it
   const policy = await loadPolicy();
+  // Google Cloud: its ways in, as edges (src/gcp/trustEdges.js); the workspace's gcp.* policy is already applied to them
+  const g = await import('./gcp/trustEdges.js').then((m) => m.gcpTrustEdges()).catch((err) => { console.error('Google Cloud ways in not built', err); return { edges: [], accounts: [] }; });
   if (policy.over.size) for (const e of edges) {
     e.findings = e.findings.flatMap((f) => { const severity = severityOf(policy, `trust.${f.id}`, f.severity); return severity ? [{ ...f, severity }] : []; });
     e.worst = worstOf(e.findings);
   }
+  edges.push(...g.edges);
+  accounts.push(...g.accounts);
   const byAws = new Map(accounts.map((a) => [a.account_id, a]));
   // custom controls about ways in: the Trust map's own query language, each match a finding
   const custom = policy.rules.filter((x) => x.target === 'way-in').map((x) => ({ ...x, ...compileWayIn(x.rule) })).filter((x) => !x.errors.length);
   await annotate(edges, roles, byAws, custom);
   edges.sort((a, b) => (SEV_ORDER[a.worst] ?? 9) - (SEV_ORDER[b.worst] ?? 9) || a.account.localeCompare(b.account) || a.role.localeCompare(b.role));
-  return { sig, at: new Date(), edges, customTitles: Object.fromEntries(custom.map((x) => [x.id, x.name])), accounts: accounts.map((a) => ({ id: a.id, name: a.name, account_id: a.account_id, environment: a.environment, status: a.status })) };
+  return { sig, at: new Date(), edges, customTitles: Object.fromEntries(custom.map((x) => [x.id, x.name])), accounts: accounts.map((a) => ({ id: a.id, name: a.name, account_id: a.account_id, environment: a.environment, status: a.status, cloud: a.cloud || 'aws', title: a.title || null })) };
 }
 
 // while the Trust map is in use, look for changes every minute, so a rebuild rarely waits for a request
@@ -647,7 +669,7 @@ export function forViewer(e, user) {
  * counted on the account instead.
  */
 export function fromOf(e, byAws) {
-  if (e.group === 'same-account' || e.group === 'service' || e.pkind === 'eks') return null;
+  if (e.group === 'same-account' || e.group === 'service' || ON_ACCOUNT.has(e.pkind)) return null;
   if (e.group === 'connected-account') { const a = byAws.get(e.principalAccount); if (a) return a.id; }
   const key = /account/.test(e.group) ? `acct:${e.principalAccount}` : e.group === 'unknown' ? 'deleted' : `${e.group}:${e.source}`;
   return `src:${key}`;
@@ -725,7 +747,7 @@ export async function trustGroups(user, q = '', { sel = null, page = 0, size = 5
     g.sessions += e.sessions;
     if (e.lastSeen && (!g.lastSeen || e.lastSeen > g.lastSeen)) g.lastSeen = e.lastSeen;
     for (const f of e.flags || []) if (f.id && !f.decision && f.status === 'open') g.undecided.push(f.id);
-    if (g.members.length < 200) g.members.push({ roleId: e.roleId, account: e.account, awsAccountId: e.awsAccountId, env: e.environment, statement: e.statement, sid: e.sid,
+    if (g.members.length < 200) g.members.push({ roleId: e.roleId, gcpId: e.gcpId || null, cloud: e.cloud || 'aws', account: e.account, awsAccountId: e.awsAccountId, env: e.environment, statement: e.statement, sid: e.sid,
       worst: e.worst, attention: !!e.attention, expected: !!e.expected, accepted: !!e.accepted, sessions: e.sessions, lastSeen: e.lastSeen, admin: !!e.admin, risk: e.risk });
   }
   const groups = [...by.values()].map((g) => ({ ...g, accounts: g.accounts.size, undecided: g.undecided.slice(0, 500) }))
@@ -745,8 +767,14 @@ export async function trustChain(user, sel, { depth = 4 } = {}) {
   const byAws = new Map(ix.accounts.map((a) => [a.account_id, a]));
   const edges = scope ? ix.edges.filter((e) => scope.has(e.accountId)) : ix.edges;
   const byRoleArn = new Map(), byRootAcct = new Map();
+  // a role is named with or without its path; a Google service account by its IAM member
+  const norm = (arn) => String(arn || '').replace(/^(arn:aws[\w-]*:iam::\d{12}:role\/)(?:.*\/)?([^/]+)$/, '$1$2');
+  const add = (k, e) => { k = norm(k); if (!byRoleArn.has(k)) byRoleArn.set(k, []); byRoleArn.get(k).push(e); };
   for (const e of edges) {
-    if (e.type === 'aws-role') { if (!byRoleArn.has(e.principal)) byRoleArn.set(e.principal, []); byRoleArn.get(e.principal).push(e); }
+    if (e.type === 'aws-role') add(e.principal, e);
+    if (e.cloud === 'gcp' && String(e.principal).startsWith('serviceAccount:')) add(e.principal, e);   // a service account becoming another
+    if (e.awsSourceRoleArn) add(e.awsSourceRoleArn, e);                                                // an AWS role, into Google Cloud
+    if (e.gcp?.email) add(`serviceAccount:${e.gcp.email}`, e);                                          // a Google service account, into AWS
     if (e.type === 'aws-root' && e.principalAccount && e.principalAccount !== e.awsAccountId) { if (!byRootAcct.has(e.principalAccount)) byRootAcct.set(e.principalAccount, []); byRootAcct.get(e.principalAccount).push(e); }
   }
   const start = edges.filter((e) => fromOf(e, byAws) === sel || e.sourceKey === sel);
@@ -754,11 +782,11 @@ export async function trustChain(user, sel, { depth = 4 } = {}) {
   let frontier = [...new Map(start.map((e) => [e.roleId, { e, via: 'trust', sure: true }])).values()];
   for (const x of frontier) seen.add(x.e.roleId);
   for (let d = 0; d < depth && frontier.length; d++) {
-    levels.push({ depth: d + 1, roles: frontier.map(({ e, via, sure, from }) => ({ roleId: e.roleId, role: e.role, account: e.account, awsAccountId: e.awsAccountId, accountId: e.accountId,
+    levels.push({ depth: d + 1, roles: frontier.map(({ e, via, sure, from }) => ({ roleId: e.roleId, gcpId: e.gcpId || null, cloud: e.cloud || 'aws', role: e.role, account: e.account, awsAccountId: e.awsAccountId, accountId: e.accountId,
       risk: e.risk, admin: !!e.admin, via, sure, from: from || null })).sort((a, b) => (b.admin - a.admin) || a.account.localeCompare(b.account) || a.role.localeCompare(b.role)) });
     const next = new Map();
     for (const { e, sure } of frontier) {
-      for (const n of byRoleArn.get(e.roleArn) || []) if (!seen.has(n.roleId) && !next.has(n.roleId)) next.set(n.roleId, { e: n, via: 'role', sure, from: e.role });
+      for (const n of byRoleArn.get(norm(e.roleArn)) || []) if (!seen.has(n.roleId) && !next.has(n.roleId)) next.set(n.roleId, { e: n, via: 'role', sure, from: e.role });
       for (const n of byRootAcct.get(e.awsAccountId) || []) if (!seen.has(n.roleId) && !next.has(n.roleId)) next.set(n.roleId, { e: n, via: 'account', sure: false, from: e.role });
     }
     for (const id of next.keys()) seen.add(id);
@@ -859,7 +887,7 @@ async function workOut(user, q, { limit, mentions, sel }) {
   const findingCountsAll = {};
   for (const e of (others.length === terms.length ? matched : all.filter((e) => matchesQuery(e, others)))) for (const f of e.findings) findingCountsAll[f.id] = (findingCountsAll[f.id] || 0) + 1;
   // ways in by their worst finding, and by use (services left out: AWS uses them, nobody signs in)
-  const worstCounts = { high: 0, medium: 0, low: 0, info: 0, none: 0 }, usage = { yes: 0, iam: 0, no: 0 };
+  const worstCounts = { high: 0, medium: 0, low: 0, info: 0, none: 0 }, usage = { yes: 0, iam: 0, no: 0, unknown: 0 };
   const review = { attentionHigh: 0, attentionMedium: 0, expected: 0, expectedDue: 0, decided: 0, accepted: 0, undecided: 0, changed7: 0, weakened7: 0 };
   for (const e of matched) {
     worstCounts[e.worst] = (worstCounts[e.worst] || 0) + 1;
@@ -869,7 +897,7 @@ async function workOut(user, q, { limit, mentions, sel }) {
     if (e.flags?.length) { if (e.decided) review.decided++; else review.undecided++; }
     if (e.accepted) review.accepted++;
     if (e.change && e.group !== 'service' && Date.now() - new Date(e.change.at) <= 7 * 864e5) { review.changed7++; if (e.change.kind === 'weakened') review.weakened7++; }
-    if (e.group !== 'service') usage[e.seen.length ? 'yes' : e.lastUsed ? 'iam' : 'no']++;
+    if (e.group !== 'service') usage[e.seen.length ? 'yes' : e.lastUsed ? 'iam' : e.useUnknown ? 'unknown' : 'no']++;
   }
   // each finding at the worst severity it has anywhere the viewer can see, so a menu can order them
   const severities = {};
@@ -877,7 +905,9 @@ async function workOut(user, q, { limit, mentions, sel }) {
   const scope = user?.scope_accounts ? new Set(user.scope_accounts) : null;
   const scoped = ix.accounts.filter((a) => !scope || scope.has(a.id));
   return { total: matched.length, totalEdges: all.length, roles: new Set(matched.map((e) => e.roleId)).size, rows: rows.slice(0, limit), rowsTotal: rows.length, truncated: rows.length > limit,
-    summary, findingCounts, findingCountsAll, worstCounts, usage, review, findings: { ...FINDINGS, ...(ix.customTitles || {}) }, severities, terms, warnings: queryWarnings(terms), builtAt: ix.at, map: mapOf(matched, scoped, ix.accounts) };
+    summary, findingCounts, findingCountsAll, worstCounts, usage, review, findings: { ...FINDINGS, ...GCP_FINDING_TITLES, ...(ix.customTitles || {}) }, severities, terms, warnings: queryWarnings(terms), builtAt: ix.at, map: mapOf(matched, scoped, ix.accounts),
+    // the clouds the viewer has anything in (whatever the filter), for the AWS | Google Cloud switch
+    clouds: [...new Set([...all.map((e) => e.cloud || 'aws'), ...scoped.map((a) => a.cloud || 'aws')])] };
 }
 
 /**
@@ -905,11 +935,11 @@ const worse = (a, b) => ((SEV_ORDER[a] ?? 9) <= (SEV_ORDER[b] ?? 9) ? a : b);
 export function mapOf(rows, scoped, allAccts) {
   const byAws = new Map(allAccts.map((a) => [a.account_id, a]));
   const blank = () => ({ inbound: { roles: new Set(), worst: 'none', findings: 0, high: 0, medium: 0, expected: 0 }, own: new Set(), services: new Set(), clusters: new Set(), clusterSources: new Set() });
-  const accounts = new Map(scoped.filter((a) => a.status !== 'planned').map((a) => [a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, planned: false, inScope: true, ...blank() }]));
-  const node = (a, inScope) => { if (!accounts.has(a.id)) accounts.set(a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, planned: a.status === 'planned', inScope, ...blank() }); return accounts.get(a.id); };
+  const accounts = new Map(scoped.filter((a) => a.status !== 'planned').map((a) => [a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, cloud: a.cloud || 'aws', planned: false, inScope: true, ...blank() }]));
+  const node = (a, inScope) => { if (!accounts.has(a.id)) accounts.set(a.id, { id: a.id, name: a.name, aws: a.account_id, env: a.environment, cloud: a.cloud || 'aws', planned: a.status === 'planned', inScope, ...blank() }); return accounts.get(a.id); };
   const sources = new Map(), links = new Map();
   for (const e of rows) {
-    const to = accounts.get(e.accountId) || node({ id: e.accountId, name: e.account, account_id: e.awsAccountId, environment: e.environment, status: 'connected' }, true);
+    const to = accounts.get(e.accountId) || node({ id: e.accountId, name: e.account, account_id: e.awsAccountId, environment: e.environment, status: 'connected', cloud: e.cloud }, true);
     if (e.group === 'same-account') { to.own.add(e.roleId); continue; }
     if (e.group === 'service') { to.services.add(e.roleId); continue; }
     to.inbound.roles.add(e.roleId); if (!e.expected && !e.accepted) to.inbound.worst = worse(to.inbound.worst, e.worst);
@@ -917,11 +947,11 @@ export function mapOf(rows, scoped, allAccts) {
     to.inbound.findings += nf.length;
     if (e.attention) { if (e.worst === 'high') to.inbound.high++; else to.inbound.medium++; }
     if (e.expected) to.inbound.expected++;
-    if (e.pkind === 'eks') { to.clusters.add(e.roleId); to.clusterSources.add(e.source); continue; }
+    if (ON_ACCOUNT.has(e.pkind)) { to.clusters.add(e.roleId); to.clusterSources.add(e.source); continue; }
     const from = fromOf(e, byAws);
     if (!from.startsWith('src:')) node(byAws.get(e.principalAccount), false);
     else {
-      if (!sources.has(from)) sources.set(from, { id: from, group: e.group, pkind: e.pkind || null,
+      if (!sources.has(from)) sources.set(from, { id: from, group: e.group, pkind: e.pkind || null, cloud: e.cloud || 'aws',
         label: e.named?.name || (e.group === 'external-account' ? e.principalAccount : e.group === 'unknown' ? 'Deleted identities' : e.source),
         aws: e.group === 'external-account' ? e.principalAccount : null, named: e.named || null,
         query: queryFor(e), roles: new Set(), accounts: new Set(), worst: 'none', open: 'none', attention: 0, expected: 0, findings: 0, vendor: true, sessions: 0, lastSeen: null, firstSeen: null, byRole: new Map(), highRisk: new Set(), adminAccounts: new Set() });

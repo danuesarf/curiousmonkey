@@ -275,7 +275,7 @@ async function estateView(ctx, shell) {
           : a.d30 > 0 ? `Drifting outward: ${headText(a.d30)} in 30 days. Permissions are granted faster than they are used.` : `Moving inward: ${headText(a.d30)} in 30 days. Cleanup is landing.`)),
       a && h('button', { class: 'btn primary', onClick: () => go(`#/radar?view=account&account=${a.id}`) }, 'Open this account on the radar'),
       !a && T.excess30 == null && h('p', { class: 'tiny muted' }, 'Trails and the 30-day trend fill in as daily snapshots accumulate. A snapshot is taken after each final analysis of a fully read account.'),
-      feedSection(a ? `CHANGES IN ${a.name.toUpperCase()}` : 'CHANGES', { ...F, items }, (f) => { sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); }));
+      feedSection(a ? `CHANGES IN ${a.name.toUpperCase()}` : 'CHANGES', { ...F, items }, (f) => { if (f.gcp_project) { go(`#/trust?q=${encodeURIComponent(`cloud:gcp account:${f.gcp_project} new:7`)}`); return; } sel = accounts.find((x) => x.id === f.account_id) || null; draw(); card(); }));
   }
 
   // back to the estate summary: click empty dish, press Esc, or click the picked row again

@@ -184,7 +184,8 @@ export async function refreshBell() {
 const openChange = (c) => {
   bellOpen = false; picker = null; drawBell();
   if (picker?.(c)) return;
-  go(String(c.kind).startsWith('resource-') ? `#/resources?accounts=${c.account_id}&exposure=${c.kind === 'resource-public' ? 'public' : 'external'}`
+  // a Google Cloud change (the Trust map's) opens the Trust map on that project
+  go(c.gcp_project ? `#/trust?q=${encodeURIComponent(`cloud:gcp account:${c.gcp_project} new:7`)}` : String(c.kind).startsWith('resource-') ? `#/resources?accounts=${c.account_id}&exposure=${c.kind === 'resource-public' ? 'public' : 'external'}`
     : c.role_id ? `#/identities/${c.role_id}${c.kind === 'new-caller' ? '?tab=activity' : c.role_id ? '?tab=history' : ''}` : `#/radar?view=account&account=${c.account_id}`);
 };
 const markAllSeen = async () => { try { await post('/changes/seen'); } catch { /* next refresh tells */ } bellOpen = false; await refreshBell(); };

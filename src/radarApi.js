@@ -139,12 +139,14 @@ const unseenSql = (user, p) => { p.push(user.changes_seen_id ?? null); return `(
 export async function changeFeed(user, { accountId = null, days = 7, limit = 60 } = {}) {
   const d = FEED_DAYS.includes(Number(days)) ? Number(days) : 7;
   const p = []; const where = [scopeSql(user, 'c.account_id', p), `c.at > now() - make_interval(days => ${d})`];
-  if (accountId) { p.push(accountId); where.push(`c.account_id = $${p.length}`); }
+  // a Google Cloud project is gcp:<project>; its changes (Trust map) have no AWS account
+  if (accountId && String(accountId).startsWith('gcp:')) { p.push(String(accountId).slice(4)); where.push(`c.gcp_project = $${p.length}`); }
+  else if (accountId) { p.push(accountId); where.push(`c.account_id = $${p.length}`); }
   const unread = unseenSql(user, p);
   p.push(Math.min(200, limit));
   const rows = (await query(
-    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, ${unread} AS unread, count(*) OVER ()::int AS total
-       FROM changes c JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
+    `SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, coalesce(a.name, c.gcp_project) AS account_name, c.gcp_project, c.role_id, r.name AS role_name, ${unread} AS unread, count(*) OVER ()::int AS total
+       FROM changes c LEFT JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
       WHERE ${where.join(' AND ')} ORDER BY c.at DESC, c.id DESC LIMIT $${p.length}`, p)).rows;
   return { items: rows.map(({ total, ...x }) => x), total: rows[0]?.total ?? 0, days: d, seenAt: user.radar_seen_at || null };
 }
@@ -154,8 +156,8 @@ export async function unreadChanges(user, { limit = 40 } = {}) {
   const p = []; const where = [scopeSql(user, 'c.account_id', p)];
   where.push(unseenSql(user, p));
   const [rows, n] = await Promise.all([
-    query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, a.name AS account_name, c.role_id, r.name AS role_name, true AS unread
-             FROM changes c JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
+    query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.account_id, coalesce(a.name, c.gcp_project) AS account_name, c.gcp_project, c.role_id, r.name AS role_name, true AS unread
+             FROM changes c LEFT JOIN cloud_accounts a ON a.id=c.account_id LEFT JOIN roles r ON r.id=c.role_id
             WHERE ${where.join(' AND ')} ORDER BY c.at DESC, c.id DESC LIMIT ${Math.min(100, limit)}`, p),
     query(`SELECT count(*)::int n, count(*) FILTER (WHERE c.severity='high')::int high, count(*) FILTER (WHERE c.severity='warn')::int warn FROM changes c WHERE ${where.join(' AND ')}`, p),
   ]);
