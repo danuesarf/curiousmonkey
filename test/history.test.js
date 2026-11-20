@@ -13,7 +13,7 @@ before(async () => {
   await (await import('../src/migrate.js')).migrate(() => {});
   h = await import('../src/history.js'); q = await import('../src/queue.js'); w = await import('../src/worker.js'); rec = await import('../src/recommender/index.js');
   await q.registerWorker();
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-123')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-123')`);
 });
 after(async () => { await db.closePool(); await pg.stop(); });
 

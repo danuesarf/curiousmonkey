@@ -14,7 +14,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   api = await import('../src/spaceApi.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','ext-1')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','ext-1')`);
   const acct = async (aws, name, env) => (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ($1,$2,$3,'arn:x',$4,'connected') RETURNING id`,
     [aws, name, env, ['us-east-1']])).rows[0].id;
   A = await acct('111111111111', 'payments-prod', 'production'); B = await acct('222222222222', 'payments-stg', 'staging');
@@ -24,7 +24,7 @@ before(async () => {
   R = {
     deploy: await role(A, '111111111111', 'deploy', { Statement: [
       { Effect: 'Allow', Principal: { Federated: 'arn:aws:iam::111111111111:oidc-provider/token.actions.githubusercontent.com' }, Action: 'sts:AssumeRoleWithWebIdentity',
-        Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': 'repo:krom-id/*' } } },
+        Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': 'repo:acme-co/*' } } },
       { Effect: 'Allow', Principal: { AWS: 'arn:aws:iam::999999999999:root' }, Action: 'sts:AssumeRole' }] }),
     api: await role(A, '111111111111', 'payments-api'),
     idle: await role(A, '111111111111', 'old-batch'),
@@ -84,7 +84,7 @@ test('identities outside the org come from trust policies, the worst first', asy
   assert.ok(s.outside.items.every((x) => x.worst === 'high' && x.findings.length && x.targets[0].accountId === A));
   const gh = s.outside.items.find((x) => x.group === 'oidc').targets[0].edges[0];
   assert.equal(gh.role, 'deploy');
-  assert.ok(gh.conditions.some((c) => c.includes('repo:krom-id/*')));
+  assert.ok(gh.conditions.some((c) => c.includes('repo:acme-co/*')));
   assert.ok(gh.findings.some((f) => /wildcard/.test(f.title)));
   assert.equal(s.events.length, 1); assert.equal(s.events[0].hour, 22);
 });

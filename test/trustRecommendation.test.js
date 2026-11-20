@@ -82,7 +82,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   tr = await import('../src/recommender/trust.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','x')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','x')`);
   const acct = async (id, name) => (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status) VALUES ($1,$2,'arn:x','{us-east-1}','connected') RETURNING id`, [id, name])).rows[0].id;
   A = await acct(OWN, 'prod');
   const S = await acct(SHARED, 'shared-tools');

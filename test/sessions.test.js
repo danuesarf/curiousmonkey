@@ -31,7 +31,7 @@ const sessionA = { type: 'AssumedRole', arn: 'arn:aws:sts::111111111111:assumed-
 const sessionB = { type: 'AssumedRole', arn: 'arn:aws:sts::222222222222:assumed-role/payments-deployer/deploy-1', accountId: '222222222222', accessKeyId: 'ASIABBBBBBBBBBBBBBB2',
   principalId: 'AROAB:deploy-1', sessionContext: { sessionIssuer: { type: 'Role', arn: ARN_B } } };
 const oidc = { eventID: 'e1', eventTime: at(0), eventSource: 'sts.amazonaws.com', eventName: 'AssumeRoleWithWebIdentity', sourceIPAddress: '20.205.243.166',
-  userIdentity: { type: 'WebIdentityUser', principalId: 'token.actions.githubusercontent.com:repo:krom-id/payments-api:ref:refs/heads/main', userName: 'repo:krom-id/payments-api:ref:refs/heads/main', identityProvider: 'token.actions.githubusercontent.com' },
+  userIdentity: { type: 'WebIdentityUser', principalId: 'token.actions.githubusercontent.com:repo:acme-co/payments-api:ref:refs/heads/main', userName: 'repo:acme-co/payments-api:ref:refs/heads/main', identityProvider: 'token.actions.githubusercontent.com' },
   requestParameters: { roleArn: ARN_A, roleSessionName: 'GitHubActions-1' }, responseElements: { credentials: { accessKeyId: sessionA.accessKeyId } } };
 const push = { eventID: 'e2', eventTime: at(1), eventSource: 'ecr.amazonaws.com', eventName: 'PutImage', userIdentity: sessionA, resources: [{ ARN: 'arn:aws:ecr:us-east-1:111111111111:repository/payments-api' }] };
 // the jump: logged in both accounts' trails (same event, different eventID per recipient)
@@ -72,7 +72,7 @@ test('a track from either end shows the whole chain, calls in order, with the ju
     assert.deepEqual(t.sessions.map((s) => [s.role, s.lane, s.parentLane]), [['ci-deployer', 0, null], ['payments-deployer', 1, 0]]);
     assert.deepEqual(t.calls.map((c) => [c.lane, c.action, c.jumpTo, c.denied]), [
       [0, 'ecr:PutImage', null, false], [0, 'sts:AssumeRole', 1, false], [1, 'ecs:UpdateService', null, false], [1, 'ecs:DeleteService', null, true]]);
-    assert.match(t.origin.caller, /repo:krom-id\/payments-api/);
+    assert.match(t.origin.caller, /repo:acme-co\/payments-api/);
   }
   const list = await ses.listSessions(owner, {});
   assert.equal(list.find((s) => s.role === 'ci-deployer').hasJumps, true);

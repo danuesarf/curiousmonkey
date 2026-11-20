@@ -82,7 +82,8 @@ A finding that only says "use could not be proven" is never high.
 | Outside your domain | medium |
 | User-managed key | high when it never expires on a high-risk account; medium past the rotation age; low otherwise |
 | Bound to a deleted identity; disabled but still granted | low |
-| A service account from a project outside the connection (`gcp.foreign-sa`) | medium; high when it can become a service account |
+| A service account from a project that is not yours (`gcp.foreign-sa`): not read by any connection, not under one of your organizations, not on Configuration's list of your projects. Google's own service accounts (service agents, Cloud Build, Firebase's BigQuery exporters) never count | medium; high when it can become a service account |
+| A service account from your own project that no connection reads | info |
 | Everyone in your own domain can become a service account (`gcp.domain-impersonator`) | medium |
 | Impersonation or `actAs` granted on a whole project or folder (`gcp.wide-impersonation`; not Owner or Editor, which are their own finding) | medium |
 | Can create keys for a service account (`gcp.key-create`) | medium |

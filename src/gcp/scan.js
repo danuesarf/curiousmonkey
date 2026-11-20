@@ -17,17 +17,22 @@ const PREDEFINED_TTL_DAYS = 7;
 
 /** Projects in scope with their ancestry (nearest first, ending at the organization when it is visible). */
 export async function hierarchy(conn, gw) {
+  // `seen`: every project the reader can see, in scope or not, with the organization it sits under. A service account
+  // from one of them under one of your organizations is yours, even when no connection reads that project.
+  const seenOf = (all) => all.map((p) => ({ projectId: p.projectId, number: p.number || null, organization: p.ancestors.find((a) => a.startsWith('organizations/')) || null }));
   if (conn.scope_type === 'project') {
     const p = await gw.project(conn.scope_id);
     if (!p) throw Object.assign(new Error(`Project ${conn.scope_id} was not found, or the identity cannot see it.`), { retryable: false });
     const folders = await gw.folders().catch(() => []);
-    return { org: null, folders, projects: [{ ...p, ancestors: ancestry(p.parent, folders) }] };
+    const all = (await gw.projects().catch(() => [])).map((x) => ({ ...x, ancestors: ancestry(x.parent, folders) }));
+    const one = { ...p, ancestors: ancestry(p.parent, folders) };
+    return { org: null, folders, projects: [one], seen: seenOf([one, ...all.filter((x) => x.projectId !== p.projectId)]) };
   }
   const folders = await gw.folders();
   const root = conn.scope_type === 'organization' ? `organizations/${conn.scope_id}` : `folders/${conn.scope_id}`;
   const all = (await gw.projects()).map((p) => ({ ...p, ancestors: ancestry(p.parent, folders) }));
   const inScope = all.filter((p) => p.ancestors.includes(root));
-  return { folders: folders.filter((f) => ancestry(f.name, folders).includes(root)), projects: inScope };
+  return { folders: folders.filter((f) => ancestry(f.name, folders).includes(root)), projects: inScope, seen: seenOf(all) };
 }
 function ancestry(parent, folders) {
   const by = new Map(folders.map((f) => [f.name, f]));
@@ -41,7 +46,7 @@ const cachedFromDb = async (names) => new Map((await query(`SELECT name, permiss
 /** Read everything one connection can see and analyse it. No database writes. */
 export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async () => {}, log = () => {}, cachedRoles = cachedFromDb } = {}) {
   await progress({ stage: 'hierarchy' });
-  const { folders, projects } = await hierarchy(conn, gw);
+  const { folders, projects, seen = [] } = await hierarchy(conn, gw);
   const orgName = conn.scope_type === 'organization' ? `organizations/${conn.scope_id}` : projects[0]?.ancestors.find((a) => a.startsWith('organizations/')) || null;
   const org = orgName ? await gw.organization(orgName.split('/')[1]).catch(() => null) : null;
 
@@ -117,18 +122,20 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
   for (const r of custom) fresh.push({ name: r.name, title: r.title || null, permissions: r.includedPermissions || [], stage: r.stage || null });
 
   await progress({ stage: 'analysis' });
-  const snap = { org: { domain: org?.displayName || null }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
+  const snap = { org: { domain: org?.displayName || null, domains: config.gcp.ownDomains || [] }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
   const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays, policy: await loadPolicy() });
-  return { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs };
+  return { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs };
 }
 
 export async function scanGcpConnection(conn, opts = {}) {
   const started = Date.now();
-  const { org, folders, projects, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs } = await collectGcp(conn, opts);
+  const { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs } = await collectGcp(conn, opts);
   const log = opts.log || (() => {});
   await tx(async (c) => {
     const keep = new Map((await c.query('SELECT project_id, environment FROM gcp_projects WHERE connection_id=$1 AND environment IS NOT NULL', [conn.id])).rows.map((r) => [r.project_id, r.environment]));
-    for (const t of ['gcp_projects', 'gcp_bindings', 'gcp_wif_providers', 'gcp_principals']) await c.query(`DELETE FROM ${t} WHERE connection_id=$1`, [conn.id]);
+    for (const t of ['gcp_projects', 'gcp_bindings', 'gcp_wif_providers', 'gcp_principals', 'gcp_seen_projects']) await c.query(`DELETE FROM ${t} WHERE connection_id=$1`, [conn.id]);
+    if (seen.length) await c.query(`INSERT INTO gcp_seen_projects(connection_id, project_id, number, organization) SELECT $1, * FROM unnest($2::text[], $3::text[], $4::text[]) ON CONFLICT DO NOTHING`,
+      [conn.id, seen.map((x) => x.projectId), seen.map((x) => x.number), seen.map((x) => x.organization)]);
     for (const p of projects) {
       await c.query(`INSERT INTO gcp_projects(project_id, connection_id, number, name, parent, ancestors, labels, environment) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [p.projectId, conn.id, p.number, p.name, p.parent, p.ancestors, JSON.stringify(p.labels || {}), keep.get(p.projectId) || null]);

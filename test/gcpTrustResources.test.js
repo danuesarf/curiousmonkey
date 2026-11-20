@@ -67,7 +67,7 @@ before(async () => {
   db = await import('../src/db.js');
   await (await import('../src/migrate.js')).migrate(() => {});
   scan = await import('../src/gcp/scan.js'); rs = await import('../src/resourceSync.js'); api = await import('../src/resourcesApi.js'); trust = await import('../src/gcp/trust.js');
-  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('KBI','kbi','x')`);
+  await db.query(`INSERT INTO workspace(name, slug, external_id) VALUES ('Acme','acme','x')`);
   conn = (await db.query(`INSERT INTO gcp_connections(name, scope_type, scope_id, auth_mode, wif, environment, status) VALUES ('acme.example','organization','100000000001','wif','{}','shared','connected') RETURNING *`)).rows[0];
 });
 after(async () => { delete process.env.DEMO_GCP_ASSET_DENIED; await db?.closePool(); await pg?.stop(); });

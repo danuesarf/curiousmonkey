@@ -47,10 +47,10 @@ const callers = async (role) => (await db.query(`SELECT id, kind, display, sessi
 const sessionsOf = async (pid) => (await db.query(`SELECT access_key_id, calls, start_known FROM track_sessions WHERE principal_id=$1 ORDER BY started_at`, [pid])).rows;
 
 test('console calls in the same batch as the sign-in go to that person and that sign-in', async () => {
-  await apply([signIn('bernard@krom.id', 'ASIASIGNIN000000001', 0),
-    call('bernard@krom.id', 'ASIACONSOLE00000001', 1, 0), call('bernard@krom.id', 'ASIACONSOLE00000002', 20, 0)]);
+  await apply([signIn('bernard@acme.example', 'ASIASIGNIN000000001', 0),
+    call('bernard@acme.example', 'ASIACONSOLE00000001', 1, 0), call('bernard@acme.example', 'ASIACONSOLE00000002', 20, 0)]);
   const p = await callers(sso);
-  assert.deepEqual(p.map((x) => [x.kind, x.display]), [['federated', 'bernard@krom.id']]);    // no "session bernard@krom.id"
+  assert.deepEqual(p.map((x) => [x.kind, x.display]), [['federated', 'bernard@acme.example']]);    // no "session bernard@acme.example"
   assert.deepEqual(p[0].call_ips, ['103.10.20.30']);
   assert.deepEqual(await sessionsOf(p[0].id), [{ access_key_id: 'ASIASIGNIN000000001', calls: 2, start_known: true }]);
   const acts = (await db.query(`SELECT sum(count)::int n FROM activity_daily WHERE principal_id=$1`, [p[0].id])).rows[0].n;
@@ -58,9 +58,9 @@ test('console calls in the same batch as the sign-in go to that person and that 
 });
 
 test('console calls in a later batch than the sign-in still find it', async () => {
-  await apply([signIn('michael@krom.id', 'ASIASIGNIN000000002', 30)]);
-  await apply([call('michael@krom.id', 'ASIACONSOLE00000003', 31, 30)]);
-  await apply([call('michael@krom.id', 'ASIACONSOLE00000004', 50, 30)]);     // a refreshed key, another batch
+  await apply([signIn('michael@acme.example', 'ASIASIGNIN000000002', 30)]);
+  await apply([call('michael@acme.example', 'ASIACONSOLE00000003', 31, 30)]);
+  await apply([call('michael@acme.example', 'ASIACONSOLE00000004', 50, 30)]);     // a refreshed key, another batch
   const m = (await callers(sso)).filter((x) => x.display.includes('michael'));
   assert.deepEqual(m.map((x) => x.kind), ['federated']);
   assert.deepEqual(await sessionsOf(m[0].id), [{ access_key_id: 'ASIASIGNIN000000002', calls: 2, start_known: true }]);
@@ -68,8 +68,8 @@ test('console calls in a later batch than the sign-in still find it', async () =
 
 test('on an Identity Center role, calls whose sign-in was not seen go to the person by name, one session per sign-in', async () => {
   // michael signs in again, but that sign-in is not in the history: his keys share one creation time
-  await apply([call('michael@krom.id', 'ASIACONSOLE00000005', 121, 120)]);
-  await apply([call('michael@krom.id', 'ASIACONSOLE00000006', 140, 120), call('michael@krom.id', 'ASIACONSOLE00000007', 141, 120)]);
+  await apply([call('michael@acme.example', 'ASIACONSOLE00000005', 121, 120)]);
+  await apply([call('michael@acme.example', 'ASIACONSOLE00000006', 140, 120), call('michael@acme.example', 'ASIACONSOLE00000007', 141, 120)]);
   const m = (await callers(sso)).filter((x) => x.display.includes('michael'));
   assert.deepEqual(m.map((x) => x.kind), ['federated']);
   const s = await sessionsOf(m[0].id);
@@ -78,17 +78,17 @@ test('on an Identity Center role, calls whose sign-in was not seen go to the per
 });
 
 test('on any other role, even one named like Identity Center, a session name proves nothing', async () => {
-  await apply([signIn('bernard@krom.id', 'ASIASIGNIN000000003', 200, DEP_ARN)]);
+  await apply([signIn('bernard@acme.example', 'ASIASIGNIN000000003', 200, DEP_ARN)]);
   // someone else, much later, with the same session name and no sign-in seen
-  await apply([call('bernard@krom.id', 'ASIACONSOLE00000008', 300, 299, 'DescribeTargetHealth', DEP_ARN, 'AWSReservedSSO_lookalike')]);
+  await apply([call('bernard@acme.example', 'ASIACONSOLE00000008', 300, 299, 'DescribeTargetHealth', DEP_ARN, 'AWSReservedSSO_lookalike')]);
   const p = await callers(deployer);
-  assert.deepEqual(p.map((x) => [x.kind, x.display]), [['federated', 'bernard@krom.id'], ['session', 'session bernard@krom.id']]);
+  assert.deepEqual(p.map((x) => [x.kind, x.display]), [['federated', 'bernard@acme.example'], ['session', 'session bernard@acme.example']]);
   assert.deepEqual((await db.query(`SELECT via FROM principals WHERE role_id=$1 AND kind='session'`, [deployer.id])).rows[0].via, 'sign-in not seen');
 });
 
 test('the migration merges callers already stored apart, on Identity Center roles only', async () => {
-  const fed = (await callers(sso)).find((x) => x.display === 'bernard@krom.id');
-  const old = (await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen) VALUES ($1,'session:bernard@krom.id','session','session bernard@krom.id','unknown (started before the window)', now() - interval '20 days', now()) RETURNING id`, [sso.id])).rows[0].id;
+  const fed = (await callers(sso)).find((x) => x.display === 'bernard@acme.example');
+  const old = (await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen) VALUES ($1,'session:bernard@acme.example','session','session bernard@acme.example','unknown (started before the window)', now() - interval '20 days', now()) RETURNING id`, [sso.id])).rows[0].id;
   await db.query(`INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count) VALUES ($1,$2,'notifications:ListManagedNotificationEvents', current_date, 1984, 0)`, [sso.id, old]);
   const dep = (await callers(deployer)).find((x) => x.kind === 'session');
   const sql = fs.readFileSync(new URL('../src/migrations/040_console_sessions_merge.sql', import.meta.url), 'utf8');

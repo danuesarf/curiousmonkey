@@ -34,18 +34,18 @@ test('a third party with ExternalId passes; a specific role in a connected accou
 
 test('OIDC: GitHub without sub is high, a broad sub is flagged, Bitbucket and EKS are recognised', () => {
   const gh = 'arn:aws:iam::111111111111:oidc-provider/token.actions.githubusercontent.com';
-  const bb = 'arn:aws:iam::111111111111:oidc-provider/api.bitbucket.org/2.0/workspaces/krom/pipelines-config/identity/oidc';
+  const bb = 'arn:aws:iam::111111111111:oidc-provider/api.bitbucket.org/2.0/workspaces/acme/pipelines-config/identity/oidc';
   const [noSub, broad, pinned, bitb] = edgesOf(role('z', [
     { Effect: 'Allow', Principal: { Federated: gh }, Action: 'sts:AssumeRoleWithWebIdentity' },
-    { Effect: 'Allow', Principal: { Federated: gh }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': 'repo:krom-id/*' }, StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } },
-    { Effect: 'Allow', Principal: { Federated: gh }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: { StringEquals: { 'token.actions.githubusercontent.com:sub': 'repo:krom-id/payments:ref:refs/heads/main', 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } },
+    { Effect: 'Allow', Principal: { Federated: gh }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: { StringLike: { 'token.actions.githubusercontent.com:sub': 'repo:acme-co/*' }, StringEquals: { 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } },
+    { Effect: 'Allow', Principal: { Federated: gh }, Action: 'sts:AssumeRoleWithWebIdentity', Condition: { StringEquals: { 'token.actions.githubusercontent.com:sub': 'repo:acme-co/payments:ref:refs/heads/main', 'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com' } } },
     { Effect: 'Allow', Principal: { Federated: bb }, Action: 'sts:AssumeRoleWithWebIdentity' },
   ]), { ...ctx, complete: new Set() });
   assert.equal(noSub.source, 'GitHub Actions');
   assert.deepEqual(ids(noSub), ['high:oidc-no-sub', 'low:oidc-no-aud']);
   assert.deepEqual(ids(broad), ['high:oidc-broad-sub']);
   assert.deepEqual(ids(pinned), []);
-  assert.equal(bitb.source, 'Bitbucket Pipelines · krom');
+  assert.equal(bitb.source, 'Bitbucket Pipelines · acme');
   assert.ok(ids(bitb).includes('medium:oidc-no-sub'));
   assert.match(providerOf('arn:aws:iam::1:oidc-provider/oidc.eks.ap-southeast-3.amazonaws.com/id/ABCDEF1234567890').label, /^EKS · ap-southeast-3/);
   assert.equal(providerOf('accounts.google.com').label, 'Google');
@@ -82,13 +82,13 @@ test('what was seen coming in is attached to the edge it came through', () => {
 test('the query language: keys, negation, quotes, free text', () => {
   const es = edgesOf(role('deployer', [
     { Effect: 'Allow', Principal: { AWS: `arn:aws:iam::${THIRD}:root` }, Action: 'sts:AssumeRole' },
-    { Effect: 'Allow', Principal: { Federated: 'arn:aws:iam::1:oidc-provider/api.bitbucket.org/2.0/workspaces/krom/pipelines-config/identity/oidc' }, Action: 'sts:AssumeRoleWithWebIdentity' },
+    { Effect: 'Allow', Principal: { Federated: 'arn:aws:iam::1:oidc-provider/api.bitbucket.org/2.0/workspaces/acme/pipelines-config/identity/oidc' }, Action: 'sts:AssumeRoleWithWebIdentity' },
     { Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' }, Action: 'sts:AssumeRole' },
   ]), { ...ctx, complete: new Set() });
   const find = (q) => es.filter((e) => matchesQuery(e, parseQuery(q))).map((e) => e.type);
   assert.deepEqual(find(`finding:account-root from:${THIRD}`), ['aws-root']);
   assert.deepEqual(find('type:root'), ['aws-root']);
-  assert.deepEqual(find('provider:"bitbucket pipelines · krom"'), ['oidc']);
+  assert.deepEqual(find('provider:"bitbucket pipelines · acme"'), ['oidc']);
   assert.deepEqual(find('-source:service role:deploy'), ['aws-root', 'oidc']);
   assert.deepEqual(find('source:external'), ['aws-root']);
   assert.deepEqual(find('no:conditions has:findings'), ['aws-root', 'oidc']);
@@ -163,7 +163,7 @@ test('IAM last used beats "never used": the role is used even when no sign-in wa
 });
 
 test('Bitbucket: a wildcard after the repository pins it (the step changes every run); after repository and environment it is fine', () => {
-  const bb = 'api.bitbucket.org/2.0/workspaces/krom/pipelines-config/identity/oidc', arn = `arn:aws:iam::${OWN}:oidc-provider/${bb}`;
+  const bb = 'api.bitbucket.org/2.0/workspaces/acme/pipelines-config/identity/oidc', arn = `arn:aws:iam::${OWN}:oidc-provider/${bb}`;
   const st = (sub) => ({ Effect: 'Allow', Principal: { Federated: arn }, Action: 'sts:AssumeRoleWithWebIdentity',
     Condition: { StringEquals: { [`${bb}:aud`]: 'ari:cloud:bitbucket::workspace/x' }, StringLike: { [`${bb}:sub`]: sub } } });
   const [repo, env, any] = edgesOf(role('deploy', [st('{7f91ae86-0388-45be-9a20-35cbc4fc5f75}:*'), st('{7f91ae86-0388-45be-9a20-35cbc4fc5f75}:{c84baa79-f46a-414f-ab4d-e05775a5af99}:*'), st('*')]), { ...ctx, complete: new Set() });

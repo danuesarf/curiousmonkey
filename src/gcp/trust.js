@@ -5,26 +5,33 @@
 //     (worked out by the IAM scan: gcp_principals.sources);
 //   - straight into a project, folder or the organization, for an identity from outside: anyone (allUsers…), a user,
 //     group or domain outside the organisation's domain, a federated identity granted roles with no service account in
-//     between, or a service account from a project outside the connection.
+//     between, or a service account from a project that is not yours (src/gcp/ownership.js: not read by any
+//     connection, not under one of your organizations, not on the workspace's list of your projects).
 // Each way in gets its own findings, from the controls on the Policy page (gcp.*). No I/O but the reads at the top.
 import { query } from '../db.js';
 import { loadPolicy } from '../controls.js';
 import { severityOf } from '../controlCatalog.js';
 import { config } from '../config.js';
 import { parseMember } from './analyze.js';
+import { loadOwnership } from './ownership.js';
 import { toCsv as rowsToCsv } from '../csv.js';
 import { TYPE_LABEL } from './resources.js';
 
 export const FROM = {
   public: 'Anyone', external: 'Outside your domain', aws: 'AWS (federation)', oidc: 'CI and identity providers', gke: 'GKE workloads', key: 'Keys',
-  org: 'Your organisation', 'other-org': 'Service account outside the connection', deleted: 'Deleted identities',
+  org: 'Your organisation', own: 'Your project, not read', 'other-org': 'Service account from outside your organisation', deleted: 'Deleted identities',
 };
 export const VIA = { wif: 'Federation', gke: 'GKE workload', token: 'Impersonation', actAs: 'Act as', 'key-create': 'Can mint keys', key: 'Key', direct: 'Roles granted directly' };
 const SEV = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
 const worstOf = (list) => list.reduce((w, f) => (SEV[f.severity] < SEV[w] ? f.severity : w), 'none');
 
-/** Which "from" group a way in belongs to. */
-function groupOf(src, domain, projects) {
+/**
+ * Which "from" group a way in belongs to. `own` is the ownership (src/gcp/ownership.js); `projects` the projects this
+ * connection reads. A service account is yours when its project is read by any connection ('org'), yours but read by
+ * none ('own'), and otherwise from outside ('other-org'). Users, groups and domains are outside when they are not in
+ * your domains; with no domain known they cannot be told apart and count as yours (the page says so).
+ */
+export function groupOf(src, own, projects = new Set()) {
   if (src.via === 'key') return 'key';
   if (src.via === 'wif' || src.kind === 'federated') return src.origin?.cloud === 'aws' ? 'aws' : 'oidc';
   if (src.via === 'gke' || src.kind === 'gke') return 'gke';
@@ -33,11 +40,15 @@ function groupOf(src, domain, projects) {
   const email = String(src.member || '').split(':').slice(1).join(':');
   if (src.kind === 'serviceAccount') {
     const p = parseMember(src.member);
-    if (p.project && !projects.has(p.project) && !p.managed) return 'other-org';
-    return 'org';
+    if (p.managed) return 'org';
+    const project = p.project || p.projectNumber;
+    if (!project) return 'org';
+    if (projects.has(own.idOf(project))) return 'org';
+    const whose = own.project(project);
+    return whose === 'read' ? 'org' : whose === 'yours' ? 'own' : 'other-org';
   }
   const d = (src.kind === 'domain' ? email : email.split('@')[1] || '').toLowerCase();
-  if (domain && d && d !== domain && !d.endsWith(`.${domain}`)) return 'external';
+  if (d && own.inDomain(d) === false) return 'external';
   return 'org';
 }
 
@@ -53,7 +64,8 @@ export function wayFindings(w, { policy, keyRotateDays = 90, now = Date.now() } 
     w.blocked ? `${w.label} is granted ${w.role}, but the bucket enforces public access prevention: refused today.` : `${w.label} can ${target}.`);
   if (w.from === 'external') f(w.target.kind === 'serviceAccount' ? 'external-impersonator' : 'external', w.target.kind === 'serviceAccount' ? 'high' : 'medium',
     w.target.kind === 'serviceAccount' ? 'Someone outside your domain can become it' : 'Outside your domain', `${w.label} is not in your organisation's domain and can ${target}.`);
-  if (w.from === 'other-org') f('foreign-sa', w.target.kind === 'serviceAccount' ? 'high' : 'medium', 'A service account from outside the connection', `${w.label} lives in a project this connection does not read: whoever runs it there can ${target}.`);
+  if (w.from === 'other-org') f('foreign-sa', w.target.kind === 'serviceAccount' ? 'high' : 'medium', 'A service account from outside your organisation', `${w.label} lives in a project that is not yours: whoever runs it there can ${target}. If the project is yours, add it under Configuration → Google Cloud: your projects.`);
+  if (w.from === 'own') f('unread-project', 'info', 'From your project that no connection reads', `${w.label} lives in a project of yours that no connection reads, so who can use it there is not known. Connect that project to see.`);
   if ((w.from === 'aws' || w.from === 'oidc') && w.origin?.broad) f('wif-broad', 'high', 'Any identity from a federated source', `${w.origin.label}: nothing narrows which identity it accepts (no attribute condition, or the whole pool).`);
   if (w.memberKind === 'domain' && w.from === 'org' && w.target.kind === 'serviceAccount') f('domain-impersonator', 'medium', 'Everyone in a domain can become it', `${w.label}: every account in the domain can ${target}.`);
   // Owner and Editor carry actAs everywhere: that is their own finding on the identity (gcp.basic-owner, basic-editor)
@@ -85,7 +97,7 @@ export async function gcpWays() {
     query(`SELECT arn FROM resources WHERE cloud = 'gcp' AND deleted_at IS NULL AND extra->>'publicAccessPrevention' = 'enforced'`).catch(() => ({ rows: [] })),
   ]);
   const blocked = new Set(papRows.rows.map((x) => x.arn));
-  const domainOf = new Map(conns.rows.map((c) => [c.id, String(c.domain || '').toLowerCase()]));
+  const own = await loadOwnership();
   const connName = new Map(conns.rows.map((c) => [c.id, c.name]));
   const projectsOf = new Map();
   for (const p of projs.rows) { if (!projectsOf.has(p.connection_id)) projectsOf.set(p.connection_id, new Set()); projectsOf.get(p.connection_id).add(p.project_id); }
@@ -100,25 +112,24 @@ export async function gcpWays() {
     ways.push(w);
   };
   for (const p of rows.rows) {
-    const domain = domainOf.get(p.connection_id) || '', projects = projectsOf.get(p.connection_id) || new Set();
+    const projects = projectsOf.get(p.connection_id) || new Set();
     const base = { connectionId: p.connection_id, connection: connName.get(p.connection_id) || null };
     // into a service account
     if (p.kind === 'serviceAccount') {
       const target = { kind: 'serviceAccount', id: p.id, member: p.member, label: p.email, project: p.project_id, risk: p.risk, env: envOf.get(p.project_id) || null };
       for (const s of p.sources || []) {
-        const from = groupOf(s, domain, projects);
+        const from = groupOf(s, own, projects);
         push({ ...base, key: `${p.member}|${s.via}|${s.member || 'key'}|${s.role || ''}|${s.at || ''}`, target, from, via: s.via, member: s.member || null, memberKind: s.kind,
           label: s.origin?.label || s.label || s.member, role: s.role || null, at: s.at ? where(s.atType, s.at, s.at.split('/')[1]) : null, wide: !!s.wide, conditional: !!s.conditional,
           origin: s.origin || null, keys: s.keys || null, namespace: s.namespace || null });
       }
-      // a service account from a project outside the connection is also an identity from outside: its roles below
-      const own = parseMember(p.member);
-      if (!(own.project && !projects.has(own.project) && !own.managed)) continue;
+      // a service account from a project that is not yours is also an identity from outside: its roles below
+      if (groupOf({ kind: 'serviceAccount', member: p.member }, own, projects) !== 'other-org') continue;
     }
     // straight in, for identities from outside: their roles are the way in
     const pm = parseMember(p.member);
     const src = { kind: p.kind, member: p.member, via: p.kind === 'federated' ? 'wif' : 'direct', origin: p.origin };
-    const from = groupOf(src, domain, projects);
+    const from = groupOf(src, own, projects);
     if (!['public', 'external', 'aws', 'oidc', 'other-org'].includes(from)) continue;
     for (const r of p.roles || []) {
       if (r.resourceType === 'serviceAccount') continue;            // counted above, as a way into that service account
@@ -134,16 +145,42 @@ export async function gcpWays() {
 }
 
 const lc = (s) => String(s ?? '').toLowerCase();
+
+/**
+ * One grant, one way in: impersonation, actAs or key creation granted on a whole project, folder or the organization
+ * reaches every service account below it, and is one decision. Those ways are folded into one, whose target is the
+ * scope ("37 service accounts in project p") and which lists them; the rest are kept as they are.
+ */
+export function collapseWide(ways) {
+  const groups = new Map(), out = [];
+  for (const w of ways) {
+    if (!w.wide || w.target.kind !== 'serviceAccount' || !w.at) { out.push(w); continue; }
+    const k = `${w.connectionId}|${w.member || w.label}|${w.via}|${w.role}|${w.at.label}`;
+    if (!groups.has(k)) { groups.set(k, []); out.push(k); }
+    groups.get(k).push(w);
+  }
+  return out.map((x) => {
+    if (typeof x !== 'string') return x;
+    const list = groups.get(x);
+    if (list.length === 1) return list[0];
+    const w = list[0], worst = list.reduce((m, y) => (SEV[y.worst] < SEV[m] ? y.worst : m), 'none');
+    const projects = [...new Set(list.map((y) => y.target.project).filter(Boolean))];
+    return { ...w, key: `wide|${x}`, worst, findings: w.findings, count: list.length,
+      target: { kind: 'scope', id: null, member: null, label: `${list.length} service accounts in ${w.at.label}`, project: projects[0] || null, projects, env: w.target.env,
+        members: list.map((y) => ({ id: y.target.id, label: y.target.label, risk: y.target.risk })) } };
+  });
+}
+
 /** The Trust page's Google Cloud view: the ways in that match, counts, and the outside sources rolled up. */
 export async function gcpTrust(q = {}) {
-  const all = await gcpWays();
+  const all = collapseWide(await gcpWays());
   const list = (v) => (v ? String(v).split(',').filter(Boolean) : []);
   const from = list(q.from), sev = list(q.severity), via = list(q.via), conns = list(q.connection), projs = list(q.project);
   const text = lc(q.q).trim();
   const keep = (w, skip) => (skip === 'from' || !from.length || from.includes(w.from)) && (skip === 'severity' || !sev.length || sev.includes(w.worst))
-    && (!via.length || via.includes(w.via)) && (!conns.length || conns.includes(w.connectionId)) && (!projs.length || projs.includes(w.target.project))
+    && (!via.length || via.includes(w.via)) && (!conns.length || conns.includes(w.connectionId)) && (!projs.length || (w.target.projects || [w.target.project]).some((p) => projs.includes(p)))
     && (!q.attention || ['high', 'medium'].includes(w.worst))
-    && (!text || [w.label, w.member, w.target.label, w.role, w.origin?.label, ...w.findings.map((f) => f.title)].some((x) => lc(x).includes(text)));
+    && (!text || [w.label, w.member, w.target.label, w.role, w.origin?.label, ...w.findings.map((f) => f.title), ...(w.target.members || []).map((m) => m.label)].some((x) => lc(x).includes(text)));
   const ways = all.filter((w) => keep(w));
   const order = q.sort === 'target' ? (a, b) => a.target.label.localeCompare(b.target.label) : q.sort === 'source' ? (a, b) => lc(a.label).localeCompare(lc(b.label))
     : (a, b) => SEV[a.worst] - SEV[b.worst] || a.target.label.localeCompare(b.target.label);
@@ -152,13 +189,14 @@ export async function gcpTrust(q = {}) {
   // the outside sources: one row per identity that comes in, with everything it reaches
   const by = new Map();
   for (const w of ways) {
-    if (w.from === 'org' || w.from === 'key' || w.from === 'deleted') continue;
+    if (w.from === 'org' || w.from === 'own' || w.from === 'key' || w.from === 'deleted') continue;
     const k = w.member || w.label;
     if (!by.has(k)) by.set(k, { key: k, label: w.label, from: w.from, member: w.member, origin: w.origin, awsRoleId: w.awsRoleId || null, worst: 'none', targets: new Set(), serviceAccounts: new Set(), projects: new Set(), vias: new Set() });
     const s = by.get(k);
     if (SEV[w.worst] < SEV[s.worst]) s.worst = w.worst;
-    s.targets.add(w.target.label); s.vias.add(w.via);
-    if (w.target.kind === 'serviceAccount') s.serviceAccounts.add(w.target.label); else s.projects.add(w.target.label);
+    s.vias.add(w.via);
+    if (w.target.kind === 'scope') for (const m of w.target.members) { s.targets.add(m.label); s.serviceAccounts.add(m.label); }
+    else { s.targets.add(w.target.label); if (w.target.kind === 'serviceAccount') s.serviceAccounts.add(w.target.label); else s.projects.add(w.target.label); }
   }
   const sources = [...by.values()].map((s) => ({ ...s, targets: s.targets.size, serviceAccounts: [...s.serviceAccounts], projects: [...s.projects], vias: [...s.vias] }))
     .sort((a, b) => SEV[a.worst] - SEV[b.worst] || b.targets - a.targets);
@@ -173,12 +211,15 @@ export async function gcpTrust(q = {}) {
     counts: { from: count('from', 'from'), severity: count('severity', 'worst'), attention: all.filter((w) => ['high', 'medium'].includes(w.worst)).length, all: all.length,
       serviceAccounts: new Set(all.filter((w) => w.target.kind === 'serviceAccount').map((w) => w.target.member)).size },
     labels: { from: FROM, via: VIA }, connections, projects,
+    // connections whose domain is not known (the organization cannot be read, none listed in Configuration): nobody
+    // there can be called outside your domain
+    noDomain: (await query(`SELECT name FROM gcp_connections WHERE coalesce(status_detail->>'domain', '') = ''`)).rows.map((r) => r.name).filter(() => !(config.gcp.ownDomains || []).length),
   };
 }
 
 export async function gcpTrustCsv(q) {
   const all = (await gcpTrust({ ...q, all: true })).items;
-  const cols = [['Severity', (w) => (w.worst === 'none' ? '' : w.worst)], ['Way in to', (w) => w.target.label], ['Target kind', (w) => w.target.kind], ['Project', (w) => w.target.project],
+  const cols = [['Severity', (w) => (w.worst === 'none' ? '' : w.worst)], ['Way in to', (w) => w.target.label], ['Target kind', (w) => w.target.kind], ['Service accounts', (w) => (w.target.members || []).map((m) => m.label).join(' ')], ['Project', (w) => w.target.project],
     ['From', (w) => FROM[w.from]], ['Identity', (w) => w.label], ['Member', (w) => w.member], ['How', (w) => VIA[w.via] || w.via], ['Role', (w) => w.role], ['Granted on', (w) => w.at?.label],
     ['Findings', (w) => w.findings.filter((f) => f.severity !== 'info').map((f) => f.title).join('; ')], ['Connection', (w) => w.connection]];
   return rowsToCsv(cols, all);

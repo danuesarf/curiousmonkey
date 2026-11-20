@@ -36,10 +36,10 @@ function bucket(files) {
   };
 }
 let n = 0;
-const assume = (t, key, who = 'dhimas@kbi') => ({ eventID: `a-${n++}`, eventTime: iso(t), eventSource: 'sts.amazonaws.com', eventName: 'AssumeRoleWithSAML', awsRegion: 'us-east-1',
+const assume = (t, key, who = 'dana@acme') => ({ eventID: `a-${n++}`, eventTime: iso(t), eventSource: 'sts.amazonaws.com', eventName: 'AssumeRoleWithSAML', awsRegion: 'us-east-1',
   userIdentity: { type: 'SAMLUser', principalId: `AROA:sso:${who}` }, requestParameters: { roleArn: ROLE, roleSessionName: who }, responseElements: { credentials: { accessKeyId: key } } });
 const call = (t, key, region, name = 'DescribeInstances') => ({ eventID: `c-${n++}`, eventTime: iso(t), eventSource: 'ec2.amazonaws.com', eventName: name, awsRegion: region,
-  userIdentity: { type: 'AssumedRole', accessKeyId: key, arn: `arn:aws:sts::${ACCT}:assumed-role/app-role/dhimas@kbi`, sessionContext: { sessionIssuer: { type: 'Role', arn: ROLE } } } });
+  userIdentity: { type: 'AssumedRole', accessKeyId: key, arn: `arn:aws:sts::${ACCT}:assumed-role/app-role/dana@acme`, sessionContext: { sessionIssuer: { type: 'Role', arn: ROLE } } } });
 
 async function account(regions, extra = {}) {
   const a = (await db.query(`INSERT INTO cloud_accounts(account_id, name, role_arn, regions, status, event_source, s3_bucket, lookback_days)
@@ -65,7 +65,7 @@ test('a session started in us-east-1 is attributed in another region, even acros
     { region: 'ap-southeast-1', time: t + 30 * MIN, records: [call(t + 25 * MIN, 'ASIAKEY1', 'ap-southeast-1')] },
   ]);
   await tr.readTrail({ ctx: ctx(), account: a, gw, now: NOW, limits: small });
-  assert.deepEqual(await usage(a), [{ key: 'fed:AROA:sso:dhimas@kbi', n: 3 }]);   // nobody "started before the window"
+  assert.deepEqual(await usage(a), [{ key: 'fed:AROA:sso:dana@acme', n: 3 }]);   // nobody "started before the window"
 });
 
 test('every file is read exactly once; late and newly delivered files are picked up by the next run', async () => {
