@@ -44,7 +44,7 @@ export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-ident
   --permissions=${perms.join(',')}` });
   }
   steps.push({ title: 'A service account to hold it', code:
-`gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com sts.googleapis.com iamcredentials.googleapis.com${usage ? ' logging.googleapis.com' : ''} --project=${home}
+`gcloud services enable iam.googleapis.com cloudresourcemanager.googleapis.com sts.googleapis.com iamcredentials.googleapis.com cloudasset.googleapis.com${usage ? ' logging.googleapis.com' : ''} --project=${home}
 gcloud iam service-accounts create ${SA_NAME} --project=${home} --display-name="Curious Monkey reader"` });
   const bind = scopeType === 'organization' ? `gcloud organizations add-iam-policy-binding ${id}` : scopeType === 'folder' ? `gcloud resource-manager folders add-iam-policy-binding ${id}` : `gcloud projects add-iam-policy-binding ${id}`;
   steps.push({ title: `Grant it on the ${scopeType}`, code: (custom ? [roleName] : predefined)

@@ -8,7 +8,7 @@
 //   activity_daily    calls per role, principal, action and day; activity_resources; passrole_observed
 import { rollupKey } from '../rollups.js';
 import { config } from '../config.js';
-import { matchTrust } from '../analyzer/trust.js';
+import { matchTrust, roleOfCallerArn } from '../analyzer/trust.js';
 import { recordNewCaller } from '../radarHistory.js';
 
 const DAY = 864e5;
@@ -37,7 +37,14 @@ export function principalFrom(e) {
   }
   if (c.type === 'AWSService' || c.invokedBy) return { key: `svc:${c.invokedBy}`, kind: 'service', display: c.invokedBy };
   if (c.type === 'IAMUser') return { key: `user:${c.arn}`, kind: 'user', display: `${c.arn?.split(':').pop()} (${c.accountId})` };
-  if (c.type === 'AssumedRole') { const m = c.arn?.match(/assumed-role\/([^/]+)\//); return { key: `role:${c.accountId}:${m?.[1]}`, kind: 'role', display: `role/${m?.[1]} (${c.accountId})` }; }
+  if (c.type === 'AssumedRole') {
+    // the session ARN, or the role's own ARN when the record has no session ARN (role/aws-reserved/sso.amazonaws.com/…/Name)
+    const name = roleOfCallerArn(c.arn)?.name;
+    if (name) return { key: `role:${c.accountId}:${name}`, kind: 'role', display: `role/${name} (${c.accountId})` };
+    // neither: only the role's unique ID is known, as for a cross-account caller (AWSAccount)
+    const id = (c.principalId || '').split(':')[0] || 'unknown';
+    return { key: `acct:${c.accountId}:${id}`, kind: 'account', display: `role ${id} in ${c.accountId}${e.sessionName ? ` (session ${e.sessionName})` : ''}` };
+  }
   if (c.type === 'SAMLUser' || c.type === 'WebIdentityUser') {
     const id = stableFederatedKey(c.principalId || e.sessionName);
     const who = id?.split(':').slice(1).join(':') || e.sessionName;
