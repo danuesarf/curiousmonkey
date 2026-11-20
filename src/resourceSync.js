@@ -14,7 +14,7 @@ import { analyzeGcpResource } from './gcp/resources.js';
 
 export const RESOURCE_SERVICES = Object.keys(SERVICES);
 const LOCK = 727013;
-const VERSION = 2;              // bump when the analysis itself changes, so stored results are worked out again
+const VERSION = 3;              // bump when the analysis itself changes, so stored results are worked out again
 const CHUNK = 500;
 const READS = {
   s3: 's3:ListAllMyBuckets, s3:GetBucketPolicy, s3:GetBucketPublicAccessBlock, s3:GetBucketLocation and s3:GetAccountPublicAccessBlock',

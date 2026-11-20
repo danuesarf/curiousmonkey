@@ -187,5 +187,18 @@ test('Space for Google Cloud: calls from the audit logs by day and by hour, neve
   assert.ok(nb['data-stg'].some((l) => l.dir === 'in' && l.roleId === lake.id && l.otherRole === 'data-etl'));
   assert.ok(nb['data-stg'].some((l) => l.dir === 'in' && l.roleId === null));
   assert.equal(p.resources[0].service, 'storage');
+  // project to project: the shared CI deployer holds roles on the payments folder, so a line to the project under it
+  const ci = e.chains.find((c) => c.from === 'gcp:acme-shared-ci' && c.to === 'gcp:acme-payments-prod');
+  assert.ok(ci, 'shared CI reaches payments');
+  const dep = ci.grants.find((g) => g.caller.startsWith('deployer@'));
+  assert.deepEqual(dep.roles.sort(), ['roles/iam.serviceAccountUser', 'roles/run.admin']);
+  assert.equal(dep.on, 'every project in folders/200000000001'); assert.equal(dep.folder, true);
+  assert.ok(!e.chains.some((c) => c.grants.some((g) => g.caller.startsWith('terraform@'))), 'an organization role draws no line');
+  const pay = await space.spaceGcpProject('acme-payments-prod');
+  const nci = pay.neighbours.find((n) => n.id === 'gcp:acme-shared-ci');
+  assert.equal(nci.cloud, 'gcp'); assert.ok(nci.links.every((l) => l.dir === 'in') && nci.links.some((l) => /deployer/.test(l.otherRole)));
+  const ciView = await space.spaceGcpProject('acme-shared-ci');
+  const deployer = ciView.clusters.flatMap((c) => c.roles).find((r) => r.name === 'deployer');
+  assert.ok(ciView.neighbours.find((n) => n.id === 'gcp:acme-payments-prod').links.some((l) => l.dir === 'out' && l.roleId === deployer.id));
   assert.equal(await space.spaceGcpProject('no-such-project'), null);
 });
