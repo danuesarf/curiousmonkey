@@ -192,19 +192,33 @@ const SOURCES = {
        WHERE f.status = 'open' AND r.deleted_at IS NULL AND f.created_at >= $1 AND f.severity = ANY($2) AND ${envSql(3, 5)}
          AND NOT EXISTS (SELECT 1 FROM alert_hits h WHERE h.rule_id = $4 AND h.dedupe = 'flag:' || f.id)
        ORDER BY f.created_at LIMIT 2000`, [r.since, atLeast(r.min_severity), r.environments, r.id, r.accounts || []])).rows;
-    return rows.map((x) => ({ dedupe: `flag:${x.id}`, item: { title: x.title, subject: x.role_name, subjectKind: x.role_kind === 'iam-user' ? 'IAM user' : 'role',
-      account: x.account_name, environment: x.environment, severity: x.severity, url: link(`#/identities/${x.role_id}?tab=findings`), at: x.created_at } }));
+    // Google Cloud ways in (Trust map): no AWS account, so only for rules that do not pick accounts
+    const g = (r.accounts || []).length ? [] : (await query(`SELECT f.id, f.title, f.severity, f.created_at, f.gcp_label, f.gcp_project, coalesce(p.environment, p.labels->>'env') AS environment
+        FROM flags f LEFT JOIN LATERAL (SELECT environment, labels FROM gcp_projects WHERE project_id = f.gcp_project LIMIT 1) p ON true
+       WHERE f.gcp_subject IS NOT NULL AND f.status = 'open' AND f.created_at >= $1 AND f.severity = ANY($2)
+         AND (cardinality($3::text[]) = 0 OR coalesce(p.environment, p.labels->>'env') = ANY($3::text[]))
+         AND NOT EXISTS (SELECT 1 FROM alert_hits h WHERE h.rule_id = $4 AND h.dedupe = 'flag:' || f.id)
+       ORDER BY f.created_at LIMIT 2000`, [r.since, atLeast(r.min_severity), r.environments, r.id])).rows;
+    return [...rows.map((x) => ({ dedupe: `flag:${x.id}`, item: { title: x.title, subject: x.role_name, subjectKind: x.role_kind === 'iam-user' ? 'IAM user' : 'role',
+      account: x.account_name, environment: x.environment, severity: x.severity, url: link(`#/identities/${x.role_id}?tab=findings`), at: x.created_at } })),
+    ...g.map((x) => ({ dedupe: `flag:${x.id}`, item: { title: x.title, subject: x.gcp_label, subjectKind: 'Google Cloud way in', account: x.gcp_project, environment: x.environment, severity: x.severity,
+      url: link(`#/trust?q=${encodeURIComponent(`cloud:gcp account:${x.gcp_project}`)}`), at: x.created_at } }))];
   },
   async change(r) {
     const top = await startMark({ query });
-    const rows = (await query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.role_id, a.id AS account_id, a.name AS account_name, a.environment
-        FROM changes c JOIN cloud_accounts a ON a.id = c.account_id
-       WHERE c.id > $1 AND c.id <= $2 AND c.severity = ANY($3) AND (cardinality($4::text[]) = 0 OR c.kind = ANY($4::text[])) AND ${envSql(5, 6)}
+    // a Google Cloud change (Trust map) has a project instead of an AWS account: its environment is the project's, and
+    // it is sent only by rules that do not pick accounts
+    const rows = (await query(`SELECT c.id, c.kind, c.severity, c.title, c.detail, c.at, c.role_id, c.gcp_project, a.id AS account_id, coalesce(a.name, c.gcp_project) AS account_name,
+             coalesce(a.environment, p.environment, p.labels->>'env') AS environment
+        FROM changes c LEFT JOIN cloud_accounts a ON a.id = c.account_id LEFT JOIN LATERAL (SELECT environment, labels FROM gcp_projects WHERE project_id = c.gcp_project LIMIT 1) p ON c.gcp_project IS NOT NULL
+       WHERE c.id > $1 AND c.id <= $2 AND c.severity = ANY($3) AND (cardinality($4::text[]) = 0 OR c.kind = ANY($4::text[]))
+         AND (cardinality($5::text[]) = 0 OR coalesce(a.environment, p.environment, p.labels->>'env') = ANY($5::text[]))
+         AND (cardinality($6::uuid[]) = 0 OR a.id = ANY($6::uuid[])) AND (a.id IS NOT NULL OR c.gcp_project IS NOT NULL)
        ORDER BY c.id`, [r.since_change_id, top, CHANGE_SEV[r.min_severity], r.change_kinds, r.environments, r.accounts || []])).rows;
     // move the mark even past changes this rule does not want, so they are not read again
     await query('UPDATE alert_rules SET since_change_id = $2 WHERE id = $1 AND since_change_id < $2', [r.id, top]);
     return rows.map((x) => ({ dedupe: `change:${x.id}`, item: { title: x.title, subject: x.detail || '', account: x.account_name, environment: x.environment,
-      severity: CHANGE_TO[x.severity] || 'low', kind: x.kind, url: link(x.role_id ? `#/identities/${x.role_id}` : `#/radar?view=account&account=${x.account_id}`), at: x.at } }));
+      severity: CHANGE_TO[x.severity] || 'low', kind: x.kind, url: link(x.gcp_project ? `#/trust?q=${encodeURIComponent(`cloud:gcp account:${x.gcp_project} new:7`)}` : x.role_id ? `#/identities/${x.role_id}` : `#/radar?view=account&account=${x.account_id}`), at: x.at } }));
   },
   async 'key-age'(r) {
     const rows = (await query(`SELECT k.key_id, k.created_at, r.id AS role_id, r.name AS user_name, a.name AS account_name, a.environment

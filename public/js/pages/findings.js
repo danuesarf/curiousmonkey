@@ -45,7 +45,7 @@ export function findingCard(f, { onDecided, onIdentify, head } = {}) {
       f.suggestion && h('p', { class: 'small' }, h('b', null, 'Suggestion: '), f.suggestion),
       f.control && h('p', { class: 'tiny muted' }, 'Control: ', h('a', { href: `#/policy?q=${encodeURIComponent(f.control)}`, class: 'mono' }, f.control)),
       f.category === 'unmapped-event' && onIdentify && h('div', { class: 'row' }, h('button', { class: 'btn sm amber', onClick: () => onIdentify(null) }, 'Identify these event names')),
-      (f.category === 'trust' || f.category === 'trust-wildcard') && f.role_id && h('div', { class: 'row' }, h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`roleid:${f.role_id}`)}&tab=ways` }, 'Show on the Trust map')),
+      (f.category === 'trust' || f.category === 'trust-wildcard') && (f.role_id || f.gcp_subject) && h('div', { class: 'row' }, h('a', { class: 'btn sm', href: `#/trust?q=${encodeURIComponent(`roleid:${f.role_id || f.gcp_subject}`)}&tab=ways` }, 'Show on the Trust map')),
       canDecide() && h('div', { class: 'stack' }, isAct && res, note,
         h('div', { class: 'row' }, opts.map(([v, l], i) => { const b = h('button', { class: `btn sm${f.decision === v ? ' primary' : ''}`, title: `Key ${i + 1}` }, l); b.addEventListener('click', () => choose(v, b)); return b; }),
           f.decision && h('button', { class: 'btn sm', onClick: clearIt }, 'Clear decision'))));
@@ -154,9 +154,9 @@ export async function findingsPage(ctx) {
     const rows = [];
     let lastRole = null;
     data.items.forEach((x, i) => {
-      if (f.sort === 'role' && x.role_id !== lastRole) {
-        lastRole = x.role_id;
-        rows.push(h('tr', { class: 'group' }, h('td', { colspan: 5 }, h('a', { href: `#/identities/${x.role_id}`, class: 'name' }, x.role_name),
+      if (f.sort === 'role' && (x.role_id || x.gcp_subject) !== lastRole) {
+        lastRole = x.role_id || x.gcp_subject;
+        rows.push(h('tr', { class: 'group' }, h('td', { colspan: 5 }, h('a', { href: x.role_id ? `#/identities/${x.role_id}` : x.gcp_principal_id ? `#/identities/gcp/${x.gcp_principal_id}` : '#/trust?q=cloud:gcp', class: 'name' }, x.role_name),
           h('span', { class: 'tiny muted' }, ` · ${x.account_name} · ${KIND[x.role_kind] || x.role_kind}`))));
       }
       const cb = h('input', { type: 'checkbox', checked: selected.has(x.id), 'aria-label': `Select ${x.title} on ${x.role_name}` });
@@ -179,15 +179,17 @@ export async function findingsPage(ctx) {
   function drawDetail() {
     const x = data.items[active];
     if (!x) { detail.replaceChildren(h('div', { class: 'empty card' }, data.items.length ? 'Pick a finding.' : 'Nothing to show.')); return; }
-    const href = `#/identities/${x.role_id}`;
-    const head = h('div', { class: 'stack', style: 'gap:2px' }, h('div', { class: 'eyebrow' }, `${KIND[x.role_kind] || x.role_kind} · ${x.account_name} · ${x.aws_account_id}`),
-      h('div', { class: 'row' }, h('a', { class: 'name', href }, x.role_name), h('span', { class: `badge b-${String(x.role_risk).toLowerCase()}` }, `${x.role_risk} risk`),
-        h('span', { class: 'badge b-neutral' }, x.requires_both ? 'Both teams' : TEAM[x.reviewer_team] || x.reviewer_team || 'No reviewer')));
+    // Google Cloud: the service account (when there is one) or the project's identities; no review team of its own
+    const gcp = x.cloud === 'gcp';
+    const href = !gcp ? `#/identities/${x.role_id}` : x.gcp_principal_id ? `#/identities/gcp/${x.gcp_principal_id}` : `#/identities?type=gcp&project=${encodeURIComponent(x.account_name)}`;
+    const head = h('div', { class: 'stack', style: 'gap:2px' }, h('div', { class: 'eyebrow' }, gcp ? `GOOGLE CLOUD · PROJECT ${x.account_name}` : `${KIND[x.role_kind] || x.role_kind} · ${x.account_name} · ${x.aws_account_id}`),
+      h('div', { class: 'row' }, h('a', { class: 'name', href }, x.role_name), x.role_risk && h('span', { class: `badge b-${String(x.role_risk).toLowerCase()}` }, `${x.role_risk} risk`),
+        !gcp && h('span', { class: 'badge b-neutral' }, x.requires_both ? 'Both teams' : TEAM[x.reviewer_team] || x.reviewer_team || 'No reviewer')));
     detail.replaceChildren(findingCard(x, {
       head,
       onDecided: () => { ctx.refreshStatus(); load({ keep: true }); },
       onIdentify: x.category === 'unmapped-event' ? () => { location.hash = `${href}?identify=`; } : null,
-    }), h('p', { class: 'tiny muted' }, h('a', { href }, x.role_kind === 'iam-user' ? 'Open the user' : 'Open the role'), ' for activity, permissions and policies.'));
+    }), h('p', { class: 'tiny muted' }, h('a', { href }, gcp ? (x.gcp_principal_id ? 'Open the service account' : 'The project\'s identities') : x.role_kind === 'iam-user' ? 'Open the user' : 'Open the role'), gcp ? ' for its permissions and who can become it.' : ' for activity, permissions and policies.'));
   }
 
   /** The decisions every selected finding takes, so one click fits them all. */
