@@ -23,7 +23,7 @@ function sessionCreatedOf(rec) {
 export function issuerRoleName(rec) {
   const ui = rec.userIdentity;
   if (ui?.type !== 'AssumedRole') return null;
-  return ui.arn?.match(/:assumed-role\/([^/]+)\//)?.[1] || null;
+  return ui.arn?.match(/:assumed-role\/([^/]+)\//)?.[1] || ui.sessionContext?.sessionIssuer?.userName || null;
 }
 
 export function parseEvent(rec) {

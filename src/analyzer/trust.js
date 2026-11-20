@@ -2,10 +2,18 @@
 import { normalizeStatements, arr, conditionToText } from './policy.js';
 
 const accountOf = (arn) => arn?.match(/^arn:aws[a-z-]*:(?:iam|sts)::(\d{12}):/)?.[1] || null;
-const assumedToRole = (arn) => {   // arn:aws:sts::123:assumed-role/Name/session -> arn:aws:iam::123:role/Name (no path known)
-  const m = arn?.match(/^arn:(aws[a-z-]*):sts::(\d{12}):assumed-role\/([^/]+)\//);
-  return m ? { account: m[2], name: m[3] } : null;
-};
+/**
+ * The role a caller ARN is: a session (arn:aws:sts::123:assumed-role/Name/session, no path known) or the role itself
+ * (arn:aws:iam::123:role/path/Name, which CloudTrail gives as the session issuer when a record has no session ARN, as on
+ * the target account's copy of a cross-account call: IAM Identity Center roles live under aws-reserved/sso.amazonaws.com/).
+ */
+export function roleOfCallerArn(arn) {
+  const s = String(arn || '').match(/^arn:(aws[a-z-]*):sts::(\d{12}):assumed-role\/([^/]+)\//);
+  if (s) return { account: s[2], name: s[3], roleArn: null };
+  const r = String(arn || '').match(/^arn:(aws[a-z-]*):iam::(\d{12}):role\/(?:.*\/)?([^/]+)$/);
+  return r ? { account: r[2], name: r[3], roleArn: arn } : null;
+}
+const assumedToRole = roleOfCallerArn;
 
 function principalMatches(p, caller) {
   if (p === '*') return { how: 'any principal' };
