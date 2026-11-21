@@ -148,11 +148,16 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
   const awsName = (a) => awsAccounts.get(a)?.name || orgAccounts.get(a) || estate.vendor?.(a) || null;
   const ownGcp = (p) => gcpProjects.has(p) || !!estate.ownProject?.(p);
   const findings = [], exposures = [];
+  const findingKey = (control, it, keyPart) => `${control}|${it.cloud}|${it.owner}|${keyPart || it.id}`.slice(0, 500);
   const f = (control, builtIn, it, title, detail, suggestion, extra = {}) => {
     const severity = severityOf(policy, control, builtIn); if (!severity) return;
-    findings.push({ key: `${control}|${it.cloud}|${it.owner}|${extra.keyPart || it.id}`.slice(0, 500), control, severity, cloud: it.cloud, owner: it.owner, itemType: it.type, nativeId: it.id,
+    findings.push({ key: findingKey(control, it, extra.keyPart), control, severity, cloud: it.cloud, owner: it.owner, itemType: it.type, nativeId: it.id,
       itemName: it.name, vpc: it.vpc, vpcOwner: it.vpcOwner || it.owner, region: it.region || null, title, detail, suggestion });
   };
+  // a finding whose evidence is not at hand right now (flow logs not read lately): left as it is, neither filed again
+  // nor resolved, so a reader that stops for a night does not close findings and drop the decisions taken on them
+  const held = [];
+  const hold = (control, it, keyPart) => { held.push(findingKey(control, it, keyPart)); };
 
   // ---------------------------------------------------------------- AWS
   const aws = items.filter((i) => i.cloud === 'aws');
@@ -299,14 +304,14 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
     if (!ips.length || n.data.kind === 'nat_gateway' || /^ELB /.test(n.data.description || '')) continue;
     const open = worldPorts(n.owner, n.data.groups);
     exposures.push({ cloud: 'aws', owner: n.owner, vpc: n.vpc, vpcOwner: n.vpcOwner || n.owner, region: n.region, kind: 'interface', id: n.id, name: n.data.instance ? `${n.name !== n.id ? n.name : 'instance'} (${n.data.instance})` : n.name,
-      addresses: ips, ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: `security group ${x.via}` })), severity: open.length ? sevPorts(open) : 'none' });
+      addresses: ips, ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: `security group ${x.via}` })), severity: open.length ? sevPorts(open) : 'none', firstSeen: n.firstSeen || null });
   }
   for (const b of lbs.filter((x) => x.data.scheme === 'internet-facing')) {
     const open = b.data.groups.length ? worldPorts(b.owner, b.data.groups) : null;
     const ls = b.data.listeners.filter((l) => !open || open.some((x) => covers(x.ranges, l.port)));
     exposures.push({ cloud: 'aws', owner: b.owner, vpc: b.vpc, vpcOwner: b.vpcOwner || b.owner, region: b.region, kind: 'load-balancer', id: b.id, name: b.name, addresses: [b.data.dns],
       ports: ls.map((l) => ({ proto: /UDP/i.test(l.proto) && !/TCP_UDP/i.test(l.proto) ? 'udp' : 'tcp', ports: String(l.port), via: `${l.proto} listener${b.data.groups.length ? '' : ' (no security group)'}` })),
-      severity: worstOf(ls.map((l) => (ADMIN_PORTS[l.port] || DATA_PORTS[l.port] ? 'high' : 'low'))) });
+      severity: worstOf(ls.map((l) => (ADMIN_PORTS[l.port] || DATA_PORTS[l.port] ? 'high' : 'low'))), firstSeen: b.firstSeen || null });
   }
 
   // ---------------------------------------------------------------- Google Cloud
@@ -387,7 +392,7 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
   }
 
   const graph = buildGraph({ items, vpcs, subnets, publicSubnet, tableOf, peerings, atts, tgws, cgws, networks, exposures, ownAws, awsName, ownGcp, awsAccounts, gcpProjects, shares });
-  if (usage) applyUsage(graph, exposures, usage, f, estate.now || Date.now());
+  if (usage) applyUsage(graph, exposures, usage, f, estate.now || Date.now(), hold);
   // connected networks whose address ranges overlap: traffic between them cannot be routed as it should
   const cidrs = new Map(graph.nodes.map((n) => [n.id, n.cidrs || []]));
   for (const l of graph.links) {
@@ -407,7 +412,7 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
     n.findings = ['vpc', 'network', 'slice'].includes(n.kind) ? mine.length : 0;
     n.worst = worstOf(mine.map((x) => x.severity));
   }
-  return { findings, exposures, graph, vpcOwnerOf, items, shares };
+  return { findings, held, exposures, graph, vpcOwnerOf, items, shares };
 }
 
 // ---------------------------------------------------------------- what the flow logs say
@@ -418,40 +423,60 @@ export const portsIn = (text) => (text === 'every port' ? null : String(text).sp
  * gateway) for at least 3 days with no accepted traffic is "not used"; read for less is "quiet so far". Lines only
  * Google Cloud can see stay "not known" (Google Cloud flow logs are not read). Each public port gets what reached it.
  */
-function applyUsage(graph, exposures, usage, f, now) {
-  const days = (node) => { const c = usage.coverage.get(node); if (!c || new Date(c.until).getTime() < now - 6 * 36e5) return 0; return (new Date(c.until) - new Date(c.since)) / 864e5; };
+// Flow logs say nothing about a VPC whose newest evidence is older than this (its reader stopped, or it has been
+// quiet for longer than its listing vouches for): its lines are not known until it is read again.
+const STALE = 6 * 36e5;
+const FLOW_LINKS = ['peering', 'tgw', 'tgw-peering', 'vpn', 'dx', 'privatelink', 'client-vpn'];
+function applyUsage(graph, exposures, usage, f, now, hold) {
+  // days of flow logs read for a VPC: fresh (none when its newest evidence is older than 6 hours), or as last known
+  const span = (node) => { const c = usage.coverage.get(node); return c ? Math.max(0, (new Date(c.until) - new Date(c.since)) / 864e5) : 0; };
+  const days = (node) => { const c = usage.coverage.get(node); return c && new Date(c.until).getTime() >= now - STALE ? span(node) : 0; };
   const behind = new Map();   // transit gateway or Direct Connect gateway -> VPCs it carries
   const add = (k, v) => { if (!behind.has(k)) behind.set(k, new Set()); behind.get(k).add(v); };
   for (const l of graph.links) if (l.kind === 'tgw') { const [v, t] = l.from.startsWith('aws:vpc:') ? [l.from, l.to] : [l.to, l.from]; add(t, v); }
   for (const l of graph.links) if (l.kind === 'dx') { const g = [l.from, l.to].find((x) => x.startsWith('aws:dxgw:')), t = [l.from, l.to].find((x) => x.startsWith('aws:tgw:'));
     if (g && t) for (const v of behind.get(t) || []) add(g, v); const v = [l.from, l.to].find((x) => x.startsWith('aws:vpc:')); if (g && v) add(g, v); }
-  const cov = (id) => (id.startsWith('aws:vpc:') ? days(id) : Math.max(0, ...[...(behind.get(id) || [])].map(days)));
+  // A VPC's flow logs see everything on its own lines. A hub's line (a VPN or Direct Connect on a transit gateway, a
+  // transit gateway peering) carries any VPC behind it, so every one of them must be read; one read VPC cannot vouch
+  // for another's attachment. A peering is seen from either end.
+  const hub = (id, d) => { const vs = [...(behind.get(id) || [])]; return vs.length ? Math.min(...vs.map(d)) : 0; };
+  const end = (id, d) => (id.startsWith('aws:vpc:') ? d(id) : id.startsWith('aws:tgw:') || id.startsWith('aws:dxgw:') ? hub(id, d) : 0);
+  const cover = (l, d) => (l.kind === 'privatelink' ? end(l.from, d) : Math.max(end(l.from, d), end(l.to, d)));
+  // and nothing is unused for longer than it has been there (first seen by a read; no date: there before the first)
+  const age = (born) => (born ? Math.max(0, (now - new Date(born).getTime()) / 864e5) : Infinity);
+  const needs = (id) => (id.startsWith('aws:vpc:') ? [id] : [...(behind.get(id) || [])]);
   const nodes = new Map(graph.nodes.map((n) => [n.id, n]));
   for (const n of graph.nodes) if (n.kind === 'vpc' && !n.stub) n.flowDays = Math.round(days(n.id) * 10) / 10;
   for (const l of graph.links) {
     // PrivateLink traffic reaches the provider through its load balancer: only the consumer's flow logs can tell
-    const u = usage.links.get(l.id), covered = l.kind === 'privatelink' ? cov(l.from) : Math.max(cov(l.from), cov(l.to));
+    const u = usage.links.get(l.id), read = cover(l, days), covered = Math.min(read, age(l.born)), known = Math.min(cover(l, span), age(l.born));
     const state = u?.bytes > 0 ? 'used' : covered >= QUIET_DAYS ? 'unused' : covered > 0 ? 'quiet' : 'unknown';
-    l.usage = { state, bytes: u?.bytes || 0, flows: u?.flows || 0, rejected: u?.rejected || 0, last: u?.last || null, ports: u?.ports || [], hourly: u?.hourly || null, coveredDays: Math.round(covered * 10) / 10 };
-    if (state === 'unused' && ['peering', 'tgw', 'tgw-peering', 'vpn', 'dx', 'privatelink', 'client-vpn'].includes(l.kind)) {
-      const end = [l.from, l.to].map((id) => nodes.get(id)).find((n) => n?.kind === 'vpc' && !n.stub) || nodes.get(l.from);
-      const other = nodes.get(end.id === l.from ? l.to : l.from);
+    // the VPCs whose flow logs would tell, when they do not
+    const unlogged = state === 'unknown' ? [...new Set((l.kind === 'privatelink' ? [l.from] : [l.from, l.to]).flatMap(needs))].filter((v) => !days(v)) : [];
+    l.usage = { state, bytes: u?.bytes || 0, flows: u?.flows || 0, rejected: u?.rejected || 0, last: u?.last || null, ports: u?.ports || [], hourly: u?.hourly || null, coveredDays: Math.round(covered * 10) / 10,
+      unlogged, ...(age(l.born) < read ? { firstSeen: l.born } : {}) };
+    if (!FLOW_LINKS.includes(l.kind) || u?.bytes > 0) continue;
+    const a = [l.from, l.to].map((id) => nodes.get(id)).find((n) => n?.kind === 'vpc' && !n.stub) || nodes.get(l.from);
+    const other = nodes.get(a.id === l.from ? l.to : l.from);
+    const it = { cloud: 'aws', owner: a.owner, type: l.kind, id: l.nativeId || l.id, name: l.name || `${a.label} ↔ ${other?.label}`, vpc: a.kind === 'vpc' ? a.nativeId : null };
+    if (state === 'unused') {
       const what = { peering: 'VPC peering', tgw: 'Transit gateway attachment', 'tgw-peering': 'Transit gateway peering', vpn: 'VPN', dx: 'Direct Connect', privatelink: 'PrivateLink connection', 'client-vpn': 'Client VPN' }[l.kind];
-      f('net.link-unused', 'low', { cloud: 'aws', owner: end.owner, type: l.kind, id: l.nativeId || l.id, name: l.name || `${end.label} ↔ ${other?.label}`, vpc: end.kind === 'vpc' ? end.nativeId : null },
-        `${what} ${end.label} ↔ ${other?.label || '?'} carried nothing in ${Math.floor(covered)} days`, `The VPC flow logs read for ${Math.floor(covered)} days show no accepted traffic on it${l.usage.rejected ? ` (${l.usage.rejected} rejected)` : ''}.`,
+      f('net.link-unused', 'low', it, `${what} ${a.label} ↔ ${other?.label || '?'} carried nothing in ${Math.floor(covered)} days`, `The VPC flow logs read for ${Math.floor(covered)} days show no accepted traffic on it${l.usage.rejected ? ` (${l.usage.rejected} rejected)` : ''}.`,
         'Remove it if nothing needs it: an unused path is still a way in, and costs money.', { keyPart: l.id });
-    }
+    } else if (known >= QUIET_DAYS) hold('net.link-unused', it, l.id);   // not read lately: what was found stands, decisions with it
   }
   for (const e of exposures) {
-    const hits = usage.exposure.get(e.id) || new Map();
-    const covered = e.cloud === 'aws' ? days(`aws:vpc:${e.vpcOwner || e.owner}:${e.vpc}`) : 0;
+    const hits = usage.exposure.get(e.id) || new Map(), node = `aws:vpc:${e.vpcOwner || e.owner}:${e.vpc}`;
+    const covered = e.cloud === 'aws' ? Math.min(days(node), age(e.firstSeen)) : 0, known = e.cloud === 'aws' ? Math.min(span(node), age(e.firstSeen)) : 0;
     e.flowDays = Math.round(covered * 10) / 10;
     for (const p of e.ports) {
       const r = portsIn(p.ports); let accepted = 0, rejected = 0, sources = 0;
       for (const [k, v] of hits) { const [proto, port] = k.split('|'); if ((p.proto === 'all' || proto === p.proto) && (r === null || r.some(([a, b]) => +port >= a && +port <= b))) { accepted += v.accepted; rejected += v.rejected; sources = Math.max(sources, v.sources); } }
       p.seen = covered > 0 ? { accepted, rejected, sources } : null;
-      if (covered >= QUIET_DAYS && !accepted) f('net.open-port-unused', 'low', { cloud: e.cloud, owner: e.owner, type: e.kind, id: e.id, name: e.name, vpc: e.vpc, vpcOwner: e.vpcOwner },
-        `${p.proto} ${p.ports} on ${e.name} is open to the internet but nobody used it`, `No accepted connection in ${Math.floor(covered)} days of VPC flow logs${rejected ? ` (${rejected} refused)` : ''}, through ${p.via}.`, 'Close it.', { keyPart: `${e.id}|${p.proto}|${p.ports}` });
+      const it = { cloud: e.cloud, owner: e.owner, type: e.kind, id: e.id, name: e.name, vpc: e.vpc, vpcOwner: e.vpcOwner }, keyPart = `${e.id}|${p.proto}|${p.ports}`;
+      if (covered >= QUIET_DAYS && !accepted) f('net.open-port-unused', 'low', it,
+        `${p.proto} ${p.ports} on ${e.name} is open to the internet but nobody used it`, `No accepted connection in ${Math.floor(covered)} days of VPC flow logs${rejected ? ` (${rejected} refused)` : ''}, through ${p.via}.`, 'Close it.', { keyPart });
+      else if (!accepted && known >= QUIET_DAYS) hold('net.open-port-unused', it, keyPart);
     }
     // the busiest ports the internet reached (port 0: the rest, folded together as they were read)
     e.reached = [...hits].filter(([k, v]) => v.accepted && k.split('|')[1] !== '0').map(([k, v]) => ({ proto: k.split('|')[0], port: Number(k.split('|')[1]), ...v })).sort((a, b) => b.accepted - a.accepted).slice(0, 10);
@@ -491,7 +516,7 @@ function buildGraph(x) {
     const r = p.data.requester, a = p.data.accepter; if (!r || !a) continue;
     const from = vpcNode(r.account, r.vpc, r.region, { cidrs: r.cidrs }), to = vpcNode(a.account, a.vpc, a.region, { cidrs: a.cidrs });
     const routed = x.items.some((t) => t.cloud === 'aws' && t.type === 'route-table' && t.data.routes.some((rt) => rt.target.type === 'peering' && rt.target.id === p.id));
-    link(from.id, to.id, 'peering', { name: p.name, nativeId: p.id, status: p.data.status, routed, crossAccount: r.account !== a.account, outside: !x.ownAws(r.account) || !x.ownAws(a.account) });
+    link(from.id, to.id, 'peering', { name: p.name, nativeId: p.id, status: p.data.status, routed, crossAccount: r.account !== a.account, outside: !x.ownAws(r.account) || !x.ownAws(a.account), born: p.firstSeen || null });
   }
   // transit gateways and their attachments
   const tgwNode = (id, owner) => node(`aws:tgw:${id}`, { kind: 'tgw', cloud: 'aws', owner, nativeId: id, label: x.tgws.get(id)?.name || id, ownerName: x.awsName(owner), yours: x.ownAws(owner), cidrs: [] });
@@ -501,9 +526,9 @@ function buildGraph(x) {
     if (a.data.resourceType === 'vpc') {
       const v = x.vpcs.get(`${a.data.resourceOwner}|${a.data.resourceId}`);
       const vn = vpcNode(a.data.resourceOwner, a.data.resourceId, v?.region || a.region, { cidrs: v?.data.cidrs });
-      link(vn.id, t.id, 'tgw', { name: a.name, nativeId: a.id, status: a.data.state, crossAccount: a.data.tgwOwner !== a.data.resourceOwner, outside: !x.ownAws(a.data.tgwOwner) || !x.ownAws(a.data.resourceOwner) });
+      link(vn.id, t.id, 'tgw', { name: a.name, nativeId: a.id, status: a.data.state, crossAccount: a.data.tgwOwner !== a.data.resourceOwner, outside: !x.ownAws(a.data.tgwOwner) || !x.ownAws(a.data.resourceOwner), born: a.firstSeen || null });
     } else if (a.data.resourceType === 'vpn') vpnHub.set(a.data.resourceId, t.id);
-    else if (a.data.resourceType === 'peering') link(t.id, tgwNode(a.data.resourceId, a.data.resourceOwner).id, 'tgw-peering', { name: a.name, nativeId: a.id, status: a.data.state });
+    else if (a.data.resourceType === 'peering') link(t.id, tgwNode(a.data.resourceId, a.data.resourceOwner).id, 'tgw-peering', { name: a.name, nativeId: a.id, status: a.data.state, born: a.firstSeen || null });
   }
   const vgws = items('aws', 'vgw');
   // Google Cloud networks (and peers of theirs that are not read)
@@ -544,7 +569,7 @@ function buildGraph(x) {
       l.up = l.tunnels.filter((t) => t.awsStatus === 'UP' && (!t.gcpStatus || t.gcpStatus === 'ESTABLISHED')).length;
     } else {
       const peer = node(`peer:${cgw?.data.ip || v.data.cgw}`, { kind: 'peer', cloud: null, owner: null, label: cgw?.name || cgw?.data.ip || v.data.cgw, ip: cgw?.data.ip || null, cidrs: [] });
-      const l = link(hub, peer.id, 'vpn', { sub: v.id, name: v.name, tunnels, vpns: [{ id: v.id, name: v.name, cgw: cgw?.data.ip || null, state: v.data.state }] });
+      const l = link(hub, peer.id, 'vpn', { sub: v.id, name: v.name, tunnels, vpns: [{ id: v.id, name: v.name, cgw: cgw?.data.ip || null, state: v.data.state }], born: v.firstSeen || null });
       l.up = tunnels.filter((t) => t.awsStatus === 'UP').length;
     }
   }
@@ -575,7 +600,7 @@ function buildGraph(x) {
     const to = v.data.dxgw ? dxgwNode(v.data.dxgw, dxgws.get(v.data.dxgw)?.data.owner || v.owner).id : v.data.vgw ? vpcOfVgw(v.owner, v.data.vgw) : null;
     if (!to) continue;
     const up = v.data.bgp.filter((b) => b.status === 'up').length;
-    const l = link(dxNode(v.data.connection, v.owner).id, to, 'dx', { sub: v.id, name: v.name, nativeId: v.id, vif: v.data.kind, vlan: v.data.vlan, status: v.data.state, prefixes: v.data.prefixes });
+    const l = link(dxNode(v.data.connection, v.owner).id, to, 'dx', { sub: v.id, name: v.name, nativeId: v.id, vif: v.data.kind, vlan: v.data.vlan, status: v.data.state, prefixes: v.data.prefixes, born: v.firstSeen || null });
     l.up = up; l.total = v.data.bgp.length;
   }
   for (const a of items('aws', 'dx-association')) {
@@ -583,14 +608,14 @@ function buildGraph(x) {
     const gwOwner = a.data.gatewayOwner || a.owner;
     const to = a.data.gatewayType === 'transitGateway' ? tgwNode(a.data.gateway, gwOwner).id
       : vpcOfVgw(a.data.gatewayOwner, a.data.gateway) || node(`aws:vgw:${a.data.gateway}`, { kind: 'vpc', cloud: 'aws', owner: gwOwner, nativeId: a.data.gateway, label: a.data.gateway, ownerName: x.awsName(gwOwner), yours: x.ownAws(gwOwner), read: false, stub: true, cidrs: [] }).id;
-    link(dxgwNode(a.data.dxgw, a.data.dxgwOwner || a.owner).id, to, 'dx', { sub: a.id, name: 'Direct Connect gateway association', nativeId: a.id, status: a.data.state, prefixes: a.data.prefixes,
+    link(dxgwNode(a.data.dxgw, a.data.dxgwOwner || a.owner).id, to, 'dx', { sub: a.id, name: 'Direct Connect gateway association', nativeId: a.id, status: a.data.state, prefixes: a.data.prefixes, born: a.firstSeen || null,
       crossAccount: !!a.data.dxgwOwner && a.data.dxgwOwner !== gwOwner, outside: !x.ownAws(gwOwner) || (a.data.dxgwOwner && !x.ownAws(a.data.dxgwOwner)) });
   }
   // Client VPN: people into a VPC
   for (const c of items('aws', 'client-vpn')) {
     const v = x.vpcs.get(`${c.vpcOwner || c.owner}|${c.vpc}`); if (!v) continue;
     const users = node(`cvpn:${c.id}`, { kind: 'peer', sub: 'client-vpn', cloud: null, owner: null, nativeId: c.id, label: `Client VPN users · ${c.name}`, ip: c.data.cidr, cidrs: [c.data.cidr] });
-    link(users.id, vpcNode(v.owner, v.id, v.region).id, 'client-vpn', { name: c.name, nativeId: c.id, status: c.data.status, rules: c.data.rules });
+    link(users.id, vpcNode(v.owner, v.id, v.region).id, 'client-vpn', { name: c.name, nativeId: c.id, status: c.data.status, rules: c.data.rules, born: c.firstSeen || null });
   }
   // PrivateLink: the provider's VPC (behind its load balancer) and each consumer
   const lbs = items('aws', 'lb'), eps = items('aws', 'endpoint');
@@ -601,7 +626,7 @@ function buildGraph(x) {
       const ep = eps.find((e) => e.id === c.endpoint);
       const cons = ep ? vpcNode(ep.vpcOwner || ep.owner, ep.vpc, ep.region).id : node(`aws:account:${c.account}`, { kind: 'peer', sub: 'account', cloud: 'aws', owner: c.account, nativeId: c.account,
         label: x.awsName(c.account) ? `${x.awsName(c.account)} (${c.account})` : `Account ${c.account}`, yours: x.ownAws(c.account), read: false, stub: true, cidrs: [] }).id;
-      link(cons, prov, 'privatelink', { sub: c.endpoint, name: sv.name.split('.').pop(), nativeId: sv.id, status: c.state, endpoint: c.endpoint, outside: !x.ownAws(c.account), crossAccount: c.account !== sv.owner });
+      link(cons, prov, 'privatelink', { sub: c.endpoint, name: sv.name.split('.').pop(), nativeId: sv.id, status: c.state, endpoint: c.endpoint, outside: !x.ownAws(c.account), crossAccount: c.account !== sv.owner, born: ep?.firstSeen || null });
     }
   }
   // Network Connectivity Center: networks (and VPN or Interconnect spokes) on a hub

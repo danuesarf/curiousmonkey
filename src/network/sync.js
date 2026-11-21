@@ -20,14 +20,20 @@ const json = (v) => JSON.stringify(v);
 export async function saveNetwork({ cloud, owner, accountId = null, gcpConnectionId = null, items = [], skipped = [], error = null }) {
   await tx(async (c) => {
     if (!error) {
+      // when each object was first seen, kept across reads; a new one in an owner read before is new now, and what was
+      // there at the first read has no date (it was there before we looked)
+      const before = new Map((await c.query('SELECT type, native_id, first_seen FROM net_items WHERE cloud = $1 AND owner = $2', [cloud, owner])).rows.map((r) => [`${r.type}|${r.native_id}`, r.first_seen]));
+      const readBefore = before.size > 0 || (await c.query('SELECT 1 FROM net_reads WHERE cloud = $1 AND owner = $2 AND error IS NULL', [cloud, owner])).rows.length > 0;
       await c.query('DELETE FROM net_items WHERE cloud = $1 AND owner = $2', [cloud, owner]);
       // the same object can come twice (a peering is seen from both accounts only once per owner, but be safe)
       const seen = new Set(), rows = items.filter((i) => { const k = `${i.type}|${i.id}`; if (seen.has(k)) return false; seen.add(k); return true; });
+      const now = new Date(), firstSeen = (x) => { const k = `${x.type}|${x.id}`; return before.has(k) ? before.get(k) : readBefore ? now : null; };
       for (let i = 0; i < rows.length; i += 500) {
         const part = rows.slice(i, i + 500);
-        await c.query(`INSERT INTO net_items(cloud, owner, account_id, gcp_connection_id, region, type, native_id, name, vpc, data)
-          SELECT $1, $2, $3, $4, x.region, x.type, x.id, x.name, x.vpc, x.data::jsonb FROM unnest($5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[]) AS x(region, type, id, name, vpc, data)`,
-        [cloud, owner, accountId, gcpConnectionId, part.map((x) => x.region), part.map((x) => x.type), part.map((x) => x.id), part.map((x) => x.name), part.map((x) => x.vpc), part.map((x) => json(x.data))]);
+        await c.query(`INSERT INTO net_items(cloud, owner, account_id, gcp_connection_id, region, type, native_id, name, vpc, data, first_seen)
+          SELECT $1, $2, $3, $4, x.region, x.type, x.id, x.name, x.vpc, x.data::jsonb, x.first_seen
+            FROM unnest($5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::timestamptz[]) AS x(region, type, id, name, vpc, data, first_seen)`,
+        [cloud, owner, accountId, gcpConnectionId, part.map((x) => x.region), part.map((x) => x.type), part.map((x) => x.id), part.map((x) => x.name), part.map((x) => x.vpc), part.map((x) => json(x.data)), part.map(firstSeen)]);
       }
     }
     const counts = {}; for (const i of items) counts[i.type] = (counts[i.type] || 0) + 1;
@@ -53,7 +59,7 @@ export async function networkEstate() {
 }
 
 export async function loadItems() {
-  return (await query(`SELECT cloud, owner, account_id, region, type, native_id AS id, name, vpc, data FROM net_items`)).rows;
+  return (await query(`SELECT cloud, owner, account_id, region, type, native_id AS id, name, vpc, data, first_seen AS "firstSeen" FROM net_items`)).rows;
 }
 
 /** Everything worked out again: findings filed (opened, updated, resolved). Returns the analysis for callers that want it. */
@@ -77,7 +83,8 @@ export async function analyzeAndFile() {
       [p.map((f) => f.key), p.map((f) => f.control), p.map((f) => f.severity), p.map((f) => f.cloud), p.map((f) => f.owner), p.map(acct), p.map((f) => f.itemType), p.map((f) => f.nativeId),
         p.map((f) => f.itemName), p.map((f) => f.vpc), p.map((f) => f.title), p.map((f) => f.detail), p.map((f) => f.suggestion || null)]);
     }
-    await c.query(`UPDATE net_findings SET status = 'resolved', resolved_at = now(), updated_at = now() WHERE status = 'open' AND NOT (key = ANY($1::text[]))`, [fs.map((f) => f.key)]);
+    // held: findings whose evidence is not at hand right now (flow logs not read lately) stay as they are
+    await c.query(`UPDATE net_findings SET status = 'resolved', resolved_at = now(), updated_at = now() WHERE status = 'open' AND NOT (key = ANY($1::text[]))`, [[...fs.map((f) => f.key), ...(r.held || [])]]);
   });
   return r;
 }

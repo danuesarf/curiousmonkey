@@ -31,6 +31,7 @@ const MINUTE = 6e4, HOUR = 36e5, DAY = 864e5;
 const LATE = 2 * HOUR;                                   // a file can land after newer ones: each listing goes back this far
 const LIST_EVERY = 5 * MINUTE;                           // AWS delivers flow log files every 5 minutes
 const RETRY_EVERY = 15 * MINUTE;                         // a flow log that could not be read is tried again after this
+const VOUCH = 48 * HOUR;                                 // listed and found nothing: still covered, this long past the newest file
 const PORTS_KEPT = 40;                                   // per hour, line, side, direction and protocol in one read; the rest fold into port 0
 // what a record needs to be put on a line
 const NEED = ['interface-id', 'srcaddr', 'dstaddr', 'srcport', 'dstport', 'protocol', 'bytes', 'start', 'action'];
@@ -122,9 +123,13 @@ const isPrivate = (v) => PRIVATE.some(([a, b]) => v >= a && v <= b);
 
 /**
  * Where a record went: built once per read from the stored networking and the map (src/network/analyze.js graph).
- * route(record) → { side, dir, port, proto, links: [link ids], exposure: target|null } or null when it is not ours to count.
+ * route(record, vpc) → { side, dir, port, proto, links: [link ids], exposure: target|null, inbound, remoteLogged } or
+ * null when it is not ours to count. `vpc`: the VPC node of the flow log the record came from, to place a record of
+ * an interface the last networking read did not see (an ECS task, an instance started since) by its address.
+ * `logged`: Map(VPC node -> since when, ms) of the VPCs whose flow logs are read in full; traffic between two of them is
+ * in both, and is counted once, where it leaves.
  */
-export function flowRouter(rawItems, graph) {
+export function flowRouter(rawItems, graph, { logged = new Map() } = {}) {
   // a member's interface in a shared VPC travels the owner's subnets and route tables
   const items = shareAware(rawItems).items;
   const aws = items.filter((i) => i.cloud === 'aws');
@@ -135,6 +140,22 @@ export function flowRouter(rawItems, graph) {
   const rtOf = new Map(); for (const t of rts) for (const s of t.data.subnets) rtOf.set(k(t.owner, s), t);
   const mainRt = new Map(rts.filter((t) => t.data.main).map((t) => [k(t.owner, t.vpc), t]));
   const vpcCidr = new Map(aws.filter((i) => i.type === 'vpc').map((v) => [k(v.owner, v.id), v.data.cidrs]));
+  const vpcRanges = new Map([...vpcCidr].map(([key, cidrs]) => [key, (cidrs || []).map(range4).filter(Boolean)]));
+  // each VPC's subnets by range, most specific first: where an interface not read yet sits
+  const subnetsIn = new Map();
+  for (const s of aws.filter((i) => i.type === 'subnet')) {
+    const r = range4(s.data.cidr); if (!r) continue;
+    const node = `aws:vpc:${s.vpcOwner || s.owner}:${s.vpc}`;
+    (subnetsIn.get(node) || subnetsIn.set(node, []).get(node)).push({ r, s });
+  }
+  for (const list of subnetsIn.values()) list.sort((a, b) => (a.r[1] - a.r[0]) - (b.r[1] - b.r[0]));
+  const unknownEni = (r, vpc) => {
+    for (const addr of [r.srcaddr, r.dstaddr]) {
+      const v = ip4(addr), hit = v == null ? null : subnetsIn.get(vpc)?.find((x) => v >= x.r[0] && v <= x.r[1]);
+      if (hit) return { id: `?${hit.s.id}`, unknown: true, owner: hit.s.owner, vpcOwner: hit.s.vpcOwner, vpc: hit.s.vpc, data: { subnet: hit.s.id, privateIp: addr, publicIps: [], kind: 'interface', description: '' } };
+    }
+    return null;
+  };
   const pls = new Map(aws.filter((i) => i.type === 'prefix-list').map((p) => [p.id, p.data.entries]));
   // a route table as ranges, most specific first; the VPC's own range is always local
   const tables = new Map();
@@ -172,9 +193,17 @@ export function flowRouter(rawItems, graph) {
   for (const n of graph.nodes) if (n.kind !== 'slice') for (const c of n.cidrs || []) { const r = range4(c); if (r) owned.push({ r, id: n.id }); }
   owned.sort((a, b) => (a.r[1] - a.r[0]) - (b.r[1] - b.r[0]));
   const ownerOf = (v) => owned.find((x) => v >= x.r[0] && v <= x.r[1])?.id || null;
+  // the VPC an address is in, only when no other node has the same range (two default VPCs are both 172.31.0.0/16)
+  const onlyOwner = (v) => {
+    const all = owned.filter((x) => v >= x.r[0] && v <= x.r[1]); if (!all.length) return null;
+    const best = all.filter((x) => x.r[1] - x.r[0] === all[0].r[1] - all[0].r[0]);
+    return new Set(best.map((x) => x.id)).size === 1 ? best[0].id : null;
+  };
+  const linkById = new Map(graph.links.map((l) => [l.id, l]));
   const mine = new Set([...aws.filter((i) => i.type === 'eni').flatMap((e) => [e.data.publicIp, ...(e.data.publicIps || [])]), ...aws.filter((i) => i.type === 'nat').flatMap((n) => n.data.publicIps),
     ...items.filter((i) => i.cloud === 'gcp' && i.type === 'instance').flatMap((i) => i.data.interfaces.flatMap((x) => x.natIps))].filter(Boolean));
   const tgwTables = new Map(); for (const t of aws.filter((i) => i.type === 'tgw-route-table')) { if (!tgwTables.has(t.data.tgw)) tgwTables.set(t.data.tgw, []); tgwTables.get(t.data.tgw).push(t); }
+  const attachmentOf = new Map(aws.filter((i) => i.type === 'tgw-attachment' && i.data.resourceType === 'vpc').map((a) => [`${a.data.tgw}|${a.data.resourceId}`, a.id]));
   const endpointEni = new Map(), lbOfEni = new Map();
   const lbs = aws.filter((i) => i.type === 'lb');
   for (const e of eniById.values()) {
@@ -193,15 +222,19 @@ export function flowRouter(rawItems, graph) {
   };
 
   const cache = new Map();
-  return function route(r) {
-    const e = eniById.get(r['interface-id']); if (!e || e.data.kind === 'nat_gateway') return null;
-    const vo = e.vpcOwner || e.owner, side = `aws:vpc:${vo}:${e.vpc}`;
+  return function route(r, vpc) {
+    const e = eniById.get(r['interface-id']) || (vpc ? unknownEni(r, vpc) : null); if (!e || e.data.kind === 'nat_gateway') return null;
+    const vo = e.vpcOwner || e.owner, side = `aws:vpc:${vo}:${e.vpc}`, own = vpcRanges.get(k(vo, e.vpc)) || [];
+    const inOwn = (v) => v != null && own.some(([a, b]) => v >= a && v <= b);
+    // a transit gateway's interface in this VPC: what comes from or goes to this VPC is on that end's own interface too
+    if (e.data.kind === 'transit_gateway' && (inOwn(ip4(r.srcaddr)) || inOwn(ip4(r.dstaddr)))) return null;
     const mineIps = [e.data.privateIp, e.data.publicIp, ...(e.data.publicIps || [])];
-    const localIsSrc = mineIps.includes(r.srcaddr) || (!mineIps.includes(r.dstaddr) && ownerOf(ip4(r.srcaddr)) === side);
+    // a secondary address (a pod's, on its node's interface) is this VPC's, not some other VPC's with the same range
+    const localIsSrc = mineIps.includes(r.srcaddr) || (!mineIps.includes(r.dstaddr) && inOwn(ip4(r.srcaddr)));
     const remote = localIsSrc ? r.dstaddr : r.srcaddr, rv = ip4(remote); if (rv == null) return null;
     const lp = Number(localIsSrc ? r.srcport : r.dstport) || 0, rp = Number(localIsSrc ? r.dstport : r.srcport) || 0;
     const remoteServes = rp > 0 && (lp === 0 || rp < lp);
-    const out = { side, dir: remoteServes ? 'out' : 'in', port: remoteServes ? rp : lp, proto: PROTO[r.protocol] || String(r.protocol), links: [], exposure: null };
+    const out = { side, dir: remoteServes ? 'out' : 'in', port: remoteServes ? rp : lp, proto: PROTO[r.protocol] || String(r.protocol), links: [], exposure: null, inbound: !localIsSrc, remoteSince: null };
     const ck = `${e.id}|${remote}`;
     let hit = cache.get(ck);
     if (!hit) {
@@ -209,18 +242,23 @@ export function flowRouter(rawItems, graph) {
       const target = lpm(ranges(t, vo, e.vpc), rv) || { type: 'none' };
       const links = [];
       const dest = isPrivate(rv) || !mine.has(remote) ? ownerOf(rv) : null;
+      let rvpc = null;   // the VPC at the other end, when it is one of ours and certain
       if (target.type === 'local') {
         if (endpointEni.has(remote) && plOf.has(endpointEni.get(remote))) links.push(plOf.get(endpointEni.get(remote)));
         if (/ClientVPN/i.test(e.data.description || '') && cvpnOf.has(side)) links.push(cvpnOf.get(side));
       } else if (['igw', 'eigw', 'nat'].includes(target.type)) { if (internetOf.has(side)) links.push(internetOf.get(side)); }
-      else if (target.type === 'peering') { if (peeringOf.has(target.id)) links.push(peeringOf.get(target.id)); }
-      else if (target.type === 'tgw') {
+      else if (target.type === 'peering') {
+        if (peeringOf.has(target.id)) { const id = peeringOf.get(target.id), l = linkById.get(id); links.push(id); rvpc = l ? (l.from === side ? l.to : l.from) : null; }
+      } else if (target.type === 'tgw') {
         const tgw = `aws:tgw:${target.id}`;
         if (tgwLink.has(`${side}|${tgw}`)) links.push(tgwLink.get(`${side}|${tgw}`));
-        if (dest && dest !== side) links.push(...path(tgw, dest));
+        if (dest && dest !== side) { links.push(...path(tgw, dest)); rvpc = onlyOwner(rv); }
         else {
-          // not one of ours: the transit gateway's own routes say which attachment (a VPN, Direct Connect)
-          const tr = (tgwTables.get(target.id) || []).flatMap((x) => x.data.routes).filter((x) => x.state === 'active').map((x) => ({ r: range4(x.dest), a: x.attachments[0] })).filter((x) => x.r && x.a)
+          // not one of ours: the transit gateway's routes say which attachment (a VPN, Direct Connect), in the route
+          // table this VPC's attachment is associated with (one segment's default route is not another's)
+          const att = attachmentOf.get(`${target.id}|${e.vpc}`), all = tgwTables.get(target.id) || [];
+          const assoc = all.filter((x) => (x.data.associations || []).some((a) => (att && a.attachment === att) || (a.resourceType === 'vpc' && a.resourceId === e.vpc)));
+          const tr = (assoc.length ? assoc : all).flatMap((x) => x.data.routes).filter((x) => x.state === 'active').map((x) => ({ r: range4(x.dest), a: x.attachments[0] })).filter((x) => x.r && x.a)
             .sort((a, b) => (a.r[1] - a.r[0]) - (b.r[1] - b.r[0])).find((x) => rv >= x.r[0] && rv <= x.r[1]);
           if (tr?.a.resourceType === 'vpn' && vpnById.has(tr.a.resourceId)) links.push(vpnById.get(tr.a.resourceId));
           else if (tr?.a.resourceType === 'direct-connect-gateway') links.push(...(dxAt.get(`aws:dxgw:${tr.a.resourceId}`) || (dxOfTgw.has(tgw) ? [dxOfTgw.get(tgw)] : [])));
@@ -230,14 +268,16 @@ export function flowRouter(rawItems, graph) {
         const here = atVpc.get(side) || [];
         const via = dest ? here.filter((id) => path(side, dest)[0] === id) : [];
         links.push(...(via.length ? via : here));
-        if (dest && via.length) links.push(...path(side, dest).slice(1));
+        if (dest && via.length) { links.push(...path(side, dest).slice(1)); rvpc = onlyOwner(rv); }
       }
-      hit = { links: [...new Set(links)], viaIgw: target.type === 'igw' };
+      hit = { links: [...new Set(links)], viaIgw: target.type === 'igw', rvpc: rvpc?.startsWith('aws:vpc:') && rvpc !== side ? rvpc : null };
+      if (cache.size >= 100_000) cache.clear();   // a busy public address meets millions of addresses; the work is cheap to redo
       cache.set(ck, hit);
     }
     out.links = hit.links;
-    // the internet reaching a public address of ours
-    if (hit.viaIgw && out.dir === 'in' && !isPrivate(rv) && !mine.has(remote)) out.exposure = lbOfEni.get(e.id) || e.id;
+    out.remoteSince = hit.rvpc && logged.has(hit.rvpc) ? logged.get(hit.rvpc) : null;
+    // the internet reaching a public address of ours (not one of an interface not read yet: it is not on the map)
+    if (!e.unknown && hit.viaIgw && out.dir === 'in' && !isPrivate(rv) && !mine.has(remote)) out.exposure = lbOfEni.get(e.id) || e.id;
     out.remote = remote;
     return out;
   };
@@ -257,14 +297,17 @@ export function openPorts(exposures = []) {
   return new Map(exposures.filter((e) => e.cloud === 'aws').map((e) => [e.id, e.ports.map((p) => ({ proto: p.proto, ranges: portsIn(p.ports) }))]));
 }
 
-function addRecord(r, route, into, { open } = {}) {
-  const x = route(r); if (!x) return;
+function addRecord(r, route, into, { open, vpc } = {}) {
+  const x = route(r, vpc); if (!x) return;
   const start = Number(r.start); if (!Number.isFinite(start)) return;
   const hour = Math.floor(start / 3600) * HOUR;
   const bytes = Number(r.bytes) || 0, packets = Number(r.packets) || 0, action = r.action === 'REJECT' ? 'REJECT' : 'ACCEPT';
   // refused traffic counts per line, not per port: only its total is shown
   const port = action === 'REJECT' ? 0 : x.port;
-  for (const id of x.links) {
+  // between two VPCs whose flow logs are both read, what is accepted is in both: counted where it leaves (from when the
+  // other end's flow log was on). A refusal is logged only where it is refused.
+  const links = action === 'ACCEPT' && x.inbound && x.remoteSince != null && start * 1000 >= x.remoteSince ? [] : x.links;
+  for (const id of links) {
     const key = `${hour}|${id}|${x.side}|${x.dir}|${port}|${x.proto}|${action}`;
     let row = into.links.get(key);
     if (!row) into.links.set(key, row = { hour, link: id, side: x.side, dir: x.dir, port, proto: x.proto, action, bytes: 0, packets: 0, records: 0 });
@@ -403,20 +446,22 @@ const DENIED = /AccessDenied|not authorized|Forbidden|403|KMS/i;
 async function noteSkip(s) {
   await query(`INSERT INTO net_flow_reads(flow_log, owner, vpc_node, bucket, prefix, note, status, read_at, created) VALUES ($1,$2,$3,$4,$5,$6,'skipped', now(), $7)
     ON CONFLICT (flow_log) DO UPDATE SET owner = EXCLUDED.owner, vpc_node = EXCLUDED.vpc_node, bucket = EXCLUDED.bucket, prefix = EXCLUDED.prefix, note = EXCLUDED.note,
-      status = 'skipped', pending = 0, read_at = now(), created = EXCLUDED.created`,
+      status = 'skipped', pending = 0, read_at = now(), created = EXCLUDED.created, covers = false`,
   [s.fl.id, s.fl.owner, s.vpcNode, s.dest?.bucket ?? null, s.dest?.prefix ?? null, s.note, s.fl.data.created || null]);
 }
 async function saveRead(j) {
   const e = j.error;
   const error = !e ? null : DENIED.test(`${e.name} ${e.message}`) ? `not allowed to read s3://${j.dest.bucket}/${j.dest.prefix ? `${j.dest.prefix}/` : ''}AWSLogs/…/vpcflowlogs/ as ${j.reader.name}: ${String(e.message).slice(0, 200)}` : String(e.message).slice(0, 300);
-  await query(`INSERT INTO net_flow_reads(flow_log, owner, vpc_node, bucket, prefix, last_time, files, bytes, note, error, read_at, front, back, listed_at, pending, status, created)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12,$13,$14,'read',$15)
+  // its listing vouches for an idle VPC only when it is the VPC's own of accepted traffic and AWS does not say delivery fails
+  const covers = !!j.covers && j.fl.data.deliverStatus !== 'FAILED';
+  await query(`INSERT INTO net_flow_reads(flow_log, owner, vpc_node, bucket, prefix, last_time, files, bytes, note, error, read_at, front, back, listed_at, pending, status, created, covers)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now(), $11,$12,$13,$14,'read',$15,$16)
     ON CONFLICT (flow_log) DO UPDATE SET owner = EXCLUDED.owner, vpc_node = EXCLUDED.vpc_node, bucket = EXCLUDED.bucket, prefix = EXCLUDED.prefix,
       last_time = GREATEST(net_flow_reads.last_time, EXCLUDED.last_time), files = net_flow_reads.files + EXCLUDED.files, bytes = net_flow_reads.bytes + EXCLUDED.bytes,
       note = EXCLUDED.note, error = EXCLUDED.error, read_at = now(), front = EXCLUDED.front, back = EXCLUDED.back, listed_at = EXCLUDED.listed_at, pending = EXCLUDED.pending, status = 'read',
-      created = EXCLUDED.created`,
+      created = EXCLUDED.created, covers = EXCLUDED.covers`,
   [j.fl.id, j.fl.owner, j.vpcNode, j.dest.bucket, j.dest.prefix, j.read.last ? new Date(j.read.last) : null, j.read.files, j.read.bytes, j.info, error,
-    j.st.front != null ? new Date(j.st.front) : null, j.st.back != null ? new Date(j.st.back) : null, j.st.listedAt != null ? new Date(j.st.listedAt) : null, j.st.pending, j.fl.data.created || null]);
+    j.st.front != null ? new Date(j.st.front) : null, j.st.back != null ? new Date(j.st.back) : null, j.st.listedAt != null ? new Date(j.st.listedAt) : null, j.st.pending, j.fl.data.created || null, covers]);
 }
 
 /** What the page says about one flow log: whether and how far it is read. `r`: its net_flow_reads row; `fl`: its item, if at hand. */
@@ -461,7 +506,7 @@ async function readFiles(j, todo, ctx) {
       const one = { links: new Map(), exposure: new Map() };
       let r = { records: 0, missing: [] }, whole = true;
       // a broken file is passed over (what it held up to the break is dropped), not read again and again
-      try { r = await countFlowFile(buf, ctx.route, one, { open: ctx.open }); } catch (e) { whole = false; ctx.log('warn', 'flow log file not readable', { key: o.key, error: e.message }); }
+      try { r = await countFlowFile(buf, ctx.route, one, { open: ctx.open, vpc: j.vpcNode }); } catch (e) { whole = false; ctx.log('warn', 'flow log file not readable', { key: o.key, error: e.message }); }
       if (r.missing.length) j.missing = r.missing; else if (whole) mergeInto(batch, one);
       files.push({ bucket: j.dest.bucket, key: o.key, flowLog: j.fl.id, owner: j.fl.owner, vpcNode: j.covers && whole && !r.missing.length ? j.vpcNode : null, time: o.time, size: buf.length, records: whole ? r.records : 0 });
       ok[i] = true;
@@ -587,7 +632,8 @@ async function readFlowLogs({ log, gwFor, now, analyze }) {
   if (!plan.read.length) return null;
 
   const a = (analyze || analyzeNetwork)(items, await networkEstate());
-  const ctx = { now, log, route: flowRouter(items, a.graph), open: openPorts(a.exposures), out: { files: 0, bytes: 0, records: 0, errors: 0, lists: 0 },
+  const logged = new Map(plan.read.filter((p) => p.covers && p.vpcNode && !states.get(p.fl.id)?.error).map((p) => [p.vpcNode, p.fl.data.created ? new Date(p.fl.data.created).getTime() : -Infinity]));
+  const ctx = { now, log, route: flowRouter(items, a.graph, { logged }), open: openPorts(a.exposures), out: { files: 0, bytes: 0, records: 0, errors: 0, lists: 0 },
     budget: { files: BUDGET_FILES, bytes: BUDGET_BYTES, lists: BUDGET_LISTS } };
   const byAcct = new Map((await query('SELECT * FROM cloud_accounts')).rows.map((x) => [x.account_id, x]));
   const bucketOwner = new Map((await query(`SELECT r.name, a.account_id FROM resources r JOIN cloud_accounts a ON a.id = r.account_id WHERE r.service = 's3' AND r.deleted_at IS NULL`).catch(() => ({ rows: [] }))).rows.map((r) => [r.name, r.account_id]));
@@ -648,7 +694,7 @@ export async function flowStorage() {
  * port, what the internet reached.
  */
 export async function loadUsage({ days = LOOKBACK_DAYS, hourStart = null } = {}) {
-  const [links, cover, exp, hourly, ports] = await Promise.all([
+  const [links, cover, exp, hourly, ports, seen] = await Promise.all([
     query(`SELECT link_id, sum(bytes) FILTER (WHERE action = 'ACCEPT')::bigint AS bytes, sum(records) FILTER (WHERE action = 'ACCEPT')::bigint AS flows,
              sum(records) FILTER (WHERE action = 'REJECT')::bigint AS rejected, max(hour) FILTER (WHERE action = 'ACCEPT') AS last
              FROM net_flow_hourly WHERE hour >= now() - make_interval(days => $1) GROUP BY 1`, [days]),
@@ -657,12 +703,20 @@ export async function loadUsage({ days = LOOKBACK_DAYS, hourStart = null } = {})
              FROM net_flow_exposure WHERE hour >= now() - make_interval(days => $1) GROUP BY 1, 2, 3`, [days]),
     hourStart != null ? loadHours(hourStart) : new Map(),
     query(`SELECT link_id, port, proto, sum(bytes)::bigint AS bytes FROM net_flow_hourly WHERE action = 'ACCEPT' AND hour >= now() - make_interval(days => $1) GROUP BY 1, 2, 3`, [days]),
+    // how far a VPC's own flow log was listed, everything found read: an idle VPC writes no files, and is still covered
+    query(`SELECT vpc_node, max(front) AS front FROM net_flow_reads WHERE status = 'read' AND covers AND error IS NULL AND front IS NOT NULL AND vpc_node IS NOT NULL GROUP BY 1`).catch(() => ({ rows: [] })),
   ]);
   const L = new Map(links.rows.map((r) => [r.link_id, { bytes: Number(r.bytes || 0), flows: Number(r.flows || 0), rejected: Number(r.rejected || 0), last: r.last, ports: [], hourly: null }]));
   for (const r of ports.rows) L.get(r.link_id)?.ports.push({ port: r.port, proto: r.proto, bytes: Number(r.bytes) });
   for (const x of L.values()) { x.ports.sort((a, b) => b.bytes - a.bytes); x.ports = x.ports.slice(0, 8); }
   for (const [id, h] of hourly) (L.get(id) || L.set(id, { bytes: 0, flows: 0, rejected: 0, last: null, ports: [] }).get(id)).hourly = h;
-  const C = new Map(cover.rows.map((r) => [r.vpc_node, { since: r.since, until: r.until, files: r.files }]));
+  const front = new Map(seen.rows.map((r) => [r.vpc_node, new Date(r.front).getTime()]));
+  // covered up to the newest file, or as far as the listing found nothing more: up to 48 hours past that file (a
+  // delivery that broke without AWS saying so cannot vouch for longer)
+  const C = new Map(cover.rows.map((r) => {
+    const last = new Date(r.until).getTime(), listed = front.get(r.vpc_node);
+    return [r.vpc_node, { since: r.since, until: listed > last ? new Date(Math.min(listed, last + VOUCH)) : r.until, files: r.files, newest: r.until }];
+  }));
   const E = new Map();
   for (const r of exp.rows) { if (!E.has(r.target)) E.set(r.target, new Map()); E.get(r.target).set(`${r.proto}|${r.port}`, { accepted: Number(r.accepted || 0), rejected: Number(r.rejected || 0), sources: r.sources || 0 }); }
   return { links: L, coverage: C, exposure: E, days };

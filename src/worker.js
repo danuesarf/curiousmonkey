@@ -23,6 +23,7 @@ import {
   completeJob, failJob, reapExpired, enqueueRun, workerTelemetry, workerRuntime, markLostWorkers, pruneSamples, workerMemoryAlarm,
 } from './queue.js';
 import { handlers } from './scanner/jobs.js';
+const FLOW_FILE_EVERY = 10 * 60_000;   // flow log findings worked out again at most this often
 
 const log = (level, msg, extra = {}) =>
   console.log(JSON.stringify({ t: new Date().toISOString(), level, worker: workerId, msg, ...extra }));
@@ -246,9 +247,16 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   timers.push(setInterval(networkRun, 30_000), setTimeout(networkRun, 12_000));
   // its VPC flow logs: new files in S3, a budget at a time, then the findings that depend on them. Only the worker
   // reads them (one worker at a time); each step is noted with this worker's id for Operations → Workers.
-  let flowing = false;
+  // The findings that depend on them change over days: they are worked out again at most every 10 minutes after
+  // something was read, not after every step.
+  let flowing = false, flowFiled = 0, flowDue = false;
   const flowRun = () => { if (flowing || stop.stopped) return; flowing = true;
-    flowTick({ log, worker: workerId }).then((r) => (r?.files ? analyzeAndFile() : null)).catch((e) => log('error', 'flow logs failed', { error: e.message })).finally(() => { flowing = false; }); };
+    flowTick({ log, worker: workerId }).then((r) => {
+      if (r?.files) flowDue = true;
+      if (!flowDue || Date.now() - flowFiled < FLOW_FILE_EVERY) return null;
+      flowDue = false; flowFiled = Date.now();
+      return analyzeAndFile();
+    }).catch((e) => log('error', 'flow logs failed', { error: e.message })).finally(() => { flowing = false; }); };
   timers.push(setInterval(flowRun, 60_000), setTimeout(flowRun, 40_000));
   timers.push(setInterval(() => pruneCallers(config.scanner.callerKeepDays, { log }).catch((e) => log('error', 'caller pruning failed', { error: e.message })), 6 * 3600_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
