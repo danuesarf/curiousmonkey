@@ -5,7 +5,7 @@
 // the view (Map | Sources | Ways in) with a panel for whatever is picked. A filter narrows everything and shows as a
 // pill; a pick only opens the panel and focuses the map. Everything is in the address, so any view can be shared:
 // #/trust?q=source:external finding:external-no-externalid&tab=ways&sel=...
-import { h, svg, get, post, api, num, ago, loadEnvironments, envName, envs, tile, pager, menu, accountPicker, debounced, poll, modal, toast } from '../lib.js';
+import { h, svg, get, post, api, num, ago, loadEnvironments, envName, envs, tile, pager, menu, accountPicker, debounced, poll, modal, toast, ssoSet, softBreaks } from '../lib.js';
 import { session } from '../main.js';
 
 const SEV_ORDER = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
@@ -693,10 +693,10 @@ export async function trustPage(ctx) {
       return h('div', { class: `tm2-way tm2-grp${open ? ' open' : ''}`, role: 'row' },
         h('button', { type: 'button', class: 'tm2-way-main', 'aria-expanded': String(open), onClick: () => { open ? S.expanded.delete(id) : S.expanded.add(id); drawWays(); } },
           h('span', { class: `tm2-dot tm2-dot-${g.attention ? g.worst : 'none'}`, title: g.worst }),
-          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, g.role, g.expected === g.ways ? h('span', { class: 'tm2-chip ok' }, 'EXPECTED') : g.accepted === g.ways ? h('span', { class: 'tm2-chip ok' }, 'ACCEPTED') : null),
+          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name', title: g.role }, ...roleName(g.role), g.expected === g.ways ? h('span', { class: 'tm2-chip ok' }, 'EXPECTED') : g.accepted === g.ways ? h('span', { class: 'tm2-chip ok' }, 'ACCEPTED') : null),
             h('span', { class: 'tiny muted' }, `in ${plural(g.accounts, 'account')}${g.ways > g.accounts ? ` · ${plural(g.ways, 'statement')}` : ''}`)),
-          h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${g.group}` }, g.pkind === 'eks' ? 'EKS' : SHORT[g.group] || g.group), h('span', { class: 'tm-ell' }, g.source)),
-            h('span', { class: 'mono tiny muted tm-ell' }, g.principal)),
+          h('span', { class: 'tm2-c-from' }, h('span', { class: 'tm2-src' }, h('span', { class: `src-tag g-${g.group}` }, g.pkind === 'eks' ? 'EKS' : SHORT[g.group] || g.group), h('span', { class: 'tm2-src-name', title: g.source }, ...softBreaks(g.source))),
+            h('span', { class: 'mono tiny muted tm-ell', title: g.principal }, g.principal)),
           h('span', { class: 'tm2-c-guard' }, g.conditions.length ? gs.map((t) => h('span', { class: 'tm2-guard' }, t)) : g.group === 'service' ? h('span', { class: 'tiny muted' }, '—') : h('span', { class: 'tiny tm2-none' }, 'no conditions')),
           h('span', { class: 'tm2-c-find' }, g.findings.length ? g.findings.map((f) => h('span', { class: 'tm2-find' }, sevBadge(f.severity), h('span', null, f.title))) : h('span', { class: 'tiny muted' }, 'nothing to flag')),
           h('span', { class: 'tm2-c-used tiny' }, g.sessions ? [h('b', null, num(g.sessions)), ` sessions · ${ago(g.lastSeen)}`] : h('span', { class: 'muted' }, g.group === 'service' ? '—' : 'never used')),
@@ -740,9 +740,9 @@ export async function trustPage(ctx) {
       return h('div', { class: `tm2-way${open ? ' open' : ''}`, role: 'row' },
         h('button', { type: 'button', class: 'tm2-way-main', 'aria-expanded': String(open), onClick: () => { open ? S.expanded.delete(id) : S.expanded.add(id); drawWays(); } },
           h('span', { class: `tm2-dot tm2-dot-${e.attention || e.worst === 'low' || e.worst === 'info' || e.worst === 'none' ? e.worst : 'none'}`, title: e.attention ? e.worst : `${e.worst}${e.expected ? ', expected' : e.accepted ? ', accepted' : ''}` }),
-          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name' }, e.role, ...reviewChips(e)), h('span', { class: 'tiny muted' }, `${isGcp(e) ? `project ${e.account}` : `${e.account} · ${e.awsAccountId}`} · ${e.sid || `statement ${e.statement + 1}`}`)),
-          h('span', { class: 'tm2-c-from' }, h('span', { class: 'row', style: 'gap:6px;flex-wrap:nowrap;min-width:0' }, h('span', { class: `src-tag g-${e.group}` }, e.pkind === 'eks' ? 'EKS' : SHORT[e.group] || e.group), h('span', { class: 'tm-ell' }, e.named?.name || e.source)),
-            h('span', { class: 'mono tiny muted tm-ell' }, e.named ? `${e.principalAccount || e.source} · ${e.principal}` : e.principal)),
+          h('span', { class: 'tm2-c-role' }, h('span', { class: 'name', title: e.role }, ...roleName(e.role), ...reviewChips(e)), h('span', { class: 'tiny muted' }, `${isGcp(e) ? `project ${e.account}` : `${e.account} · ${e.awsAccountId}`} · ${e.sid || `statement ${e.statement + 1}`}`)),
+          h('span', { class: 'tm2-c-from' }, h('span', { class: 'tm2-src' }, h('span', { class: `src-tag g-${e.group}` }, e.pkind === 'eks' ? 'EKS' : SHORT[e.group] || e.group), h('span', { class: 'tm2-src-name', title: e.named?.name || e.source }, ...softBreaks(e.named?.name || e.source))),
+            ((t) => h('span', { class: 'mono tiny muted tm-ell', title: t }, t))(e.named ? `${e.principalAccount || e.source} · ${e.principal}` : e.principal)),
           h('span', { class: 'tm2-c-guard' }, e.conditions.length ? [...g.map((t) => h('span', { class: 'tm2-guard' }, t)), g.length < e.conditions.length ? h('span', { class: 'tiny muted' }, `+${e.conditions.length - g.length}`) : null]
             : e.group === 'service' ? h('span', { class: 'tiny muted' }, '—') : h('span', { class: 'tiny tm2-none' }, 'no conditions')),
           h('span', { class: 'tm2-c-find' }, findings.length ? findings.map((f) => h('span', { class: 'tm2-find' }, sevBadge(f.severity), h('span', null, f.title))) : h('span', { class: 'tiny muted' }, 'nothing to flag')),
@@ -819,8 +819,11 @@ export async function trustPage(ctx) {
   const facts = (rows) => h('dl', { class: 'tm-facts' }, rows.filter(Boolean).flatMap(([k, v, tone]) => [h('dt', null, k), h('dd', { class: tone ? `tm-${tone}` : null }, v)]));
   const listOf = (title, items, empty) => h('div', { class: 'tm-sect' }, h('div', { class: 'tm-sect-h' }, h('span', null, title), h('span', { class: 'mono' }, num(items.length))),
     items.length ? h('div', { class: 'tm-list' }, items) : h('p', { class: 'tiny muted', style: 'margin:4px 0' }, empty || 'none'));
-  const item = ({ label, meta, worst, onClick, href }) => {
-    const kids = [h('span', { class: `tm2-dot tm2-dot-${worst || 'none'}` }), h('span', { class: 'tm-item-b' }, h('span', { class: 'tm-item-l' }, label), meta && h('span', { class: 'tm-item-m' }, meta)), sevBadge(worst)];
+  // an Identity Center role by its permission set (the full name is on hover); any long name wraps between words
+  const roleName = (name) => { const set = ssoSet(name); return set ? [...softBreaks(set), h('span', { class: 'tm2-chip', title: `IAM Identity Center permission set · ${name}` }, 'SSO')] : softBreaks(name); };
+  const roleText = (name) => { const set = ssoSet(name); return set ? `${set} (SSO)` : name; };
+  const item = ({ label, meta, worst, onClick, href, title }) => {
+    const kids = [h('span', { class: `tm2-dot tm2-dot-${worst || 'none'}` }), h('span', { class: 'tm-item-b' }, h('span', { class: 'tm-item-l', title: title || (typeof label === 'string' ? label : null) }, label), meta && h('span', { class: 'tm-item-m', title: meta }, meta)), sevBadge(worst)];
     return href ? h('a', { class: 'tm-item', href }, ...kids) : h('button', { type: 'button', class: 'tm-item', onClick }, ...kids);
   };
   const filterTo = (terms) => h('button', { type: 'button', class: 'btn sm primary', title: 'Add it to the filter: the counts, the map, both tables and the export narrow to it', onClick: () => changeTerms([...S.terms, ...parse(terms)]) }, 'Filter to this');
@@ -847,7 +850,7 @@ export async function trustPage(ctx) {
       rolesBox,
       h('div', { class: 'tm-actions' }, filterTo(l.query), waysBtn(), expectBtn({ source: l.from, sourceLabel: nameOf(l.from), accounts: [to?.aws].filter(Boolean), sel: l.id })));
       const key = `${q()}|${l.id}`;
-      const fill = (r) => rolesBox.replaceChildren(listOf(r.rows.some(isGcp) ? 'What it reaches' : 'Roles behind it', groupRoles(r.rows).map((x) => item({ label: x.role, worst: x.worst, href: roleHref(x),
+      const fill = (r) => rolesBox.replaceChildren(listOf(r.rows.some(isGcp) ? 'What it reaches' : 'Roles behind it', groupRoles(r.rows).map((x) => item({ label: roleText(x.role), title: x.role, worst: x.worst, href: roleHref(x),
         meta: [x.findings.slice(0, 2).join(' · ') || (x.conditions ? plural(x.conditions, 'condition') : 'no conditions'), usedText(x), x.risk ? `${x.risk} risk role` : null].filter(Boolean).join(' · ') }))),
       r.total > r.rows.length && h('p', { class: 'tiny muted' }, `The first ${num(r.rows.length)} of ${num(r.total)} statements; the rest under Its ways in.`));
       if (lineKey === key && lineRoles) fill(lineRoles);
@@ -929,7 +932,7 @@ export async function trustPage(ctx) {
       box.replaceChildren(h('div', { class: 'tm-sect-h' }, h('span', null, 'Where it leads next'), h('span', { class: 'mono' }, num(c.roles))),
         h('p', { class: 'tiny', style: 'margin:4px 0' }, `Through the ${plural(c.levels[0].total, 'role')} it gets into: ${plural(sure.length, 'more role')} named in their trust${maybe.length ? `, ${num(maybe.length)} more possible (a whole account trusted)` : ''}`,
           c.moreAccounts ? `, in ${plural(c.moreAccounts, 'more account')}` : '', c.admin ? h('b', { class: 'tm-bad' }, ` · ${plural(c.admin, 'administrator role')} on the way`) : '', '.'),
-        h('div', { class: 'tm-list' }, [...sure, ...maybe].slice(0, 8).map((r) => item({ label: r.role, worst: r.admin ? 'high' : 'none', href: roleHref(r),
+        h('div', { class: 'tm-list' }, [...sure, ...maybe].slice(0, 8).map((r) => item({ label: roleText(r.role), title: r.role, worst: r.admin ? 'high' : 'none', href: roleHref(r),
           meta: `${r.account} · from ${r.from}${r.sure ? '' : ' · possible'}${r.admin ? ' · admin' : ''}` }))),
         sure.length + maybe.length > 8 && h('p', { class: 'tiny muted' }, `and ${num(sure.length + maybe.length - 8)} more`));
     } catch { box.replaceChildren(); }
@@ -967,6 +970,7 @@ export async function trustPage(ctx) {
 
   // ---------------------------------------------------------------- drawing
   function drawView() {
+    body.classList.toggle('tm2-wide', S.tab === 'ways');
     if (S.tab === 'map') { view.replaceChildren(mapBox); drawMap(); }
     else if (S.tab === 'grid') drawGrid();
     else if (S.tab === 'sources') drawSources();

@@ -6,6 +6,20 @@ Element.prototype.append = function (...kids) { return nativeAppend.apply(this, 
 import { paint, COLOUR_ATTRS } from './theme.js';
 export { paint } from './theme.js';
 // Tiny DOM helpers. Everything goes in as text nodes, so data from the API can never become markup.
+/** An IAM Identity Center role's permission set: AWSReservedSSO_<set>_<16 hex> -> <set>; null for any other role. */
+export const ssoSet = (name) => String(name || '').match(/^AWSReservedSSO_(.+?)_[0-9a-f]{16}$/)?.[1] || null;
+/**
+ * A long name that may wrap between its words, not in the middle of one: a <wbr> after _ - / . : @ and between a
+ * lower-case letter or digit and the capital after it (BackendEngineer|NonProd). Copying it copies the name as it is.
+ */
+export function softBreaks(text) {
+  const s = String(text ?? ''), out = [], re = /[_\-/.:@](?=.)|[a-z0-9](?=[A-Z])/g;
+  let last = 0;
+  for (let m = re.exec(s); m; m = re.exec(s)) { const at = m.index + 1; out.push(s.slice(last, at), document.createElement('wbr')); last = at; }
+  out.push(s.slice(last));
+  return out;
+}
+
 export function h(tag, props, ...kids) {
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props || {})) {
