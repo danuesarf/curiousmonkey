@@ -1139,6 +1139,9 @@ a.home-tile:hover{border-color:var(--edge);background:var(--raise)}
 .net-world-box{border-color:var(--red-line);background:var(--red-bg)}
 .net-f{border-left:3px solid var(--edge);padding:4px 8px}.net-f.sev-high{border-color:var(--red)}.net-f.sev-medium{border-color:var(--amber)}
 .net-reads{text-align:right}.net-skips summary{cursor:pointer;color:var(--amber)}.net-skips ul{text-align:left;max-width:420px}
+.net-fl summary{color:var(--muted)}.net-fl.bad summary{color:var(--amber)}.net-fl ul{max-width:520px;max-height:320px;overflow:auto;padding-left:0;list-style:none}
+.net-fl-by{text-align:left;max-width:520px;padding-top:6px;border-top:1px solid var(--line)}
+.net-fl li{padding:5px 0;border-bottom:1px solid var(--line)}.net-fl li:last-child{border-bottom:0}.net-fl .mono,.net-fl-list .mono{word-break:break-all}.net-fl-list li{margin-bottom:6px}
 .net-head-side{align-items:flex-end;gap:8px}
 .net-pending{display:flex;align-items:center;gap:8px;justify-content:flex-end;color:var(--ink2)}
 .net-spin{width:10px;height:10px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--green);animation:net-spin .9s linear infinite}
@@ -1172,6 +1175,8 @@ a.home-tile:hover{border-color:var(--edge);background:var(--raise)}
 .ns-pulse{animation:ns-pulse 1.6s ease-in-out infinite}
 @keyframes ns-pulse{0%,100%{opacity:.9}50%{opacity:.25}}
 .ns-time{display:flex;align-items:flex-end;gap:12px;padding:10px 16px;border-top:1px solid var(--line)}
+.ns-day{display:flex;flex-direction:column;align-items:flex-start;gap:6px}.ns-day-nav{display:flex;align-items:center;gap:6px}.ns-day-t{white-space:nowrap}
+.ns-day-nav .btn{padding:0 8px;min-height:22px;line-height:20px}.ns-day-nav .btn:disabled{opacity:.35}
 .ns-bars{display:flex;align-items:flex-end;gap:3px;flex:1;height:38px}
 .ns-bar{flex:1;height:100%;display:flex;align-items:flex-end;background:none;border:0;padding:0;cursor:pointer}
 .ns-bar span{display:block;width:100%;background:var(--green-d)}.ns-bar.on span{background:var(--banana)}

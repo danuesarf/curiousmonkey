@@ -114,7 +114,7 @@ export function demoGateway(account) {
     },
     async listNetwork() { calls++; return demoAwsNetwork(acct, region0); },
     // VPC flow log files in S3 (DEMO_FLOW_DENIED=1: the bucket refuses the scanner)
-    async listFlowLogObjects({ bucket, prefix }) { calls++; if (process.env.DEMO_FLOW_DENIED === '1') throw Object.assign(new Error('Access Denied'), { name: 'AccessDenied' }); return demoFlowKeys({ bucket, prefix, now: demoNow().getTime() }); },
+    async listFlowLogObjects({ bucket, prefix, startAfter }) { calls++; if (process.env.DEMO_FLOW_DENIED === '1') throw Object.assign(new Error('Access Denied'), { name: 'AccessDenied' }); return demoFlowKeys({ bucket, prefix, startAfter, now: demoNow().getTime() }); },
     async getFlowLogObject({ key }) { calls++; return demoFlowFile(key); },
     async listSamlProviders() {
       calls++;

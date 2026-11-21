@@ -5,26 +5,35 @@ import { query } from '../db.js';
 import { cached, scopeKey } from '../cache.js';
 import { analyzeNetwork, ADMIN_PORTS, DATA_PORTS } from './analyze.js';
 import { loadItems, networkEstate, pendingNetworkRead } from './sync.js';
-import { loadUsage } from './flows.js';
+import { loadUsage, loadHours, flowState, flowStorage, flowStep, LOOKBACK_DAYS, KEEP_DAYS } from './flows.js';
 import { loadPolicy } from '../controls.js';
 import { environmentOf } from '../environments.js';
 
 export class NetError extends Error { constructor(status, message) { super(message); this.status = status; } }
 const SEV = { high: 0, medium: 1, low: 2, none: 3 };
 
-// the 24 one-hour buckets ending with the current hour, as Space replays them
+// the 24 one-hour buckets ending with the current hour (`day` days back), as Space replays them
 const hourStart = (day = 0) => Math.floor(Date.now() / 36e5) * 36e5 - 23 * 36e5 - day * 864e5;
-async function model(day = 0) {
-  return cached(`network:model:${day}`, async () => {
-    const start = hourStart(day);
-    const [items, estate, policy, accts, projects, usage, flowReads] = await Promise.all([loadItems(), networkEstate(), loadPolicy(),
+async function model() {
+  return cached('network:model', async () => {
+    const start = hourStart();
+    const [items, estate, policy, accts, projects, usage, flowReads, flowBytes] = await Promise.all([loadItems(), networkEstate(), loadPolicy(),
       query('SELECT id, account_id, name, environment FROM cloud_accounts').then((r) => r.rows),
       query('SELECT DISTINCT ON (project_id) project_id, name, environment, connection_id FROM gcp_projects ORDER BY project_id').then((r) => r.rows).catch(() => []),
-      loadUsage({ hourStart: start }), query('SELECT * FROM net_flow_reads ORDER BY flow_log').then((r) => r.rows).catch(() => [])]);
+      loadUsage({ hourStart: start }), query('SELECT * FROM net_flow_reads').then((r) => r.rows).catch(() => []), flowStorage().catch(() => null)]);
     const r = analyzeNetwork(items, estate, policy, usage);
     // r.items: what was read with shared VPCs merged (one VPC under its owner, each interface once)
-    return { ...r, accts, projects, hourStart: start, flowReads, targetOf: targets(r.graph, r.items, r.vpcOwnerOf) };
+    return { ...r, accts, projects, hourStart: start, flowReads: new Map(flowReads.map((x) => [x.flow_log, x])), flowBytes, targetOf: targets(r.graph, r.items, r.vpcOwnerOf) };
   }, { freshMs: 30e3, staleMs: 120e3 });
+}
+/** Every active AWS flow log in what was read, with whether and how far it is read (src/network/flows.js). */
+function flowLogsOf(m, pick = () => true) {
+  const now = Date.now();
+  return m.items.filter((i) => i.cloud === 'aws' && i.type === 'flow-log' && i.data.status === 'ACTIVE' && pick(i)).map((i) => {
+    const r = m.flowReads.get(i.id);
+    return { flowLog: i.id, owner: i.owner, resource: i.data.resource, vpcNode: r?.vpc_node || (i.vpc ? `aws:vpc:${i.vpcOwner || i.owner}:${i.vpc}` : null), traffic: i.data.traffic,
+      destination: i.data.destination, arn: i.data.arn, bucket: r?.bucket || null, prefix: r?.prefix ?? null, ...flowState(i, r, now) };
+  }).sort((a, b) => String(a.vpcNode).localeCompare(String(b.vpcNode)) || a.flowLog.localeCompare(b.flowLog));
 }
 
 /**
@@ -75,13 +84,18 @@ function participantView(n, v) {
     tenants: (n.tenants || []).map((y) => (v.ok('aws', y.account) ? y : { account: y.account, name: y.name, owner: y.owner, read: y.read, hidden: true })) };
 }
 
-export async function networkOverview(user, { day = 0 } = {}) {
-  const m = await model(Math.max(0, Math.min(29, Number(day) || 0))), v = visible(user, m);
-  const reads = (await query('SELECT * FROM net_reads ORDER BY cloud, owner')).rows.filter((r) => v.ok(r.cloud, r.owner));
-  // a node is drawn when it is visible, or is the other end of a link from one that is
+// a node is drawn when it is visible, or is the other end of a link from one that is
+function shownOf(m, v) {
   const shown = new Set(m.graph.nodes.filter((n) => n.cloud && v.node(n) && !n.stub).map((n) => n.id));
   const links = m.graph.links.filter((l) => shown.has(l.from) || shown.has(l.to));
   for (const l of links) { shown.add(l.from); shown.add(l.to); }
+  return { shown, links };
+}
+
+export async function networkOverview(user) {
+  const m = await model(), v = visible(user, m);
+  const reads = (await query('SELECT * FROM net_reads ORDER BY cloud, owner')).rows.filter((r) => v.ok(r.cloud, r.owner));
+  const { shown, links } = shownOf(m, v);
   const partOf = (n) => participantView(n, v);
   // the far end of a link into something this person may not see: its name and owner only
   const nodes = m.graph.nodes.filter((n) => shown.has(n.id)).map((n) => (v.full(n) ? n : v.node(n) ? partOf(n)
@@ -100,9 +114,21 @@ export async function networkOverview(user, { day = 0 } = {}) {
     reads: reads.map((r) => ({ cloud: r.cloud, owner: r.owner, name: env.get(`${r.cloud}|${r.owner}`)?.name || r.owner, readAt: r.read_at, skipped: r.skipped, error: r.error, counts: r.counts })),
     owners, nodes, links, exposures: m.exposures.filter((e) => v.ok(e.cloud, e.owner)).sort((a, b) => SEV[a.severity] - SEV[b.severity]),
     findings: sev, linkFindings: onLinks, pending: await pendingNetworkRead(), ports: { admin: ADMIN_PORTS, data: DATA_PORTS }, hourStart: new Date(m.hourStart).toISOString(),
-    flowLogs: m.flowReads.filter((r) => v.ok('aws', r.owner)).map((r) => ({ flowLog: r.flow_log, owner: r.owner, vpcNode: r.vpc_node, bucket: r.bucket, prefix: r.prefix, lastTime: r.last_time, files: r.files,
-      bytes: Number(r.bytes || 0), note: r.note, error: r.error, readAt: r.read_at })),
+    flowLogs: flowLogsOf(m, (i) => v.ok('aws', i.owner)),
+    flow: { lookbackDays: LOOKBACK_DAYS, keepDays: KEEP_DAYS, storedBytes: m.flowBytes, step: await flowStep().catch(() => null) },
   };
+}
+
+/**
+ * The lines' traffic by the hour for the 24 hours `day` days before the last 24 (0: the last 24 hours), for Space to
+ * replay an earlier day: { hourStart, day, hours: { link id: [24 × { bytes, rejected }] } }, the lines this person sees.
+ */
+export async function networkHours(user, { day = 0 } = {}) {
+  const m = await model(), v = visible(user, m);
+  const d = Math.max(0, Math.min(LOOKBACK_DAYS - 1, Math.floor(Number(day) || 0))), start = hourStart(d);
+  const ids = new Set(shownOf(m, v).links.map((l) => l.id));
+  const all = await cached(`network:hours:${start}`, () => loadHours(start), { freshMs: 60e3, staleMs: 300e3 });
+  return { day: d, hourStart: new Date(start).toISOString(), hours: Object.fromEntries([...all].filter(([id]) => ids.has(id))) };
 }
 
 export async function networkFindings(user, q = {}) {
@@ -175,9 +201,7 @@ export async function networkDetail(user, nodeId) {
       loadBalancers: list('lb').map((b) => ({ id: b.id, account: b.owner, name: b.name, scheme: b.data.scheme, kind: b.data.kind, listeners: b.data.listeners, groups: b.data.groups })),
       interfaces: enis.map((e) => ({ id: e.id, account: e.owner, name: e.name, subnet: e.data.subnet, privateIp: e.data.privateIp, publicIp: e.data.publicIp, groups: e.data.groups, kind: e.data.kind, instance: e.data.instance })),
       flowLogs: m.items.some((i) => i.cloud === 'aws' && i.owner === n.owner && i.type === 'flow-log' && i.data.resource === n.nativeId && i.data.status === 'ACTIVE'),
-      flowLogList: m.items.filter((i) => i.cloud === 'aws' && i.owner === n.owner && i.type === 'flow-log' && (i.data.resource === n.nativeId || subnets.some((s) => s.id === i.data.resource)))
-        .map((i) => { const r = m.flowReads.find((x) => x.flow_log === i.id); return { id: i.id, resource: i.data.resource, status: i.data.status, destination: i.data.destination, arn: i.data.arn, traffic: i.data.traffic,
-          read: r ? { files: r.files, lastTime: r.last_time, note: r.note, error: r.error } : null }; }),
+      flowLogList: flowLogsOf(m, (i) => i.owner === n.owner && (i.data.resource === n.nativeId || subnets.some((s) => s.id === i.data.resource))),
       clientVpns: list('client-vpn').map((c) => ({ id: c.id, name: c.name, ...c.data })),
       resolver: { endpoints: list('resolver-endpoint').map((e) => ({ id: e.id, name: e.name, ...e.data })),
         rules: m.items.filter((i) => i.cloud === 'aws' && i.owner === n.owner && i.type === 'resolver-rule' && i.data.vpcs.includes(n.nativeId)).map((r) => ({ id: r.id, name: r.name, ...r.data })) },

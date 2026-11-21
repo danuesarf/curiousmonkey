@@ -3,6 +3,7 @@ import { query } from './db.js';
 import { config } from './config.js';
 import { markLostWorkers } from './queue.js';
 import { effectiveLookback } from './settings.js';
+import { isEnabled } from './extensions.js';
 
 const MB = 1024 * 1024;
 const RANGES = { '1h': [60, '15 seconds'], '6h': [360, '2 minutes'], '24h': [1440, '5 minutes'] };
@@ -45,13 +46,34 @@ export async function workerStatus({ range = '1h' } = {}) {
     return { ...j, stalled, sinceProgressS: at ? Math.round((now - at) / 1000) : null };
   });
   const q = queue.rows[0];
-  const advice = advise({ workers, reading, fails: fails.rows, queue: q, accounts: accts.rows });
-  return { range, workers, reading, failures: fails.rows, queue: q, advice, settings: { sliceHours: config.scanner.sliceHours, maxLookbackDays: config.scanner.maxLookbackDays } };
+  const flow = await flowReader().catch(() => null);
+  const advice = advise({ workers, reading, fails: fails.rows, queue: q, accounts: accts.rows, flow });
+  return { range, workers, reading, failures: fails.rows, queue: q, advice, flow, settings: { sliceHours: config.scanner.sliceHours, maxLookbackDays: config.scanner.maxLookbackDays } };
+}
+
+/**
+ * The VPC flow log reader (src/network/flows.js), when Networking is on: its last step and the worker that ran it,
+ * each flow log by state, what is kept. Only the worker reads flow logs; this says which one, and how it is going.
+ */
+async function flowReader() {
+  if (!(await isEnabled('networking'))) return null;
+  const { flowStep, flowState, flowStorage, FLOW_SETTINGS } = await import('./network/flows.js');
+  const [step, reads, vpcs, stored] = await Promise.all([flowStep(),
+    query(`SELECT r.*, a.name AS account_name FROM net_flow_reads r LEFT JOIN cloud_accounts a ON a.account_id = r.owner ORDER BY r.vpc_node, r.flow_log`).then((r) => r.rows),
+    query(`SELECT owner, native_id, name FROM net_items WHERE cloud = 'aws' AND type = 'vpc'`).then((r) => new Map(r.rows.map((v) => [`aws:vpc:${v.owner}:${v.native_id}`, v.name || v.native_id]))).catch(() => new Map()),
+    flowStorage().catch(() => null)]);
+  const now = Date.now();
+  const flowLogs = reads.map((r) => ({ flowLog: r.flow_log, owner: r.owner, accountName: r.account_name || r.owner, vpcNode: r.vpc_node, vpc: vpcs.get(r.vpc_node) || r.vpc_node?.split(':').pop() || null,
+    bucket: r.bucket, prefix: r.prefix, ...flowState(null, r, now) }));
+  const n = (st) => flowLogs.filter((x) => x.state === st).length;
+  return { ...step, settings: FLOW_SETTINGS, storedBytes: stored, flowLogs,
+    counts: { current: n('current'), catchingUp: n('catching-up'), waiting: n('waiting'), error: n('error'), skipped: n('skipped') },
+    pending: flowLogs.reduce((t, x) => t + (x.pending || 0), 0), historyBack: flowLogs.filter((x) => x.state === 'catching-up').map((x) => x.back).filter(Boolean).sort()[0] || null };
 }
 
 // ---- advice ----
 // Each item: { level: 'critical'|'warning'|'info'|'good', area: 'memory'|'cpu'|'capacity'|'reading'|'setup', title, detail, fix }
-export function advise({ workers, reading, fails, queue, accounts }) {
+export function advise({ workers, reading, fails, queue, accounts, flow = null }) {
   const out = [];
   const add = (level, area, title, detail, fix) => out.push({ level, area, title, detail, fix });
   const alive = workers.filter((w) => w.alive);
@@ -118,6 +140,19 @@ export function advise({ workers, reading, fails, queue, accounts }) {
   const capped = [...new Map(accounts.filter((a) => a.event_source === 's3' && a.lookback_days > effectiveLookback(a)).map((a) => [a.id, a])).values()];
   if (capped.length) add('info', 'reading', `${capped.length} account${capped.length > 1 ? 's ask' : ' asks'} for more history than the workspace maximum`, capped.map((a) => `${a.name} (${a.lookback_days} days)`).join(', '), 'Raise the maximum lookback under Configuration if you want it.');
   for (const f of fails.filter((x) => x.n >= 3 && !/lease expired|AccessDenied/i.test(x.error || ''))) add('warning', 'reading', `${f.n} jobs failed with the same error in 24 h`, f.error, 'Open one of them on the Scans page and read its log.');
+
+  // VPC flow logs (Networking): the worker reads them a step a minute; say when it stopped, or one cannot be read
+  if (flow && alive.length && flow.flowLogs.length) {
+    const since = flow.last?.at ? Math.round((Date.now() - new Date(flow.last.at).getTime()) / 1000) : null;
+    if (since == null || since > 600) add('warning', 'reading', since == null ? 'VPC flow logs have not been read yet' : `VPC flow logs: no step for ${dur(since)}`,
+      'A worker reads new flow log files every minute; none has finished a step lately.', 'Check the worker logs for “flow logs failed”, and that the Networking extension is on.');
+    else if (flow.last?.error) add('warning', 'reading', 'The VPC flow log step failed', flow.last.error, 'Check the worker logs for “flow logs failed”.');
+  }
+  if (flow?.counts.error) {
+    const bad = flow.flowLogs.filter((x) => x.state === 'error');
+    add('warning', 'reading', `${bad.length} VPC flow log${bad.length > 1 ? 's' : ''} cannot be read`, bad.slice(0, 3).map((x) => `${x.vpc || x.flowLog} (${x.accountName}): ${x.error}`).join(' · '),
+      'The onboarding template lets the scanner role read flow log files in any bucket, but a bucket policy or an SSE-KMS key can still refuse it: allow the role in both, or connect the log archive account that owns the bucket.');
+  }
 
   if (!out.some((o) => o.level === 'critical' || o.level === 'warning')) add('good', 'capacity', 'Nothing needs attention', 'Workers have headroom and every read is moving.', null);
   const order = { critical: 0, warning: 1, info: 2, good: 3 };

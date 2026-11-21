@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { listExtensions, setExtension, isEnabled } from '../extensions.js';
-import { networkOverview, networkFindings, networkDetail, networkInventory, decideNetFinding, undecideNetFinding, NetError } from '../network/api.js';
+import { networkOverview, networkHours, networkFindings, networkDetail, networkInventory, decideNetFinding, undecideNetFinding, NetError } from '../network/api.js';
 import { requestNetworkRead } from '../network/sync.js';
 import { clearCache } from '../cache.js';
 
@@ -30,7 +30,9 @@ extensions.put('/extensions/:key', requirePerm('settings'), wrap(async (req, res
   res.json({ ok: true, changed, items: await listExtensions() });
 }));
 
-extensions.get('/network', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkOverview(req.user, { day: req.query.day })); }));
+extensions.get('/network', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkOverview(req.user)); }));
+// the lines' traffic by the hour on an earlier day, for Space's replay
+extensions.get('/network/hours', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkHours(req.user, { day: req.query.day })); }));
 extensions.get('/network/findings', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkFindings(req.user, req.query)); }));
 extensions.get('/network/node', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkDetail(req.user, String(req.query.id || ''))); }));
 extensions.get('/network/inventory', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkInventory(req.user, req.query)); }));
