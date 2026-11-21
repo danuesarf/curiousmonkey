@@ -15,12 +15,16 @@ const KIND_COLOR = { share: '#b9a3ff', peering: '#8ec5ff', tgw: '#6fe3b0', 'tgw-
 const RED = '#ff6b5e', AMBER = '#f0b45a', IDLE = '#5f6f68';
 const human = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} kB` : `${b} B`);
 
-function ctrl(a, b, lift) {
+// `bow`: how far the control point moves sideways (x). A line between accounts or projects stacked in one cloud's column
+// with another between them bows out past the column's outer edge, or it would run front to back straight over the
+// zones and rings between them (seen from above, rising and going back both move a line up the screen, so lifting
+// alone does not separate them)
+function ctrl(a, b, lift, bow = 0) {
   const dx = b[0] - a[0], dy = b[1] - a[1], dist = Math.hypot(dx, dy) || 1, A = lift != null ? lift : 40 + 0.22 * dist;
-  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2 + 2 * A];
+  return [(a[0] + b[0]) / 2 + bow, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2 + 2 * A];
 }
-function arc(a, b, P, lift) {
-  const c = ctrl(a, b, lift), pts = [];
+function arc(a, b, P, lift, bow = 0) {
+  const c = ctrl(a, b, lift, bow), pts = [];
   for (let i = 0; i <= 24; i++) { const t = i / 24, u = 1 - t; pts.push(P(u * u * a[0] + 2 * u * t * c[0] + t * t * b[0], u * u * a[1] + 2 * u * t * c[1] + t * t * b[1], u * u * a[2] + 2 * u * t * c[2] + t * t * b[2])); }
   return { pts, d: `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')}` };
 }
@@ -55,13 +59,17 @@ function layout(d, envColor) {
   };
   const da = field('aws', -AISLE - FW), dg = field('gcp', AISLE);
   const depth = Math.max(da, dg, 500);
-  // hubs in the aisle, level with what they connect, at least 150 apart
+  // hubs in the aisle, on their own cloud's side of it (transit and Direct Connect gateways towards AWS, Network
+  // Connectivity Center hubs towards Google Cloud), level with what they connect, at least 150 apart on each side
   const near = (id) => { const ys = d.links.filter((l) => l.from === id || l.to === id).map((l) => P.get(l.from === id ? l.to : l.from)?.y).filter((y) => y != null); return ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 0; };
-  const hubs = d.nodes.filter((n) => ['tgw', 'dxgw', 'hub'].includes(n.kind));
-  const ys = hubs.map((n) => ({ n, y: near(n.id) })).sort((a, b) => a.y - b.y);
-  for (let i = 1; i < ys.length; i++) if (ys[i].y - ys[i - 1].y < 150) ys[i].y = ys[i - 1].y + 150;
-  const shift = ys.length ? (ys[0].y + ys[ys.length - 1].y) / 2 - ys.reduce((a, b) => a + b.y, 0) / ys.length : 0;
-  ys.forEach(({ n, y }, i) => P.set(n.id, { x: (i % 2 ? 40 : -40), y: y - shift, z: 80 + (i % 2) * 30, r: 16, hub: true }));
+  for (const side of [-1, 1]) {
+    const ys = d.nodes.filter((n) => ['tgw', 'dxgw', 'hub'].includes(n.kind) && (n.cloud === 'gcp' ? 1 : -1) === side).map((n) => ({ n, y: near(n.id) })).sort((a, b) => a.y - b.y);
+    const want = ys.reduce((a, b) => a + b.y, 0) / (ys.length || 1);
+    for (let i = 1; i < ys.length; i++) if (ys[i].y - ys[i - 1].y < 150) ys[i].y = ys[i - 1].y + 150;
+    // spreading them out pushes them back: bring the group to where it wanted to be on average
+    const shift = ys.reduce((a, b) => a + b.y, 0) / (ys.length || 1) - want;
+    ys.forEach(({ n, y }, i) => P.set(n.id, { x: side * (AISLE * 0.5 + (i % 2) * 24), y: y - shift, z: 80 + (i % 2) * 30, r: 16, hub: true }));
+  }
   // peers and outsiders: off the outer edge of the cloud they connect to
   const outer = d.nodes.filter((n) => n.kind === 'peer' || (n.stub && n.kind !== 'tgw'));
   const left = [], right = [];
@@ -69,7 +77,7 @@ function layout(d, envColor) {
   const spread = (list, x) => list.forEach((n, i) => P.set(n.id, { x, y: list.length === 1 ? 0 : -depth / 2 + (depth * i) / (list.length - 1), z: 20, r: 14, outer: true }));
   spread(left, -AISLE - FW - 200); spread(right, AISLE + FW + 200);
   P.set('internet', { x: 0, y: depth / 2 + 40, z: 300, r: 26 });
-  return { P, zones, span: AISLE + FW };
+  return { P, zones, span: AISLE + FW, aisle: AISLE };
 }
 
 /**
@@ -79,6 +87,17 @@ function layout(d, envColor) {
  */
 export function networkScene(d, { pick, sel, envColor, onHour, match = () => true, tools = [], internet = () => true, onInternet = () => {} }) {
   const L = layout(d, envColor);
+  // a line between two accounts or projects on the same cloud's plane with another zone between them goes round the
+  // outside of the plane, its middle just past the outer edge, clear of the zones and rings it would cross
+  const inColumn = (p) => Math.abs(p[0]) >= L.aisle * 0.99 && Math.abs(p[0]) <= L.span + 1;
+  const zoneAt = (p) => L.zones.filter((z) => Math.sign(z.x0 + z.x1) === Math.sign(p[0])).sort((x, y) => x.y0 - y.y0).findIndex((z) => p[1] >= z.y0 && p[1] <= z.y1);
+  const bowOf = (a, b) => {
+    if (!inColumn(a) || !inColumn(b) || Math.sign(a[0]) !== Math.sign(b[0])) return 0;
+    const za = zoneAt(a), zb = zoneAt(b);
+    if (za < 0 || zb < 0 || Math.abs(za - zb) < 2) return 0;
+    const side = Math.sign(a[0]);
+    return side * Math.max(0, 2 * (L.span + 40 - side * (a[0] + b[0]) / 2));
+  };
   const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, playing: false, internet: internet() };
   const hasFlows = d.links.some((l) => l.usage && l.usage.state !== 'unknown');
   const hourly = Array.from({ length: 24 }, (_, i) => d.links.reduce((n, l) => n + (l.kind === 'internet' ? 0 : l.usage?.hourly?.[i]?.bytes || 0), 0));
@@ -95,6 +114,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
     const v = view(HOME.az, HOME.el), pts = [];
     for (const z of L.zones) pts.push([z.x0, z.y0, 0], [z.x1, z.y0, 0], [z.x1, z.y1, 0], [z.x0, z.y1, 0]);
     for (const p of L.P.values()) pts.push([p.x, p.y, p.z]);
+    for (const z of L.zones) pts.push([Math.sign(z.x0 + z.x1) * (L.span + 60), (z.y0 + z.y1) / 2, 0]);   // room for lines round the outside
     let x0 = Infinity, x1 = -Infinity, u0 = Infinity, u1 = -Infinity;
     for (const [x, y, z] of pts) { const [X, U] = v(x, y, z); x0 = Math.min(x0, X); x1 = Math.max(x1, X); u0 = Math.min(u0, U); u1 = Math.max(u1, U); }
     const F = Math.min((W - 80) / Math.max(1e-6, x1 - x0), (H - 70) / Math.max(1e-6, u1 - u0));
@@ -131,7 +151,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
       const hourBytes = u.hourly ? u.hourly[st.hour].bytes : 0;
       const color = l.kind === 'internet' && (d.nodes.find((n) => n.id === (l.from === 'internet' ? l.to : l.from))?.worst === 'high') ? RED : KIND_COLOR[l.kind] || '#a9bfb2';
       const top = l.kind === 'internet' ? [a[0], a[1], 90] : a;
-      const g = arc(top, b, P, l.kind === 'internet' ? 30 : null);
+      const g = arc(top, b, P, l.kind === 'internet' ? 30 : null, l.kind === 'internet' ? 0 : bowOf(a, b));
       const on = cur === l.id;
       let stroke = color, dash = null, op = 0.85, w = usageWidth(l, u.bytes);
       if (u.state === 'unused') { stroke = IDLE; dash = '7 6'; op = 0.75; w = 1.4; }
@@ -143,7 +163,9 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
         svg('path', { d: g.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 14, class: 'ns-hit', onClick: () => pick(l.id) },
           svg('title', null, `${l.kind}${l.name ? ` · ${l.name}` : ''} · ${u.state === 'used' ? `used, ${human(u.bytes)} in ${Math.max(1, Math.floor(u.coveredDays || 0))} day${Math.floor(u.coveredDays || 0) > 1 ? 's' : ''} of flow logs` : u.state === 'unused' ? `not used in ${Math.floor(u.coveredDays)} days of flow logs` : u.state === 'quiet' ? 'nothing yet (flow logs read for less than 3 days)' : 'use not known (no flow logs on either side)'}`))));
       if (u.state === 'unused' && (on || !cur)) { const m = g.pts[12]; out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 32), y: f(m[1] - 9), width: 64, height: 16, rx: 2, fill: '#030d08', stroke: IDLE }), svg('text', { x: f(m[0]), y: f(m[1] + 3), 'text-anchor': 'middle', class: 'ns-tag-t', fill: '#a9bfb2' }, 'NOT USED'))); }
-      if (l.kind === 'vpn' && l.tunnels?.length && (l.up ?? 0) < l.tunnels.length) { const m = g.pts[12]; out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 30), y: f(m[1] + 10), width: 60, height: 16, rx: 2, fill: '#030d08', stroke: RED }), svg('text', { x: f(m[0]), y: f(m[1] + 22), 'text-anchor': 'middle', class: 'ns-tag-t', fill: RED }, `${l.up}/${l.tunnels.length} UP`))); }
+      if (l.kind === 'vpn' && l.tunnels?.length && (l.up ?? 0) < l.tunnels.length) { const m = g.pts[12]; const dy = u.state === 'unused' && (on || !cur) ? 18 : 0;
+        // on the line it is about (above or below it, it lands on a ring or a zone's name), under NOT USED when both
+        out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 30), y: f(m[1] - 8 + dy), width: 60, height: 16, rx: 2, fill: '#030d08', stroke: RED }), svg('text', { x: f(m[0]), y: f(m[1] + 4 + dy), 'text-anchor': 'middle', class: 'ns-tag-t', fill: RED }, `${l.up}/${l.tunnels.length} UP`))); }
       // light travelling along a line that carried traffic in the hour shown
       if (hourBytes > 0 && !document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
         const n = Math.min(3, 1 + Math.floor(Math.log10(1 + hourBytes) / 3));
@@ -187,7 +209,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
         }
         const lp = P(p.x, p.y - p.r * 1.02, 0);   // under the ring's front edge
         g.push(svg('text', { x: f(lp[0]), y: f(lp[1] + 14), 'text-anchor': 'middle', class: 'ns-label strong' }, n.label.length > 24 ? `${n.label.slice(0, 23)}…` : n.label),
-          svg('text', { x: f(lp[0]), y: f(lp[1] + 27), 'text-anchor': 'middle', class: 'ns-sub' }, p.slice ? `shared by ${n.vpcOwnerName || n.vpcOwner} · ${n.interfaces || 0} interfaces`
+          svg('text', { x: f(lp[0]), y: f(lp[1] + 27), 'text-anchor': 'middle', class: 'ns-sub' }, p.slice ? `shared by ${n.vpcOwnerName || n.vpcOwner} · ${n.attachedOnly ? 'nothing running' : n.cloud === 'gcp' ? `${n.instances || 0} instance${n.instances === 1 ? '' : 's'}` : `${n.interfaces || 0} interface${n.interfaces === 1 ? '' : 's'}`}`
             : `${(n.cidrs || []).slice(0, 1).join('')}${n.shared ? ` · shared ×${(n.tenants || []).length - 1}` : ''}${n.flowDays ? ` · flow logs ${n.flowDays} d` : ''}`));
       }
       out.push(svg('g', { class: 'ns-node', opacity: fade(n.id), onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': n.label,

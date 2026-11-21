@@ -54,8 +54,10 @@ export function classifyPorts(ranges) {
 }
 const named = (ports, dict) => [...new Set(ports.map((p) => `${dict[p]} (${p})`))].join(', ');
 
-// ---------------------------------------------------------------- shared VPCs (AWS RAM)
+// ---------------------------------------------------------------- shared VPCs (AWS RAM, Google Cloud Shared VPC)
 const ACCOUNT = /^\d{12}$/;
+// a Google Cloud network's project, from its path (projects/<project>/global/networks/<name>)
+const projectOf = (path) => (/^projects\//.test(path || '') ? path.split('/')[1] : null);
 /**
  * One VPC per real owner. A VPC a network account shares with member accounts (AWS RAM) is read several ways: the
  * owner reads it with its subnets, routes and gateways, and the network interfaces members run in it; each member reads
@@ -64,8 +66,13 @@ const ACCOUNT = /^\d{12}$/;
  *   - each network interface once, under the account it belongs to (the member's own read when there is one);
  *   - `vpcOwner` on every AWS item that sits in a VPC: the account that owns the VPC (in a shared VPC, not the
  *     account the item belongs to).
- * Returns { items, shares: Map('<owner>|<vpc>' -> { owner, vpc, members: Map(account -> { via: Set('read' |
- * 'interfaces' | 'ram'), share, shareName }), principals: [OU or organization ARNs] }), vpcOwnerOf(owner, vpc) }.
+ * Google Cloud's Shared VPC is simpler to read: a service project's instances, load balancers and endpoints name the
+ * host's network in their own path, and the host lists its service projects (xpn). Its items get `vpcOwner` too (the
+ * network's project), and each service project becomes a member of the host network it runs in, or, when it runs
+ * nothing there yet, of the host it is attached to (`attached`: the host's networks, as it may use any it is given).
+ * Returns { items, shares: Map('<cloud>|<owner>|<vpc>' -> { cloud, owner, vpc, members: Map(account or project ->
+ * { via: Set('read' | 'interfaces' | 'ram' | 'instances' | 'xpn'), share, shareName }), principals: [OU or
+ * organization ARNs] }), vpcOwnerOf(owner, vpc) }.
  */
 export function shareAware(items) {
   const realVpc = new Map(), ownRead = new Set();
@@ -73,12 +80,19 @@ export function shareAware(items) {
     if (i.type === 'vpc') realVpc.set(`${i.owner}|${i.id}`, i.data?.owner || i.owner);
     if (['vpc', 'subnet', 'eni'].includes(i.type) && (!i.data?.owner || i.data.owner === i.owner)) ownRead.add(`${i.type}|${i.owner}|${i.id}`);
   }
-  const vpcOwnerOf = (owner, vpc) => (vpc ? realVpc.get(`${owner}|${vpc}`) || owner : owner);
+  const vpcOwnerOf = (owner, vpc) => (!vpc ? owner : projectOf(vpc) || realVpc.get(`${owner}|${vpc}`) || owner);
   const shares = new Map();
-  const share = (owner, vpc) => { const k = `${owner}|${vpc}`; if (!shares.has(k)) shares.set(k, { owner, vpc, members: new Map(), principals: [] }); return shares.get(k); };
+  const share = (owner, vpc, cloud = 'aws') => { const k = `${cloud}|${owner}|${vpc}`; if (!shares.has(k)) shares.set(k, { cloud, owner, vpc, members: new Map(), principals: [] }); return shares.get(k); };
   const member = (sh, acct, via, extra = {}) => { if (acct === sh.owner) return; if (!sh.members.has(acct)) sh.members.set(acct, { via: new Set() }); const m = sh.members.get(acct); m.via.add(via); Object.assign(m, extra); };
   const out = [], kept = new Set();
   for (const i of items) {
+    if (i.cloud === 'gcp') {
+      // a service project's instance, load balancer or endpoint in the host's network
+      const host = projectOf(i.vpc);
+      if (host && host !== i.owner && ['instance', 'forwarding-rule', 'psc-endpoint', 'ilb'].includes(i.type)) member(share(host, i.vpc, 'gcp'), i.owner, 'instances');
+      out.push(host ? { ...i, vpcOwner: host } : i);
+      continue;
+    }
     if (i.cloud !== 'aws') { out.push(i); continue; }
     const real = i.data?.owner;
     if ((i.type === 'vpc' || i.type === 'subnet') && real && ACCOUNT.test(real) && real !== i.owner) {
@@ -112,6 +126,11 @@ export function shareAware(items) {
         else if (!sh.principals.includes(p.id)) sh.principals.push(p.id);
       }
     }
+  }
+  // service projects attached to a Shared VPC host (xpn): members of each of its networks, as attached
+  const gnets = items.filter((i) => i.cloud === 'gcp' && i.type === 'network');
+  for (const x of items.filter((i) => i.cloud === 'gcp' && i.type === 'shared-vpc')) {
+    for (const n of gnets.filter((y) => y.owner === x.data.host)) for (const svc of x.data.services) member(share(x.data.host, n.id, 'gcp'), svc, 'xpn');
   }
   for (const [k, sh] of shares) if (!sh.members.size && !sh.principals.length) shares.delete(k);
   return { items: out, shares, vpcOwnerOf };
@@ -350,17 +369,17 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
     const ips = pubOf(i); if (!ips.length) continue;
     const open = [];
     for (const g of gfwRules) if (i.data.interfaces.some((x) => x.network === g.path) && targetsOf(g.rule, g.path).includes(i)) { if (g.ranges && !g.ranges.length) continue; open.push({ ranges: g.ranges, via: g.label.toLowerCase(), proto: g.ranges === null ? 'all' : 'tcp' }); }
-    exposures.push({ cloud: 'gcp', owner: i.owner, vpc: i.vpc, region: i.region, kind: 'instance', id: i.id, name: i.name, addresses: ips,
+    exposures.push({ cloud: 'gcp', owner: i.owner, vpc: i.vpc, vpcOwner: i.vpcOwner || i.owner, region: i.region, kind: 'instance', id: i.id, name: i.name, addresses: ips,
       ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: x.via })), severity: open.length ? sevPorts(open) : 'none' });
   }
-  for (const r of gby('forwarding-rule')) exposures.push({ cloud: 'gcp', owner: r.owner, vpc: r.vpc, region: r.region, kind: 'load-balancer', id: r.id, name: r.name, addresses: [r.data.ip],
+  for (const r of gby('forwarding-rule')) exposures.push({ cloud: 'gcp', owner: r.owner, vpc: r.vpc, vpcOwner: r.vpcOwner || r.owner, region: r.region, kind: 'load-balancer', id: r.id, name: r.name, addresses: [r.data.ip],
     ports: [{ proto: String(r.data.proto || 'tcp').toLowerCase(), ports: r.data.ports.join(', ') || 'every port', via: `forwarding rule (${r.data.scheme})` }],
     severity: worstOf(r.data.ports.map((p) => { const [a] = String(p).split('-').map(Number); return ADMIN_PORTS[a] || DATA_PORTS[a] ? 'high' : 'low'; })) });
 
   // ---------------------------------------------------------------- the graph
   // subnets shared (AWS RAM) with an account that is neither connected nor in the organization
   for (const sh of shares.values()) for (const [acct, m] of sh.members) {
-    if (!m.via.has('ram') || ownAws(acct)) continue;
+    if (sh.cloud !== 'aws' || !m.via.has('ram') || ownAws(acct)) continue;
     const v = vpcs.get(key(sh.owner, sh.vpc)); if (!v) continue;
     f('net.vpc-shared-external', 'medium', { ...v, cloud: 'aws', type: 'ram-share', id: m.share || v.id, name: m.shareName || v.name }, `VPC ${v.name} is shared with ${awsName(acct) || `account ${acct}`}, outside your estate`,
       `Subnets of ${v.name} are shared through AWS RAM${m.shareName ? ` (${m.shareName})` : ''} with account ${acct}, which is neither connected here nor in your organization. It can run resources inside the VPC, behind its routes and next to what runs there.`,
@@ -464,30 +483,6 @@ function buildGraph(x) {
     if (igw || nats.length) {
       const l = link(n.id, internet().id, 'internet', { egress: igw ? (nats.length ? 'internet gateway, NAT' : 'internet gateway') : 'NAT', ingress: n.exposed, publicSubnets: pub.length });
       l.from = n.id; l.to = 'internet';
-    }
-  }
-  // shared VPCs: who runs what in them, and each member's slice joined to the VPC by a share line
-  const SLICE_TYPES = ['eni', 'sg', 'lb', 'endpoint', 'client-vpn', 'resolver-endpoint'];
-  for (const sh of x.shares?.values() || []) {
-    const vn = nodes.get(`aws:vpc:${sh.owner}:${sh.vpc}`); if (!vn || vn.stub) continue;
-    const inVpc = x.items.filter((i) => i.cloud === 'aws' && i.vpc === sh.vpc && (i.vpcOwner || i.owner) === sh.owner && SLICE_TYPES.includes(i.type));
-    const exposedBy = (acct) => x.exposures.filter((z) => z.cloud === 'aws' && z.vpc === sh.vpc && (z.vpcOwner || z.owner) === sh.owner && z.owner === acct && z.ports.length).length;
-    const part = (acct) => {
-      const mine = inVpc.filter((i) => i.owner === acct), enis = mine.filter((i) => i.type === 'eni');
-      return { interfaces: enis.length, subnets: [...new Set(enis.map((i) => i.data.subnet).filter(Boolean))], securityGroups: mine.filter((i) => i.type === 'sg').length,
-        loadBalancers: mine.filter((i) => i.type === 'lb').length, exposed: exposedBy(acct) };
-    };
-    vn.shared = true;
-    vn.sharedWithPrincipals = sh.principals;
-    vn.tenants = [{ account: sh.owner, name: x.awsName(sh.owner), owner: true, read: x.awsAccounts.has(sh.owner), ...part(sh.owner) },
-      ...[...sh.members].map(([acct, m]) => ({ account: acct, name: x.awsName(acct), owner: false, read: x.awsAccounts.has(acct), yours: x.ownAws(acct), via: [...m.via].sort(), share: m.shareName || null, ...part(acct) }))
-        .sort((a, b) => b.interfaces - a.interfaces || a.account.localeCompare(b.account))];
-    // a slice for each member whose own read shows it there: it sits in that account's card, joined to the VPC
-    for (const t of vn.tenants.filter((y) => !y.owner && y.read && (y.via.includes('read') || y.interfaces))) {
-      const s = node(`aws:slice:${t.account}:${sh.vpc}`, { kind: 'slice', cloud: 'aws', owner: t.account, nativeId: sh.vpc, vpcOwner: sh.owner, region: vn.region, label: vn.label,
-        ownerName: x.awsName(t.account), yours: x.ownAws(t.account), read: true, cidrs: vn.cidrs, vpcLabel: vn.label, vpcOwnerName: x.awsName(sh.owner),
-        interfaces: t.interfaces, subnets: { total: t.subnets.length, public: t.subnets.filter((id) => x.publicSubnet.get(`${sh.owner}|${id}`)).length }, exposed: t.exposed, securityGroups: t.securityGroups });
-      Object.assign(link(s.id, vn.id, 'share', { name: t.share || 'shared VPC', crossAccount: true, outside: !t.yours, interfaces: t.interfaces }), { from: s.id, to: vn.id });
     }
   }
   // VPC peering
@@ -615,7 +610,7 @@ function buildGraph(x) {
     if (!sp.data.hub) continue;
     const hub = hubNode(sp.data.hub).id;
     const nets = sp.data.kind === 'vpc' ? [sp.vpc] : sp.data.uris.map((u) => tunnelNet.get(u)).filter(Boolean);
-    for (const n of [...new Set(nets)].filter(Boolean)) link(netNode(n).id, hub, 'ncc', { sub: sp.id, name: sp.name, nativeId: sp.id, status: sp.data.state, spoke: sp.data.kind });
+    for (const n of [...new Set(nets)].filter(Boolean)) link(netNode(n).id, hub, 'ncc', { sub: sp.id, name: sp.name, nativeId: sp.id, status: sp.data.state, spoke: sp.data.kind, crossProject: projectOf(n) !== projectOf(sp.data.hub) });
   }
   // Private Service Connect: consumer network to the producer network behind the service attachment
   const atts = new Map(items('gcp', 'service-attachment').map((a) => [a.id, a]));
@@ -625,9 +620,55 @@ function buildGraph(x) {
     const a = atts.get(e.data.target), prod = a && ilbs.get(a.data.producer)?.vpc;
     const to = prod ? netNode(prod).id : node(`gcp:psc:${e.data.target}`, { kind: 'peer', sub: 'psc', cloud: 'gcp', owner: e.data.target.split('/')[1], nativeId: e.data.target,
       label: `PSC service ${e.data.target.split('/').pop()} (${e.data.target.split('/')[1]})`, yours: x.ownGcp(e.data.target.split('/')[1]), read: false, stub: true, cidrs: [] }).id;
-    link(netNode(e.vpc).id, to, 'psc', { sub: e.id, name: e.name, nativeId: e.id, status: e.data.status, outside: !x.ownGcp(e.data.target.split('/')[1]) });
+    link(netNode(e.vpc).id, to, 'psc', { sub: e.id, name: e.name, nativeId: e.id, status: e.data.status, outside: !x.ownGcp(e.data.target.split('/')[1]), crossProject: e.data.target.split('/')[1] !== projectOf(e.vpc) });
   }
-  // Shared VPC: the host's networks are used by its service projects
-  for (const sv of items('gcp', 'shared-vpc')) for (const n of nodes.values()) if (n.kind === 'network' && n.owner === sv.data.host && !n.stub) n.sharedWith = [...new Set([...(n.sharedWith || []), ...sv.data.services])];
+  // Shared VPCs (AWS RAM) and Shared VPC networks (Google Cloud): who runs what in them, and each member's part of
+  // it (a slice, in its own account or project) joined to the VPC or network by a share line
+  const AWS_PARTS = ['eni', 'sg', 'lb', 'endpoint', 'client-vpn', 'resolver-endpoint'], GCP_PARTS = ['instance', 'forwarding-rule', 'psc-endpoint', 'ilb'];
+  // where a service project that runs nothing yet is drawn: its host's busiest network
+  const busiest = new Map();
+  for (const n of x.networks.values()) { const k = ginst.filter((i) => i.vpc === n.id).length, b = busiest.get(n.owner); if (!b || k > b.k || (k === b.k && n.name < b.name)) busiest.set(n.owner, { id: n.id, k, name: n.name }); }
+  const runsInHost = (project, host) => x.items.some((i) => i.cloud === 'gcp' && i.owner === project && GCP_PARTS.includes(i.type) && projectOf(i.vpc) === host);
+  for (const sh of x.shares?.values() || []) {
+    const aws = sh.cloud === 'aws';
+    let vn = nodes.get(aws ? `aws:vpc:${sh.owner}:${sh.vpc}` : `gcp:net:${sh.vpc}`);
+    // a host network that is not read (its project is not connected): known from what service projects run in it
+    if (!vn && !aws && [...sh.members.values()].some((m) => m.via.has('instances'))) vn = Object.assign(netNode(sh.vpc), { ownerNotRead: true });
+    if (!vn || (aws && vn.stub)) continue;
+    // a Shared VPC service project is in the host's organization (Google Cloud allows no other), so it is yours
+    const name = (a) => (aws ? x.awsName(a) : x.gcpProjects.get(a)?.name || null), read = (a) => (aws ? x.awsAccounts.has(a) : x.gcpProjects.has(a)), yours = (a) => (aws ? x.ownAws(a) : true);
+    const inIt = x.items.filter((i) => i.cloud === sh.cloud && i.vpc === sh.vpc && (i.vpcOwner || i.owner) === sh.owner && (aws ? AWS_PARTS : GCP_PARTS).includes(i.type));
+    const exposedBy = (a) => x.exposures.filter((z) => z.cloud === sh.cloud && z.vpc === sh.vpc && (z.vpcOwner || z.owner) === sh.owner && z.owner === a && z.ports.length).length;
+    const part = (a) => {
+      const mine = inIt.filter((i) => i.owner === a);
+      if (!aws) {
+        const inst = mine.filter((i) => i.type === 'instance');
+        return { instances: inst.length, externalIps: inst.filter((i) => i.data.interfaces.some((y) => y.natIps.length)).length,
+          subnets: [...new Set(inst.flatMap((i) => i.data.interfaces.filter((y) => y.network === sh.vpc).map((y) => y.subnet)).filter(Boolean))],
+          loadBalancers: mine.filter((i) => i.type === 'forwarding-rule' || i.type === 'ilb').length, endpoints: mine.filter((i) => i.type === 'psc-endpoint').length, exposed: exposedBy(a), runs: mine.length };
+      }
+      const enis = mine.filter((i) => i.type === 'eni');
+      return { interfaces: enis.length, subnets: [...new Set(enis.map((i) => i.data.subnet).filter(Boolean))], securityGroups: mine.filter((i) => i.type === 'sg').length,
+        loadBalancers: mine.filter((i) => i.type === 'lb').length, exposed: exposedBy(a), runs: mine.length };
+    };
+    vn.shared = true;
+    vn.sharedWithPrincipals = sh.principals;
+    vn.tenants = [{ account: sh.owner, name: name(sh.owner), owner: true, read: read(sh.owner) && !vn.ownerNotRead, ...part(sh.owner) },
+      ...[...sh.members].map(([a, m]) => ({ account: a, name: name(a), owner: false, read: read(a), yours: yours(a), via: [...m.via].sort(), share: m.shareName || null, ...part(a) }))
+        .sort((p, q) => q.runs - p.runs || p.account.localeCompare(q.account))];
+    if (!aws) vn.sharedWith = vn.tenants.filter((t) => !t.owner).map((t) => t.account);
+    // a slice for each member that is read and is there: it runs something there, it reads the VPC as shared with it
+    // (AWS), or it is attached to the host and runs nothing in any of its networks yet (drawn on the busiest one)
+    for (const t of vn.tenants.filter((y) => !y.owner && y.read)) {
+      const idle = !aws && !t.runs && t.via.includes('xpn') && busiest.get(sh.owner)?.id === sh.vpc && !runsInHost(t.account, sh.owner);
+      if (!(t.runs || (aws && t.via.includes('read')) || idle)) continue;
+      const s = node(`${sh.cloud}:slice:${t.account}:${sh.vpc}`, { kind: 'slice', cloud: sh.cloud, owner: t.account, nativeId: sh.vpc, vpcOwner: sh.owner, region: vn.region || null, label: vn.label,
+        ownerName: name(t.account), yours: t.yours, read: true, cidrs: vn.cidrs, vpcLabel: vn.label, vpcOwnerName: (aws && name(sh.owner)) || sh.owner, attachedOnly: idle, exposed: t.exposed,
+        ...(aws ? { interfaces: t.interfaces, securityGroups: t.securityGroups, subnets: { total: t.subnets.length, public: t.subnets.filter((id) => x.publicSubnet.get(`${sh.owner}|${id}`)).length } }
+          : { instances: t.instances, externalIps: t.externalIps, subnets: { total: t.subnets.length, public: 0 } }) });
+      Object.assign(link(s.id, vn.id, 'share', { name: t.share || (aws ? 'shared VPC' : 'Shared VPC'), [aws ? 'crossAccount' : 'crossProject']: true, outside: !t.yours,
+        ...(aws ? { interfaces: t.interfaces } : { instances: t.instances, attachedOnly: idle }) }), { from: s.id, to: vn.id });
+    }
+  }
   return { nodes: [...nodes.values()], links: [...links.values()] };
 }

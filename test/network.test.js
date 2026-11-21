@@ -14,7 +14,7 @@ const { demoAwsNetwork, demoGcpNormalized } = await import('../src/network/demo.
 const { scannerPolicy } = await import('../src/onboarding.js');
 const { gcpSnippets } = await import('../src/gcp/onboarding.js');
 const { flowRouter, aggregate, parseFlowText, s3Dest, fileTime, dayPrefix } = await import('../src/network/flows.js');
-const { demoFlowKeys, demoFlowFile, DEMO_SHARED_VPC, DEMO_SHARED_WITH } = await import('../src/network/demo.js');
+const { demoFlowKeys, demoFlowFile, DEMO_SHARED_VPC, DEMO_SHARED_WITH, DEMO_GCP_SERVICE_IDLE } = await import('../src/network/demo.js');
 const zlib = await import('node:zlib');
 const PROD = '111111111111', DATA = '222222222222';
 const PROJECTS = ['acme-shared-ci', 'acme-data-stg', 'acme-payments-prod'];
@@ -101,6 +101,46 @@ test("a shared VPC (AWS RAM): one VPC under its owner, each member's part of it,
   assert.equal(x.side, v.id);
   assert.deepEqual(x.links, [r.graph.links.find((l) => l.kind === 'internet' && l.from === v.id).id]);
   assert.equal(x.exposure, 'eni-0c300000000orders');
+});
+
+test('a Google Cloud Shared VPC: service projects drawn in the host network they run in, joined to it', () => {
+  const CI = 'projects/acme-shared-ci/global/networks/ci', TRANSIT = 'projects/acme-shared-ci/global/networks/transit';
+  const r = analyzeNetwork(demoItems(), estate);
+  const ci = r.graph.nodes.find((n) => n.id === `gcp:net:${CI}`);
+  assert.equal(ci.shared, true);
+  assert.deepEqual(ci.tenants.map((t) => `${t.account}:${t.owner ? 'host' : t.via.join('+')}:${t.instances}:${t.read}`),
+    ['acme-shared-ci:host:1:true', 'acme-payments-prod:instances+xpn:1:true', `${DEMO_GCP_SERVICE_IDLE}:xpn:0:false`]);
+  assert.ok(ci.tenants.every((t) => t.owner || t.yours), 'a service project is in the host organization');
+  // payments runs in ci, so it has a part there and none in transit, which it may use but does not
+  const slices = r.graph.nodes.filter((n) => n.kind === 'slice' && n.cloud === 'gcp');
+  assert.deepEqual(slices.map((n) => n.id), [`gcp:slice:acme-payments-prod:${CI}`]);
+  assert.equal(slices[0].instances, 1);
+  const share = r.graph.links.find((l) => l.kind === 'share' && l.from === slices[0].id);
+  assert.deepEqual([share.to, share.crossProject], [`gcp:net:${CI}`, true]);
+  assert.equal(r.graph.nodes.find((n) => n.id === `gcp:net:${TRANSIT}`).tenants.find((t) => t.account === 'acme-payments-prod').instances, 0);
+  // lines between projects say so: Private Service Connect across projects, NCC spokes in the hub's own project
+  assert.equal(r.graph.links.find((l) => l.kind === 'psc').crossProject, true);
+  assert.ok(r.graph.links.filter((l) => l.kind === 'ncc').every((l) => l.crossProject === false));
+
+  // a service project's VM with an external address reachable on SSH: exposed, and counted on the host's network
+  const withIp = demoItems().map((i) => (i.id.endsWith('/instances/payments-batch-1')
+    ? { ...i, data: { ...i.data, tags: ['ssh'], interfaces: i.data.interfaces.map((y) => ({ ...y, natIps: ['198.51.100.31'] })) } } : i));
+  const r2 = analyzeNetwork(withIp, estate);
+  const e = r2.exposures.find((x) => x.name === 'payments-batch-1');
+  assert.deepEqual([e.owner, e.vpcOwner, e.severity], ['acme-payments-prod', 'acme-shared-ci', 'high']);
+  assert.equal(r2.graph.nodes.find((n) => n.id === `gcp:net:${CI}`).exposed, 2, "the host's runner and the service project's VM");
+  assert.equal(r2.graph.nodes.find((n) => n.id === `gcp:slice:acme-payments-prod:${CI}`).exposed, 1);
+
+  // attached and running nothing yet: drawn on the host's busiest network, once
+  const attached = demoItems().map((i) => (i.type === 'shared-vpc' ? { ...i, data: { ...i.data, services: [...i.data.services, 'acme-data-stg'] } } : i));
+  const idle = analyzeNetwork(attached, estate).graph.nodes.filter((n) => n.kind === 'slice' && n.owner === 'acme-data-stg');
+  assert.deepEqual(idle.map((n) => [n.nativeId, n.attachedOnly]), [[CI, true]]);
+
+  // the host not connected: its network is known from the service project's VM, under the host, marked so
+  const alone = analyzeNetwork(demoItems().filter((i) => i.owner !== 'acme-shared-ci'), { ...estate, gcpProjects: new Map([['acme-payments-prod', {}], ['acme-data-stg', {}]]) });
+  const lone = alone.graph.nodes.find((n) => n.id === `gcp:net:${CI}`);
+  assert.deepEqual([lone.owner, lone.stub, lone.ownerNotRead], ['acme-shared-ci', true, true]);
+  assert.ok(alone.graph.links.some((l) => l.kind === 'share' && l.from === `gcp:slice:acme-payments-prod:${CI}` && l.to === lone.id));
 });
 
 test('exposure: public addresses and what the internet reaches on them', () => {
@@ -250,7 +290,15 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
   assert.ok(vpc.links.some((l) => l.kind === 'peering' && l.other.label === 'data-platform'));
   const net = await api.networkDetail(owner, 'gcp:net:projects/acme-shared-ci/global/networks/ci');
   assert.ok(net.firewallRules.some((x) => x.name === 'allow-ssh-anywhere'));
-  assert.equal(net.instances[0].name, 'ci-runner-1');
+  // a Shared VPC network: the host's instance and the service project's, and who runs what
+  assert.deepEqual(net.instances.map((i) => `${i.name}@${i.owner}`).sort(), ['ci-runner-1@acme-shared-ci', 'payments-batch-1@acme-payments-prod']);
+  assert.deepEqual(net.tenants.map((t) => t.account), ['acme-shared-ci', 'acme-payments-prod', DEMO_GCP_SERVICE_IDLE]);
+  // a service project's part of it: its own instances only, under the host's firewall rules
+  const part = await api.networkDetail(owner, `gcp:slice:acme-payments-prod:projects/acme-shared-ci/global/networks/ci`);
+  assert.equal(part.node.kind, 'slice');
+  assert.equal(part.vpcNode, 'gcp:net:projects/acme-shared-ci/global/networks/ci');
+  assert.deepEqual(part.instances.map((i) => i.name), ['payments-batch-1']);
+  assert.ok(part.firewallRules.some((x) => x.name === 'allow-ssh-anywhere'));
   await assert.rejects(api.networkDetail(owner, 'aws:vpc:000:nope'), /Not found/);
 
   const list = await api.networkFindings(owner, { severity: 'high' });

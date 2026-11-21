@@ -213,6 +213,7 @@ const net = (p, n) => `https://www.googleapis.com/compute/v1/projects/${p}/globa
 const reg = (p, r) => `https://www.googleapis.com/compute/v1/projects/${p}/regions/${r}`;
 const fw = (p, n, name, rule, src, extra = {}) => ({ name, network: net(p, n), direction: 'INGRESS', priority: 1000, allowed: [rule], sourceRanges: src, ...extra });
 const R = 'us-central1';
+export const DEMO_GCP_SERVICE_IDLE = 'acme-sandbox-dev';
 const GCP = {
   'acme-shared-ci': {
     networks: [{ name: 'transit', autoCreateSubnetworks: false, routingConfig: { routingMode: 'GLOBAL' }, peerings: [{ name: 'transit-to-data', network: net('acme-data-stg', 'data-vpc'), state: 'ACTIVE', exportCustomRoutes: true, importCustomRoutes: true }] },
@@ -233,6 +234,8 @@ const GCP = {
     instances: [{ name: 'ci-runner-1', zone: `${reg('acme-shared-ci', R).replace('regions', 'zones')}-a`, status: 'RUNNING', tags: { items: ['ssh', 'ci'] },
       serviceAccounts: [{ email: 'deployer@acme-shared-ci.iam.gserviceaccount.com' }], networkInterfaces: [{ network: net('acme-shared-ci', 'ci'), subnetwork: `${reg('acme-shared-ci', R)}/subnetworks/ci-runners`, networkIP: '10.210.0.5', accessConfigs: [{ natIP: '198.51.100.77' }] }] }],
     addresses: [{ name: 'ci-runner-ip', address: '198.51.100.77', addressType: 'EXTERNAL', status: 'IN_USE', region: reg('acme-shared-ci', R), users: ['ci-runner-1'] }],
+    // a Shared VPC host: payments runs a batch job in its ci network; a sandbox project is attached and not connected
+    xpnResources: [{ type: 'PROJECT', id: 'acme-payments-prod' }, { type: 'PROJECT', id: DEMO_GCP_SERVICE_IDLE }],
     nccHubs: [{ name: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE' }],
     nccSpokes: [{ name: 'projects/acme-shared-ci/locations/global/spokes/transit', hub: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE', linkedVpcNetwork: { uri: net('acme-shared-ci', 'transit') } },
       { name: 'projects/acme-shared-ci/locations/global/spokes/ci', hub: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE', linkedVpcNetwork: { uri: net('acme-shared-ci', 'ci') } }],
@@ -262,7 +265,11 @@ const GCP = {
     routes: [{ name: 'default-route-internet', network: net('acme-payments-prod', 'default'), destRange: '0.0.0.0/0', priority: 1000, nextHopGateway: 'https://www.googleapis.com/compute/v1/projects/acme-payments-prod/global/gateways/default-internet-gateway' }],
     instances: [{ name: 'payments-api-1', zone: `${reg('acme-payments-prod', R).replace('regions', 'zones')}-a`, status: 'RUNNING', tags: { items: ['web'] },
       serviceAccounts: [{ email: 'payments-api@acme-payments-prod.iam.gserviceaccount.com' }],
-      networkInterfaces: [{ network: net('acme-payments-prod', 'default'), subnetwork: `${reg('acme-payments-prod', R)}/subnetworks/default`, networkIP: '10.130.0.8', accessConfigs: [{ natIP: '198.51.100.90' }] }] }],
+      networkInterfaces: [{ network: net('acme-payments-prod', 'default'), subnetwork: `${reg('acme-payments-prod', R)}/subnetworks/default`, networkIP: '10.130.0.8', accessConfigs: [{ natIP: '198.51.100.90' }] }] },
+      // a service project of acme-shared-ci's Shared VPC: this VM runs in the host's ci network
+      { name: 'payments-batch-1', zone: `${reg('acme-payments-prod', R).replace('regions', 'zones')}-a`, status: 'RUNNING', tags: { items: ['batch'] },
+        serviceAccounts: [{ email: 'payments-batch@acme-payments-prod.iam.gserviceaccount.com' }],
+        networkInterfaces: [{ network: net('acme-shared-ci', 'ci'), subnetwork: `${reg('acme-shared-ci', R)}/subnetworks/ci-runners`, networkIP: '10.210.0.30' }] }],
     serviceAttachments: [{ name: 'payments-api', region: reg('acme-payments-prod', R), targetService: `${reg('acme-payments-prod', R)}/forwardingRules/payments-ilb`, connectionPreference: 'ACCEPT_AUTOMATIC',
       connectedEndpoints: [{ endpoint: `${reg('acme-data-stg', R)}/forwardingRules/payments-api-psc`, status: 'ACCEPTED', consumerNetwork: net('acme-data-stg', 'data-vpc') },
         { endpoint: `${reg('partner-data-net-4821', R)}/forwardingRules/acme-payments`, status: 'ACCEPTED', consumerNetwork: net('partner-data-net-4821', 'partner-vpc') }] }],
