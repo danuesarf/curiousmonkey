@@ -17,6 +17,7 @@ import { bump } from '../telemetry.js';
 import { baseCredentials, refreshingRoleCredentials } from './credentials.js';
 import { trailDayPrefix, trailRegionsPrefix, fileTimeFromKey } from './trailKeys.js';
 import { resourceReaders } from './resourceReaders.js';
+import { awsNetworkReader } from '../network/awsReader.js';
 import { CloudTrailClient, LookupEventsCommand, DescribeTrailsCommand, GetEventSelectorsCommand,
   ListEventDataStoresCommand } from '@aws-sdk/client-cloudtrail';
 
@@ -127,6 +128,8 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       if (!readers[service] || service === 'organizationId') throw new Error(`unknown resource service ${service}`);
       return readers[service]();
     },
+    /** Networking (the Networking extension), every region of the account: { items, skipped }. */
+    async listNetwork() { return awsNetworkReader(credentials).read(account.regions?.length ? account.regions : ['us-east-1']); },
     async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
       const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];
       const out = [];

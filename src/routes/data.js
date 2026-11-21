@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { isEnabled } from '../extensions.js';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { query, tx } from '../db.js';
@@ -130,7 +131,7 @@ data.get('/onboarding/snippets', requirePerm('accounts'), wrap(async (req, res) 
   }).parse(Object.fromEntries(Object.entries(req.query).filter(([, v]) => v !== '')));
   const s3 = q.bucket ? S3In.parse({ bucket: q.bucket, prefix: q.prefix || null }) : null;
   const principal = q.principal || config.scanner.principalArn || null;
-  const s = scannerSnippets({ mode: q.mode, principalArn: principal, roleName: q.roleName, externalId: ws.external_id, s3 });
+  const s = scannerSnippets({ mode: q.mode, principalArn: principal, roleName: q.roleName, externalId: ws.external_id, s3, network: await isEnabled('networking') });
   res.json({ ...s, roleName: q.roleName, externalId: ws.external_id, principalArn: principal, permissions: s.perms });
 }));
 

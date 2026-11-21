@@ -1,6 +1,7 @@
 // A small invented Google Cloud organization for AWS_MODE=demo and the tests. Nothing here is real.
 // It is wired to the demo AWS estate both ways: an AWS role signs in to Google Cloud through workload identity
 // federation, and a Google service account is trusted by an AWS role (see demo/estate.js, lake-reader).
+import { demoGcpNetwork } from '../network/demo.js';
 export const DEMO_ORG = { id: '100000000001', domain: 'acme.example' };
 const ORG = `organizations/${DEMO_ORG.id}`;
 export const DEMO_EXPORTER_ID = '104857600000000000001';     // the unique ID an AWS trust policy names
@@ -221,6 +222,7 @@ export function demoGcpGateway() {
       return { source: 'asset', items: ASSETS, skipped: [] };
     },
     async bucketPublicAccess(name) { return PAP[name] || 'inherited'; },
+    async network(projectId) { return demoGcpNetwork(projectId); },
     async whoami() { return { email: sa('cm-reader', 'acme-shared-ci') }; },
   };
 }

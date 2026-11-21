@@ -1,0 +1,137 @@
+// Reading AWS networking through the read-only scanner role: everything that decides what can reach what. VPCs,
+// subnets, route tables, internet, egress-only and NAT gateways, security groups, network ACLs, VPC peering, transit
+// gateways and their attachments, site-to-site VPNs (customer and virtual private gateways), VPC endpoints, network
+// interfaces (who sits where, with which public IP and groups), flow logs, Network Firewall and load balancers.
+// Each call that is denied is skipped and named, so one missing permission does not lose the rest.
+import { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeRouteTablesCommand, DescribeInternetGatewaysCommand, DescribeEgressOnlyInternetGatewaysCommand,
+  DescribeNatGatewaysCommand, DescribeSecurityGroupsCommand, DescribeNetworkAclsCommand, DescribeVpcPeeringConnectionsCommand, DescribeTransitGatewaysCommand,
+  DescribeTransitGatewayAttachmentsCommand, DescribeVpnConnectionsCommand, DescribeCustomerGatewaysCommand, DescribeVpnGatewaysCommand, DescribeVpcEndpointsCommand,
+  DescribeNetworkInterfacesCommand, DescribeFlowLogsCommand } from '@aws-sdk/client-ec2';
+import { NetworkFirewallClient, ListFirewallsCommand, DescribeFirewallCommand } from '@aws-sdk/client-network-firewall';
+import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { bump } from '../telemetry.js';
+
+const DENIED = /AccessDenied|UnauthorizedOperation|not authorized|AuthorizationError|OptInRequired/i;
+const nameTag = (tags) => (tags || []).find((t) => t.Key === 'Name')?.Value || null;
+const proto = (p) => (p === '-1' ? 'all' : p === '6' ? 'tcp' : p === '17' ? 'udp' : p === '1' ? 'icmp' : p === '58' ? 'icmpv6' : String(p));
+
+/** A security group rule, flattened: protocol, ports, and every source or destination it names. */
+export const sgRule = (p) => ({
+  proto: proto(p.IpProtocol), from: p.FromPort ?? null, to: p.ToPort ?? null,
+  cidrs: (p.IpRanges || []).map((r) => r.CidrIp), ipv6: (p.Ipv6Ranges || []).map((r) => r.CidrIpv6),
+  groups: (p.UserIdGroupPairs || []).map((g) => ({ id: g.GroupId, account: g.UserId || null, peering: g.VpcPeeringConnectionId || null })),
+  prefixLists: (p.PrefixListIds || []).map((x) => x.PrefixListId),
+  descriptions: [...(p.IpRanges || []), ...(p.Ipv6Ranges || []), ...(p.UserIdGroupPairs || [])].map((r) => r.Description).filter(Boolean).slice(0, 4),
+});
+
+/** The items of one region, already normalised: [{ type, id, name, vpc, region, data }]. */
+export function normalizeAwsRegion(region, r) {
+  const out = [];
+  const add = (type, id, name, vpc, data) => out.push({ type, id, name: name || id, vpc: vpc || null, region, data });
+  for (const v of r.vpcs || []) add('vpc', v.VpcId, nameTag(v.Tags), v.VpcId, { cidrs: (v.CidrBlockAssociationSet || [{ CidrBlock: v.CidrBlock }]).map((c) => c.CidrBlock).filter(Boolean),
+    ipv6: (v.Ipv6CidrBlockAssociationSet || []).map((c) => c.Ipv6CidrBlock).filter(Boolean), isDefault: !!v.IsDefault, state: v.State || null, owner: v.OwnerId || null });
+  for (const s of r.subnets || []) add('subnet', s.SubnetId, nameTag(s.Tags), s.VpcId, { cidr: s.CidrBlock, ipv6: (s.Ipv6CidrBlockAssociationSet || []).map((c) => c.Ipv6CidrBlock),
+    az: s.AvailabilityZone || null, mapPublicIp: !!s.MapPublicIpOnLaunch, owner: s.OwnerId || null });
+  for (const t of r.routeTables || []) add('route-table', t.RouteTableId, nameTag(t.Tags), t.VpcId, {
+    main: (t.Associations || []).some((a) => a.Main), subnets: (t.Associations || []).map((a) => a.SubnetId).filter(Boolean), gateways: (t.Associations || []).map((a) => a.GatewayId).filter(Boolean),
+    routes: (t.Routes || []).map((x) => {
+      const target = x.GatewayId ? { type: /^igw-/.test(x.GatewayId) ? 'igw' : /^vgw-/.test(x.GatewayId) ? 'vgw' : x.GatewayId === 'local' ? 'local' : /^vpce-/.test(x.GatewayId) ? 'endpoint' : 'gateway', id: x.GatewayId }
+        : x.NatGatewayId ? { type: 'nat', id: x.NatGatewayId } : x.TransitGatewayId ? { type: 'tgw', id: x.TransitGatewayId } : x.VpcPeeringConnectionId ? { type: 'peering', id: x.VpcPeeringConnectionId }
+        : x.EgressOnlyInternetGatewayId ? { type: 'eigw', id: x.EgressOnlyInternetGatewayId } : x.NetworkInterfaceId ? { type: 'eni', id: x.NetworkInterfaceId }
+        : x.InstanceId ? { type: 'instance', id: x.InstanceId } : x.VpcEndpointId ? { type: 'endpoint', id: x.VpcEndpointId } : x.CoreNetworkArn ? { type: 'cloudwan', id: x.CoreNetworkArn } : { type: 'other', id: null };
+      return { dest: x.DestinationCidrBlock || x.DestinationIpv6CidrBlock || x.DestinationPrefixListId || null, target, state: x.State || 'active' };
+    }) });
+  for (const g of r.igws || []) add('igw', g.InternetGatewayId, nameTag(g.Tags), g.Attachments?.[0]?.VpcId, { vpcs: (g.Attachments || []).map((a) => a.VpcId) });
+  for (const g of r.eigws || []) add('eigw', g.EgressOnlyInternetGatewayId, nameTag(g.Tags), g.Attachments?.[0]?.VpcId, { vpcs: (g.Attachments || []).map((a) => a.VpcId) });
+  for (const n of (r.nats || []).filter((x) => !['deleted', 'failed'].includes(x.State))) add('nat', n.NatGatewayId, nameTag(n.Tags), n.VpcId, { subnet: n.SubnetId,
+    public: n.ConnectivityType !== 'private', publicIps: (n.NatGatewayAddresses || []).map((a) => a.PublicIp).filter(Boolean), state: n.State });
+  for (const g of r.sgs || []) add('sg', g.GroupId, g.GroupName, g.VpcId, { groupName: g.GroupName, description: g.Description || null, isDefault: g.GroupName === 'default',
+    ingress: (g.IpPermissions || []).map(sgRule), egress: (g.IpPermissionsEgress || []).map(sgRule), owner: g.OwnerId || null });
+  for (const a of r.nacls || []) add('nacl', a.NetworkAclId, nameTag(a.Tags), a.VpcId, { isDefault: !!a.IsDefault, subnets: (a.Associations || []).map((x) => x.SubnetId),
+    entries: (a.Entries || []).map((e) => ({ n: e.RuleNumber, egress: !!e.Egress, proto: proto(e.Protocol), from: e.PortRange?.From ?? null, to: e.PortRange?.To ?? null,
+      cidr: e.CidrBlock || e.Ipv6CidrBlock, action: e.RuleAction })) });
+  const side = (s) => s && { account: s.OwnerId, vpc: s.VpcId, region: s.Region || region, cidrs: (s.CidrBlockSet || [{ CidrBlock: s.CidrBlock }]).map((c) => c.CidrBlock).filter(Boolean) };
+  for (const p of (r.peerings || []).filter((x) => !['deleted', 'rejected', 'failed', 'expired'].includes(x.Status?.Code))) add('peering', p.VpcPeeringConnectionId, nameTag(p.Tags), null,
+    { requester: side(p.RequesterVpcInfo), accepter: side(p.AccepterVpcInfo), status: p.Status?.Code || null });
+  for (const t of r.tgws || []) add('tgw', t.TransitGatewayId, nameTag(t.Tags), null, { owner: t.OwnerId, asn: t.Options?.AmazonSideAsn || null, state: t.State,
+    autoAccept: t.Options?.AutoAcceptSharedAttachments === 'enable' });
+  for (const a of (r.tgwAttachments || []).filter((x) => !['deleted', 'failed', 'rejected'].includes(x.State))) add('tgw-attachment', a.TransitGatewayAttachmentId, nameTag(a.Tags),
+    a.ResourceType === 'vpc' ? a.ResourceId : null, { tgw: a.TransitGatewayId, tgwOwner: a.TransitGatewayOwnerId, resourceType: a.ResourceType, resourceId: a.ResourceId,
+      resourceOwner: a.ResourceOwnerId, state: a.State });
+  for (const v of (r.vpns || []).filter((x) => x.State !== 'deleted')) add('vpn', v.VpnConnectionId, nameTag(v.Tags), null, { vgw: v.VpnGatewayId || null, tgw: v.TransitGatewayId || null,
+    cgw: v.CustomerGatewayId, state: v.State, staticRoutes: !!v.Options?.StaticRoutesOnly,
+    tunnels: (v.VgwTelemetry || []).map((t) => ({ outsideIp: t.OutsideIpAddress, status: t.Status, detail: t.StatusMessage || null })) });
+  for (const c of (r.cgws || []).filter((x) => x.State !== 'deleted')) add('cgw', c.CustomerGatewayId, nameTag(c.Tags), null, { ip: c.IpAddress, asn: c.BgpAsn || null, device: c.DeviceName || null });
+  for (const g of (r.vgws || []).filter((x) => x.State !== 'deleted')) add('vgw', g.VpnGatewayId, nameTag(g.Tags), g.VpcAttachments?.find((a) => a.State === 'attached')?.VpcId,
+    { vpcs: (g.VpcAttachments || []).filter((a) => a.State === 'attached').map((a) => a.VpcId), asn: g.AmazonSideAsn || null });
+  for (const e of (r.endpoints || []).filter((x) => !['deleted', 'failed', 'rejected'].includes(String(x.State).toLowerCase()))) {
+    let policy = null; try { policy = e.PolicyDocument ? JSON.parse(e.PolicyDocument) : null; } catch { policy = null; }
+    const open = !policy || (policy.Statement || []).some((s) => s.Effect === 'Allow' && (s.Principal === '*' || s.Principal?.AWS === '*') && [].concat(s.Action).includes('*') && [].concat(s.Resource).includes('*') && !s.Condition);
+    add('endpoint', e.VpcEndpointId, nameTag(e.Tags), e.VpcId, { service: e.ServiceName, kind: e.VpcEndpointType, subnets: e.SubnetIds || [], groups: (e.Groups || []).map((g) => g.GroupId),
+      routeTables: e.RouteTableIds || [], policyOpen: open });
+  }
+  for (const n of r.enis || []) add('eni', n.NetworkInterfaceId, n.Description || n.NetworkInterfaceId, n.VpcId, { subnet: n.SubnetId, privateIp: n.PrivateIpAddress || null,
+    publicIp: n.Association?.PublicIp || null, publicIps: [...new Set((n.PrivateIpAddresses || []).map((p) => p.Association?.PublicIp).filter(Boolean))], ipv6: (n.Ipv6Addresses || []).map((x) => x.Ipv6Address),
+    groups: (n.Groups || []).map((g) => g.GroupId), kind: n.InterfaceType || 'interface', instance: n.Attachment?.InstanceId || null, requester: n.RequesterId || null,
+    managed: !!n.RequesterManaged, description: n.Description || null, status: n.Status });
+  for (const f of r.flowLogs || []) add('flow-log', f.FlowLogId, null, /^vpc-/.test(f.ResourceId) ? f.ResourceId : null, { resource: f.ResourceId, status: f.FlowLogStatus, traffic: f.TrafficType,
+    destination: f.LogDestinationType || null });
+  for (const f of r.firewalls || []) add('firewall', f.FirewallArn, f.FirewallName, f.VpcId, { subnets: (f.SubnetMappings || []).map((m) => m.SubnetId), policy: f.FirewallPolicyArn?.split('/').pop() || null,
+    endpoints: f.endpoints || [] });
+  for (const b of r.lbs || []) add('lb', b.LoadBalancerArn, b.LoadBalancerName, b.VpcId, { scheme: b.Scheme, kind: b.Type, dns: b.DNSName, subnets: (b.AvailabilityZones || []).map((z) => z.SubnetId).filter(Boolean),
+    groups: b.SecurityGroups || [], listeners: (b.listeners || []).map((l) => ({ port: l.Port, proto: l.Protocol })) });
+  return out;
+}
+
+/** The reader, given credentials: read(regions) → { items, skipped }. */
+export function awsNetworkReader(credentials) {
+  return {
+    async read(regions) {
+      const items = [], skipped = new Set();
+      for (const region of regions) {
+        const ec2 = new EC2Client({ region, credentials }), nfw = new NetworkFirewallClient({ region, credentials }), elb = new ElasticLoadBalancingV2Client({ region, credentials });
+        const all = async (label, Cmd, key, input = {}, client = ec2, tokenIn = 'NextToken', tokenOut = 'NextToken') => {
+          const out = []; let token;
+          try {
+            do { bump('apiCalls'); const r = await client.send(new Cmd({ ...input, ...(token ? { [tokenIn]: token } : {}) })); out.push(...(r[key] || [])); token = r[tokenOut]; } while (token);
+          } catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add(label); return []; } throw e; }
+          return out;
+        };
+        const [vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs] = await Promise.all([
+          all('ec2:DescribeVpcs', DescribeVpcsCommand, 'Vpcs'), all('ec2:DescribeSubnets', DescribeSubnetsCommand, 'Subnets'),
+          all('ec2:DescribeRouteTables', DescribeRouteTablesCommand, 'RouteTables'), all('ec2:DescribeInternetGateways', DescribeInternetGatewaysCommand, 'InternetGateways'),
+          all('ec2:DescribeEgressOnlyInternetGateways', DescribeEgressOnlyInternetGatewaysCommand, 'EgressOnlyInternetGateways'), all('ec2:DescribeNatGateways', DescribeNatGatewaysCommand, 'NatGateways'),
+          all('ec2:DescribeSecurityGroups', DescribeSecurityGroupsCommand, 'SecurityGroups'), all('ec2:DescribeNetworkAcls', DescribeNetworkAclsCommand, 'NetworkAcls'),
+          all('ec2:DescribeVpcPeeringConnections', DescribeVpcPeeringConnectionsCommand, 'VpcPeeringConnections'), all('ec2:DescribeTransitGateways', DescribeTransitGatewaysCommand, 'TransitGateways'),
+          all('ec2:DescribeTransitGatewayAttachments', DescribeTransitGatewayAttachmentsCommand, 'TransitGatewayAttachments'),
+          // these three have no paging
+          all('ec2:DescribeVpnConnections', DescribeVpnConnectionsCommand, 'VpnConnections'), all('ec2:DescribeCustomerGateways', DescribeCustomerGatewaysCommand, 'CustomerGateways'),
+          all('ec2:DescribeVpnGateways', DescribeVpnGatewaysCommand, 'VpnGateways'), all('ec2:DescribeVpcEndpoints', DescribeVpcEndpointsCommand, 'VpcEndpoints'),
+          all('ec2:DescribeNetworkInterfaces', DescribeNetworkInterfacesCommand, 'NetworkInterfaces'), all('ec2:DescribeFlowLogs', DescribeFlowLogsCommand, 'FlowLogs'),
+        ]);
+        // Network Firewall: list, then describe each for its VPC and subnets
+        const fwList = await all('network-firewall:ListFirewalls', ListFirewallsCommand, 'Firewalls', {}, nfw);
+        const firewalls = [];
+        for (const f of fwList) {
+          try { bump('apiCalls'); const d = await nfw.send(new DescribeFirewallCommand({ FirewallArn: f.FirewallArn })); firewalls.push({ ...d.Firewall, endpoints: Object.values(d.FirewallStatus?.SyncStates || {}).map((s) => s.Attachment?.EndpointId).filter(Boolean) }); }
+          catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add('network-firewall:DescribeFirewall'); break; } throw e; }
+        }
+        // load balancers and their listeners (the ports they take from the internet)
+        const lbs = await all('elasticloadbalancing:DescribeLoadBalancers', DescribeLoadBalancersCommand, 'LoadBalancers', {}, elb, 'Marker', 'NextMarker');
+        for (const b of lbs) {
+          try { bump('apiCalls'); b.listeners = (await elb.send(new DescribeListenersCommand({ LoadBalancerArn: b.LoadBalancerArn }))).Listeners || []; }
+          catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add('elasticloadbalancing:DescribeListeners'); b.listeners = []; } else throw e; }
+        }
+        items.push(...normalizeAwsRegion(region, { vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs, firewalls, lbs }));
+      }
+      return { items, skipped: [...skipped] };
+    },
+  };
+}
+
+export const AWS_NETWORK_READS = [
+  'ec2:DescribeVpcs', 'ec2:DescribeSubnets', 'ec2:DescribeRouteTables', 'ec2:DescribeInternetGateways', 'ec2:DescribeEgressOnlyInternetGateways', 'ec2:DescribeNatGateways',
+  'ec2:DescribeSecurityGroups', 'ec2:DescribeNetworkAcls', 'ec2:DescribeVpcPeeringConnections', 'ec2:DescribeTransitGateways', 'ec2:DescribeTransitGatewayAttachments',
+  'ec2:DescribeVpnConnections', 'ec2:DescribeCustomerGateways', 'ec2:DescribeVpnGateways', 'ec2:DescribeVpcEndpoints', 'ec2:DescribeNetworkInterfaces', 'ec2:DescribeFlowLogs',
+  'network-firewall:ListFirewalls', 'network-firewall:DescribeFirewall', 'elasticloadbalancing:DescribeLoadBalancers', 'elasticloadbalancing:DescribeListeners',
+];

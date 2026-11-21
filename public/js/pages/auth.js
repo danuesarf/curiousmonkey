@@ -118,7 +118,7 @@ function secretField(label, input, hint) {
   return h('div', { class: 'field' }, h('label', { for: input.id }, label), h('div', { class: 'au-secret' }, input, btn), hint && h('span', { class: 'hint' }, hint));
 }
 
-async function afterAuth(res) { session.user = res.user; setCsrf(res.csrf); setWorkspaceTimeZone(res.display?.timeZone); go('#/'); }
+async function afterAuth(res) { session.user = res.user; session.extensions = res.extensions || []; setCsrf(res.csrf); setWorkspaceTimeZone(res.display?.timeZone); go('#/'); }
 const brand = () => h('div', { class: 'row' }, logo(), h('b', null, 'Curious Monkey'));
 
 export function signIn(st) {

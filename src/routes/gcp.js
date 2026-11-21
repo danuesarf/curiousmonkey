@@ -1,6 +1,7 @@
 // Google Cloud: connections, principals (the Roles page's Google Cloud tab), one principal, and Google Cloud's side
 // of Space. Members limited to some AWS accounts do not see Google Cloud: its data is not split by account.
 import { Router } from 'express';
+import { isEnabled } from '../extensions.js';
 import { z } from 'zod';
 import { config } from '../config.js';
 import { query } from '../db.js';
@@ -85,7 +86,7 @@ gcp.get('/gcp/onboarding', requirePerm('accounts'), unscoped, wrap(async (req, r
     usage: z.enum(['0', '1']).optional(), dataAccess: z.enum(['0', '1']).optional() }).parse(req.query);
   const w = (await query(`SELECT aws_identity FROM workers WHERE aws_identity IS NOT NULL ORDER BY heartbeat_at DESC LIMIT 1`)).rows[0];
   const aws = awsRoleOf(config.scanner.principalArn || w?.aws_identity?.arn);
-  res.json({ ...gcpSnippets({ ...q, home: q.home || undefined, homeNumber: q.homeNumber || undefined, aws, usage: q.usage === '1', dataAccess: q.dataAccess === '1' }), aws });
+  res.json({ ...gcpSnippets({ ...q, home: q.home || undefined, homeNumber: q.homeNumber || undefined, aws, usage: q.usage === '1', dataAccess: q.dataAccess === '1', network: await isEnabled('networking') }), aws });
 }));
 
 /** Try the credentials and the scope before saving: who we are, and that the scope can be read. */

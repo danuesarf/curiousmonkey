@@ -1,3 +1,4 @@
+import { GCP_NETWORK_PERMISSIONS, GCP_NETWORK_PREDEFINED } from '../network/gcpReader.js';
 // The gcloud commands to let Curious Monkey read a Google Cloud organization, folder or project: a read-only role,
 // a service account holding it, and either workload identity federation from this app's own AWS role (no secret
 // to store) or a key.
@@ -28,9 +29,9 @@ export function awsRoleOf(arn) {
   return m ? { account: m[1], role: m[2], sessionArn: `arn:aws:sts::${m[1]}:assumed-role/${m[2]}` } : null;
 }
 
-export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-identity-project', homeNumber = 'PROJECT_NUMBER', orgId = '', aws = null, usage = false, dataAccess = false }) {
-  const perms = [...GCP_READER_PERMISSIONS, ...(usage ? GCP_USAGE_PERMISSIONS : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PERMISSIONS : [])];
-  const predefined = [...GCP_READER_PREDEFINED, ...(usage ? GCP_USAGE_PREDEFINED : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PREDEFINED : [])];
+export function gcpSnippets({ scopeType, scopeId, mode = 'wif', home = 'my-identity-project', homeNumber = 'PROJECT_NUMBER', orgId = '', aws = null, usage = false, dataAccess = false, network = false }) {
+  const perms = [...GCP_READER_PERMISSIONS, ...(usage ? GCP_USAGE_PERMISSIONS : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PERMISSIONS : []), ...(network ? GCP_NETWORK_PERMISSIONS : [])];
+  const predefined = [...GCP_READER_PREDEFINED, ...(usage ? GCP_USAGE_PREDEFINED : []), ...(usage && dataAccess ? GCP_DATA_ACCESS_PREDEFINED : []), ...(network ? GCP_NETWORK_PREDEFINED : [])];
   const sa = `${SA_NAME}@${home}.iam.gserviceaccount.com`;
   const id = scopeId || (scopeType === 'project' ? 'PROJECT_ID' : scopeType === 'folder' ? 'FOLDER_ID' : 'ORG_ID');
   const steps = [];
@@ -69,5 +70,10 @@ gcloud iam service-accounts add-iam-policy-binding ${sa} --project=${home} \\
 `gcloud iam roles update curiousMonkeyReader ${roleParent} \\
   --add-permissions=${[...GCP_USAGE_PERMISSIONS, ...(dataAccess ? GCP_DATA_ACCESS_PERMISSIONS : [])].join(',')}` });
   }
-  return { steps, serviceAccount: sa, pool: POOL, provider: PROVIDER, permissions: perms, predefined: custom ? [] : predefined, orgId, usage };
+  if (network && custom) {
+    steps.push({ title: 'Already connected? Add the networking permissions (Networking extension) to the existing role instead', code:
+`gcloud iam roles update curiousMonkeyReader ${roleParent} \\
+  --add-permissions=${GCP_NETWORK_PERMISSIONS.join(',')}` });
+  }
+  return { steps, serviceAccount: sa, pool: POOL, provider: PROVIDER, permissions: perms, predefined: custom ? [] : predefined, orgId, usage, network };
 }

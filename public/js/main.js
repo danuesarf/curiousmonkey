@@ -21,6 +21,7 @@ import { findingsPage } from './pages/findings.js';
 import { reviewsPage, reviewPage } from './pages/reviews.js';
 import { controlsPage } from './pages/controls.js';
 import { resourcesPage } from './pages/resources.js';
+import { networkPage } from './pages/network.js';
 
 const root = document.getElementById('app');
 const state = { user: null, leave: [], status: null };
@@ -35,6 +36,7 @@ const routes = [
   [/^#\/events$/, () => eventsPage, 'events'],
   [/^#\/trust$/, () => trustPage, 'trust', false],
   [/^#\/resources$/, () => resourcesPage, 'resources'],
+  [/^#\/network$/, () => networkPage, 'network'],
   [/^#\/findings$/, () => findingsPage, 'findings'],
   [/^#\/policy$/, () => controlsPage, 'policy'],
   [/^#\/admin\/policy$/, () => () => { location.replace(`#/policy${location.hash.includes('?') ? `?${location.hash.split('?')[1]}` : ''}`); return document.createElement('div'); }, 'policy'],
@@ -52,7 +54,7 @@ const routes = [
   [/^#\/accounts\/([\w-]+)\/edit$/, (m) => (c) => editAccountPage(c, m[1]), 'accounts'],
   [/^#\/accounts$/, () => accountsPage, 'accounts'],
   [/^#\/operations(?:\/(scans|workers|database))?$/, (m) => (c) => operationsPage(c, m[1]), 'operations'],
-  [/^#\/admin(?:\/(members|audit|alerts|config))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
+  [/^#\/admin(?:\/(members|audit|alerts|config|extensions))?$/, (m) => (c) => adminPage(c, m[1]), 'admin'],
 ];
 
 // Addresses that moved. They still open: the old one is swapped for the new one in the address bar (no extra history entry).
@@ -94,6 +96,7 @@ const ICON = {
   radar: 'M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0M12 12L19 6',
   trust: 'M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4',
   resources: 'M4 7l8-4 8 4-8 4zM4 12l8 4 8-4M4 17l8 4 8-4M15 3.5l3 1.5',
+  network: 'M12 4.5a2 2 0 1 0 0.01 0M5 17.5a2 2 0 1 0 0.01 0M19 17.5a2 2 0 1 0 0.01 0M12 6.5v5M12 11.5l-6 5M12 11.5l6 5M7 19.5h10',
   events: 'M4 6h16M4 12h16M4 18h11M18 16l2.5 2.5M16.5 17.5a2 2 0 1 0 0.01 0',
   space: 'M3 15l9 4.5 9-4.5-9-4.5zM12 6.5a2 2 0 1 0 0.01 0M6.5 9.5a1.2 1.2 0 1 0 0.01 0M17.5 8a1.2 1.2 0 1 0 0.01 0',
   identities: 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM2 21c0-4 3-6 7-6 1.5 0 2.8.3 3.9.8M16 14a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18 17.5l3.5 3.5M20 19.5l1-1', operations: 'M3 12h4l3-8 4 16 3-8h4', accounts: 'M4 7h16v12H4zM8 7V4h8v3',
@@ -286,14 +289,14 @@ const group = (label, ...items) => { const shown = items.filter(Boolean); return
 function shell(active, content, full) {
   const item = (key, href, label, perm, extra) => (!perm || [].concat(perm).some(can)) && h('a', { class: 'item', href, 'aria-current': active === key ? 'page' : null },
     svg('svg', { width: 20, height: 20, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'aria-hidden': 'true' }, svg('path', { d: ICON[key] })), label, extra);
-  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', resources: 'Resource access', findings: 'Findings', reviews: 'Access reviews', policy: 'Policy', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
+  setCrumbs({ home: 'Home', radar: 'Radar', space: 'Space', events: 'Events', trust: 'Trust map', resources: 'Resource access', network: 'Networking', findings: 'Findings', reviews: 'Access reviews', policy: 'Policy', identities: 'Identities', operations: 'Operations', accounts: 'Accounts', admin: 'Admin' }[active] || '');
   if (!statusBar.firstChild) statusBar.append(crumbsEl);
   refreshStatus();
   return h('div', { class: 'shell' },
     h('nav', { class: 'rail', 'aria-label': 'Main' },
       h('a', { class: 'home', href: '#/', 'aria-label': 'Curious Monkey home' }, mark()),
       item('home', '#/', 'Home', 'view'),
-      group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('resources', '#/resources', 'Resources', 'view')),
+      group('Watch', item('radar', '#/radar', 'Radar', 'view'), item('space', '#/space', 'Space', 'view'), item('trust', '#/trust', 'Trust', 'view'), item('resources', '#/resources', 'Resources', 'view'), state.extensions?.includes('networking') && item('network', '#/network', 'Network', 'view')),
       group('Investigate', item('events', '#/events', 'Events', 'view'), item('identities', '#/identities', 'Identities', 'view')),
       group('Review', item('findings', '#/findings', 'Findings', 'view', findingsCount), item('reviews', '#/reviews', 'Reviews', 'view'), item('policy', '#/policy', 'Policy', 'view')),
       group('Admin', item('accounts', '#/accounts', 'Accounts', 'view'), item('operations', '#/operations/scans', 'Operations', 'ops'), item('admin', `#/admin/${adminTabs(state.user)[0]?.[0] || 'members'}`, 'Admin', ['members', 'audit', 'settings'])),
@@ -305,7 +308,7 @@ function shell(active, content, full) {
           [`Workspace time: ${tzName(workspaceTimeZone())} (${workspaceTimeZone()})`, () => { setTzChoice('workspace'); render(); }, { checked: tzChoice() === 'workspace' }],
           [`My browser's time: ${tzName(BROWSER_TZ)} (${BROWSER_TZ})`, () => { setTzChoice('browser'); render(); }, { checked: tzChoice() === 'browser' }],
         ], { title: `${state.user.name}: your menu`, align: 'start', btnClass: 'avatar-btn' }),
-        h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; bellLoaded = false; unread = { count: 0, worst: 'none', items: [] }; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
+        h('button', { onClick: async () => { await post('/auth/signout'); state.user = null; state.extensions = null; bellLoaded = false; unread = { count: 0, worst: 'none', items: [] }; setCsrf(''); go('#/signin'); } }, 'Sign out'))),
     h('div', { class: 'frame' }, statusBar, h('main', { class: full ? 'main full' : 'main', id: 'content' }, content)));
 }
 
@@ -320,8 +323,8 @@ async function render() {
   const [path, qs] = hash.split('?'); const params = new URLSearchParams(qs || '');
   try {
     if (path === '#/reset') return mount(authPages.resetPassword(params));
-    if (!state.user) {
-      try { const me = await get('/auth/me'); state.user = me.user; setCsrf(me.csrf); setWorkspaceTimeZone(me.display?.timeZone); } catch (e) { if (!(e instanceof ApiError) || e.status !== 401) throw e; }
+    if (!state.user || !state.extensions) {
+      try { const me = await get('/auth/me'); state.user = me.user; state.extensions = me.extensions || []; setCsrf(me.csrf); setWorkspaceTimeZone(me.display?.timeZone); } catch (e) { if (!(e instanceof ApiError) || e.status !== 401) throw e; }
     }
     const st = state.user ? null : await get('/auth/state');
     if (!state.user) {
@@ -351,6 +354,8 @@ async function render() {
     console.error(e);
   }
 }
+/** Draw the page again with the menu as it is now (after an extension is turned on or off). */
+export const refreshShell = () => render();
 function mount(node) { clear(root); root.append(node); window.scrollTo(0, 0); }
 window.addEventListener('hashchange', render);
 render();

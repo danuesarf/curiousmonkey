@@ -46,7 +46,7 @@ after(async () => { await db.closePool(); await pg.stop(); });
 test('every built-in control has an id, a domain, a name and a way to fix it; ids are unique; every built-in rule can be read', () => {
   const ids = new Set();
   for (const b of ctl.BUILTIN) {
-    assert.match(b.id, /^(perm|usage|evidence|trust|cred|gcp|res|rule)\.[a-z-]+$/); assert.ok(ctl.DOMAINS[b.domain], b.id); assert.ok(b.name && b.what && b.fix && b.where, b.id);
+    assert.match(b.id, /^(perm|usage|evidence|trust|cred|gcp|res|net|rule)\.[a-z-]+$/); assert.ok(ctl.DOMAINS[b.domain], b.id); assert.ok(b.name && b.what && b.fix && b.where, b.id);
     assert.ok(b.severity ? ctl.SEVERITIES.includes(b.severity) : b.varies, `${b.id}: a severity, or what it varies by`);
     assert.ok(!ids.has(b.id)); ids.add(b.id);
     if (b.rule) assert.deepEqual(b.target === 'identity' ? idr.compileIdentityRule(b.rule).errors : tm.compileWayIn(b.rule).errors, [], b.id);

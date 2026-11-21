@@ -6,6 +6,7 @@ import { alertsTick } from './alerts.js';
 import { trustTick, pruneCallers } from './trustSync.js';
 import { policyTick } from './policySync.js';
 import { resourceTick } from './resourceSync.js';
+import { networkTick } from './network/sync.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -237,6 +238,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const resourceRun = () => { if (resourcing || stop.stopped) return; resourcing = true;
     resourceTick({ log }).catch((e) => log('error', 'resource access failed', { error: e.message })).finally(() => { resourcing = false; }); };
   timers.push(setInterval(resourceRun, 60_000), setTimeout(resourceRun, 25_000));
+  // the Networking extension (when on): each account's and project's networking, read once a day or on request
+  let networking = false;
+  const networkRun = () => { if (networking || stop.stopped) return; networking = true;
+    networkTick({ log }).catch((e) => log('error', 'networking read failed', { error: e.message })).finally(() => { networking = false; }); };
+  timers.push(setInterval(networkRun, 30_000), setTimeout(networkRun, 12_000));
   timers.push(setInterval(() => pruneCallers(config.scanner.callerKeepDays, { log }).catch((e) => log('error', 'caller pruning failed', { error: e.message })), 6 * 3600_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });

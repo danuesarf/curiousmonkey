@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- **Extensions.** Optional features an owner or admin turns on under Admin → Extensions; each says what it adds and what the scanner reads for it. Off by default.
+- **Networking (the first extension).** A network analyzer for AWS and Google Cloud: VPCs, subnets, route tables, internet and NAT gateways, security groups, network ACLs, Network Firewall, load balancers, peering, transit gateways and VPNs; networks, subnets, firewall rules and policies, Cloud Routers and NAT, VPN gateways and tunnels, Interconnect, forwarding rules and instances. A map of how they connect, inside each cloud and between them (an AWS VPN and a Google HA VPN gateway are matched by their addresses), what the internet reaches port by port, 24 `net.*` controls on the Policy page with findings reviewers can mark expected, and an inventory. Read once a day by the worker, or on Read now; the scanner policy and the Google Cloud setup get the read permissions while it is on.
 - **Space: lines between Google Cloud projects.** A service account from one project with a role in another (on the project, a resource in it, a service account there to become, or a folder above it) draws a line between the two projects, like AWS's account-to-account paths: solid with calls seen there in 7 days, dotted when only allowed, amber for Owner or Editor. Click it for which service accounts and roles; the project card lists other projects in and out, and one project shows them past its edge. Roles on the organization reach every project and stay on the identity's page.
 
 ### Changed
