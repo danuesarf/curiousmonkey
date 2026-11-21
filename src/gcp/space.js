@@ -258,9 +258,14 @@ export async function spaceGcpProject(projectId, day = 0) {
   for (const r of out) for (const s of r.services) total.set(s.name, (total.get(s.name) || 0) + s.calls);
   const services = [...total].sort((m, n) => n[1] - m[1]).slice(0, 8).map(([name, calls]) => ({ name, calls }));
   const groups = new Map();
-  for (const r of out.filter((x) => !x.cold)) { const k = r.services[0]?.name || (usage ? 'quiet this week' : 'no roles'); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  const tail = usage ? 'quiet this week' : 'no roles';
+  for (const r of out.filter((x) => !x.cold)) { const k = r.services[0]?.name || tail; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  // as in an AWS account: the five biggest keep a ring each, the rest share one, and those quiet this week (or with no
+  // roles) keep their own ring, never counted under "Other services"
+  const rest = groups.get(tail); groups.delete(tail);
   let clusters = [...groups].map(([key, rs]) => ({ key, roles: rs, calls: rs.reduce((t, r) => t + r.calls7, 0) })).sort((m, n) => n.roles.length - m.roles.length || n.calls - m.calls);
   if (clusters.length > 6) clusters = [...clusters.slice(0, 5), { key: 'other', roles: clusters.slice(5).flatMap((c) => c.roles) }];
+  if (rest) clusters.push({ key: tail, roles: rest, calls: 0 });
   const order = usage ? (m, n) => n.calls7 - m.calls7 : (m, n) => n.permissions - m.permissions;
 
   // AWS accounts past the edge: federation into this project (in), AWS roles that trust a service account here (out)
@@ -320,6 +325,7 @@ export async function spaceGcpProject(projectId, day = 0) {
     account: { id: `gcp:${projectId}`, cloud: 'gcp', name: projectId, projectId, title: project.name, number: project.number, awsAccountId: project.number, environment: project.environment, ou: null, connection: project.connection, connectionName: project.connectionName },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort(order).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
+    calledCount: usage ? out.filter((r) => r.calls7 > 0).length : 0,
     neighbours, outside: { items, hidden: Math.max(0, all.length - MAX_SOURCES) }, scanner: null, events: [],
     resources: exposed.rows.map(towerOf),
   };

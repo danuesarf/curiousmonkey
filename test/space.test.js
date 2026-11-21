@@ -189,3 +189,47 @@ test('sessions can be listed by the account they were entered from, for the wind
   assert.ok((await listSessions(owner, { accountId: B, fromAccountId: A })).every((x) => x.isJump));
   assert.equal((await listSessions(owner, { accountId: A, fromAccountId: A })).length, 0);       // chaining inside one account is not from another
 });
+
+test('one account: roles quiet this week keep a ring of their own, never "Other services", and are not counted as called', async () => {
+  const C = (await db.query(`INSERT INTO cloud_accounts(account_id, name, environment, role_arn, regions, status) VALUES ('333333333333','ledger-dev','development','arn:x',$1,'connected') RETURNING id`,
+    [['us-east-1']])).rows[0].id;
+  const mk = async (name) => (await db.query(`INSERT INTO roles(account_id, arn, name, kind) VALUES ($1,$2,$3,'custom') RETURNING id`, [C, `arn:aws:iam::333333333333:role/${name}`, name])).rows[0].id;
+  // seven services, one role each: the busiest five keep a ring, the other two share one
+  let pid = null;
+  for (const [i, svc] of ['s3', 'sqs', 'sns', 'ecs', 'kms', 'logs', 'ssm'].entries()) {
+    const id = await mk(`app-${svc}`);
+    pid ??= (await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen) VALUES ($1,'svc-c','service','ecs','sts:AssumeRole',now(),now()) RETURNING id`, [id])).rows[0].id;
+    await db.query(`INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count) VALUES ($1,$2,$3,current_date,$4,0)`, [id, pid, `${svc}:Describe`, 100 - i]);
+  }
+  // called a month ago and not this week; and one never called at all
+  const quiet = await mk('legacy-batch');
+  await db.query(`INSERT INTO activity_daily(role_id, principal_id, action, day, count, error_count) VALUES ($1,$2,'iam:ListRoles',current_date - 30,5,0)`, [quiet, pid]);
+  await mk('never-used');
+  const s = await api.spaceAccount(owner, C);
+  assert.deepEqual(s.clusters.map((c) => c.key), ['s3', 'sqs', 'sns', 'ecs', 'kms', 'other', 'quiet this week']);
+  assert.deepEqual(s.clusters.find((c) => c.key === 'other').roles.map((r) => r.name).sort(), ['app-logs', 'app-ssm']);
+  assert.deepEqual(s.clusters.at(-1).roles.map((r) => r.name), ['legacy-batch']);
+  assert.deepEqual([s.roleCount, s.calledCount, s.coldCount], [9, 7, 1]);
+});
+
+test('the roles and users filter: an IAM user named in trust is its own line, and lines and paths follow the filter', async () => {
+  // production's IAM user ci-bot may go on to staging's artifact-push; staging's IAM user ops-bot entered production's deploy
+  const bot = (await db.query(`INSERT INTO roles(account_id, arn, name, kind) VALUES ($1,'arn:aws:iam::111111111111:user/ci-bot','ci-bot','iam-user') RETURNING id`, [A])).rows[0].id;
+  await db.query(`INSERT INTO roles(account_id, arn, name, kind, trust_policy) VALUES ($1,'arn:aws:iam::222222222222:role/artifact-push','artifact-push','custom',$2)`,
+    [B, JSON.stringify({ Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { AWS: 'arn:aws:iam::111111111111:user/ci-bot' } }] })]);
+  await db.query(`INSERT INTO principals(role_id, key, kind, display, via, first_seen, last_seen, sessions_count) VALUES ($1,'user:arn:aws:iam::222222222222:user/ops-bot','user','user/ops-bot','sts:AssumeRole',now(),now(),3)`, [R.deploy]);
+
+  const nb = async (who) => (await api.spaceAccount(owner, A, who)).neighbours.find((x) => x.name === 'payments-stg');
+  const all = await nb('all'), roles = await nb('roles'), users = await nb('users');
+  const fromBot = all.links.find((l) => l.roleId === bot);
+  assert.deepEqual([fromBot.dir, fromBot.otherRole, fromBot.roleName], ['out', 'artifact-push', 'ci-bot']);     // the user, not the whole account
+  assert.ok(!roles.links.some((l) => l.roleId === bot) && roles.links.some((l) => l.dir === 'in'));
+  assert.ok(users.links.some((l) => l.roleId === bot));
+  assert.ok(users.links.every((l) => l.dir === 'out' && (l.roleId === bot || l.roleId === null)), 'nothing enters an IAM user; roles here are not shown');
+
+  const callers = async (who) => (await api.spaceEstate(owner, who)).chains.filter((c) => c.from === B && c.to === A).flatMap((c) => c.roles.map((r) => r.caller)).sort();
+  assert.deepEqual(await callers('users'), ['user/ops-bot']);
+  const byRoles = await callers('roles');
+  assert.ok(byRoles.includes('release') && !byRoles.includes('user/ops-bot'));
+  assert.deepEqual((await callers('all')).filter((x) => ['release', 'user/ops-bot'].includes(x)), ['release', 'user/ops-bot']);
+});

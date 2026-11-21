@@ -150,7 +150,7 @@ IAM users are watched alongside roles. **Identities → IAM users** lists every 
 
 A user opens on the same identity page as a role, with a *Credentials* tab. It adds the keys' CloudTrail activity (calls, first and last seen, source IPs), who used it in the last 30 days (each key, and console or temporary sessions separately), the roles it assumed, and its own and its groups' policies. **Permission analysis** is the same page as for a role: granted, used, never used.
 
-Radar and Space have a **Show: All | Roles | IAM users** switch. Users are drawn as squares in Space and sit in their own sector on the account radar.
+Radar and Space have a **Show: All | Roles | IAM users** switch. Users are drawn as squares in Space and sit in their own sector on the account radar. With IAM users only, Space leaves out what only roles have (outside identities a trust policy lets in, the scanner's role, lines into a role) and keeps where the users go: paths they made between your accounts, and roles elsewhere whose trust policy names them, each drawn from the user itself.
 
 Risk adds to the usual permission findings: an active key older than 90 days, a key never used or idle for 90 days, two active keys, a console password without MFA or never used, and console access alongside keys.
 
