@@ -197,8 +197,14 @@ export function realGcpGateway(conn, { client: injected } = {}) {
         safe('routers', agg('routers')), safe('routes', list('global/routes')), safe('vpnGateways', agg('vpnGateways')), safe('targetVpnGateways', agg('targetVpnGateways')),
         safe('externalVpnGateways', list('global/externalVpnGateways')), safe('vpnTunnels', agg('vpnTunnels')), safe('interconnectAttachments', agg('interconnectAttachments')),
         safe('addresses', agg('addresses')), safe('forwardingRules', agg('forwardingRules')), safe('globalForwardingRules', list('global/forwardingRules')), safe('instances', agg('instances'))]);
+      // Private Service Connect (services offered), Network Connectivity Center, Shared VPC
+      const NCC = `https://networkconnectivity.googleapis.com/v1/projects/${projectId}/locations`;
+      const [serviceAttachments, nccHubs, nccSpokes, xpn] = await Promise.all([
+        safe('serviceAttachments', agg('serviceAttachments')), safe('networkconnectivity.hubs', pages(`${NCC}/global/hubs?pageSize=100`, 'hubs')),
+        safe('networkconnectivity.spokes', pages(`${NCC}/-/spokes?pageSize=100`, 'spokes')),
+        safe('compute.projects.getXpnResources', pages(`${base}/getXpnResources?maxResults=500`, 'resources'))]);
       return { raw: { networks, subnetworks, firewalls, firewallPolicies, routers, routes, vpnGateways, targetVpnGateways, externalVpnGateways, vpnTunnels, interconnectAttachments, addresses,
-        forwardingRules: [...forwardingRules, ...globalForwardingRules], instances }, skipped };
+        forwardingRules: [...forwardingRules, ...globalForwardingRules], instances, serviceAttachments, nccHubs, nccSpokes, xpnResources: xpn }, skipped };
     },
     async bucketPublicAccess(name) {
       return optional(call('GET', `${STORAGE}/b/${encodeURIComponent(name)}?fields=iamConfiguration`).then((b) => b.iamConfiguration?.publicAccessPrevention || null), null);

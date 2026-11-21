@@ -9,14 +9,19 @@
 //   Inventory: everything read, searchable.
 import { h, svg, get, post, api, ago, num, toast, busy, syncUrl, tile, searchBox, loadEnvironments, envs, copy } from '../lib.js';
 import { session } from '../main.js';
+import { networkScene } from './netSpace.js';
 
-const TABS = [['map', 'Map'], ['exposure', 'Exposure'], ['findings', 'Findings'], ['inventory', 'Inventory']];
+const TABS = [['space', 'Space'], ['map', 'Map'], ['exposure', 'Exposure'], ['findings', 'Findings'], ['inventory', 'Inventory']];
 const SEV = { high: 0, medium: 1, low: 2, none: 3 };
 const RED = 'var(--red)', AMBER = 'var(--amber)';
 const sevColor = (s) => (s === 'high' ? RED : s === 'medium' ? AMBER : 'var(--edge)');
 const LINK = { peering: ['Peering', 'var(--blue)'], tgw: ['Transit gateway', 'var(--green)'], 'tgw-peering': ['Transit gateway peering', 'var(--green)'], vpn: ['VPN', 'var(--banana)'],
+  dx: ['Direct Connect', '#ff9f6b'], 'client-vpn': ['Client VPN', '#7fd1ff'], privatelink: ['PrivateLink', '#d6a2ff'], psc: ['Private Service Connect', '#d6a2ff'], ncc: ['Network Connectivity Center', 'var(--green)'],
   interconnect: ['Interconnect', '#c59bff'], internet: ['Internet', 'var(--faint)'] };
-const KIND = { vpc: 'VPC', network: 'NETWORK', tgw: 'TRANSIT GATEWAY', peer: 'PEER', internet: 'INTERNET' };
+const KIND = { vpc: 'VPC', network: 'NETWORK', tgw: 'TRANSIT GATEWAY', dxgw: 'DIRECT CONNECT GATEWAY', hub: 'NCC HUB', peer: 'PEER', internet: 'INTERNET' };
+const PEER = { dx: 'DIRECT CONNECT', 'client-vpn': 'CLIENT VPN', account: 'ACCOUNT', psc: 'PSC SERVICE' };
+const USE = { used: ['used', 'b-green'], unused: ['not used', 'b-neutral'], quiet: ['quiet so far', 'b-neutral'], unknown: ['not known', 'b-neutral'] };
+const human = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} kB` : `${b} B`);
 const CLOUD = { aws: 'AWS', gcp: 'Google Cloud' };
 const TYPE_LABEL = { vpc: 'VPCs', subnet: 'Subnets', 'route-table': 'Route tables', igw: 'Internet gateways', eigw: 'Egress-only gateways', nat: 'NAT gateways', sg: 'Security groups', nacl: 'Network ACLs',
   peering: 'VPC peering', tgw: 'Transit gateways', 'tgw-attachment': 'Transit gateway attachments', vpn: 'Site-to-site VPNs', cgw: 'Customer gateways', vgw: 'Virtual private gateways', endpoint: 'VPC endpoints',
@@ -32,7 +37,7 @@ const gcpRule = (f) => `${f.action} ${f.rules.map((x) => `${x.proto}${x.ports.le
 export async function networkPage(ctx) {
   ctx.setCrumbs('Watch', 'Networking');
   const P = ctx.params;
-  const f = { tab: TABS.some(([k]) => k === P.get('tab')) ? P.get('tab') : 'map', cloud: ['aws', 'gcp'].includes(P.get('cloud')) ? P.get('cloud') : '', q: P.get('q') || '', sel: P.get('sel') || '',
+  const f = { tab: TABS.some(([k]) => k === P.get('tab')) ? P.get('tab') : 'space', cloud: ['aws', 'gcp'].includes(P.get('cloud')) ? P.get('cloud') : '', q: P.get('q') || '', sel: P.get('sel') || '',
     internet: P.get('internet') !== '0', fsev: P.get('severity') || '', ftype: P.get('type') || '', fstatus: P.get('status') === 'resolved' ? 'resolved' : 'open' };
   await loadEnvironments().catch(() => []);
   const envColor = (id) => envs().find((e) => e.id === id)?.color || 'var(--edge)';
@@ -40,16 +45,20 @@ export async function networkPage(ctx) {
   let d = await get('/network');
   const body = h('div');
   const panel = h('aside', { class: 'card net-panel', 'aria-live': 'polite' });
-  const toUrl = () => syncUrl({ tab: f.tab === 'map' ? '' : f.tab, cloud: f.cloud, q: f.q, sel: f.sel, internet: f.internet ? '' : '0', severity: f.fsev, type: f.ftype, status: f.fstatus === 'open' ? '' : f.fstatus });
+  const toUrl = () => syncUrl({ tab: f.tab === 'space' ? '' : f.tab, cloud: f.cloud, q: f.q, sel: f.sel, internet: f.internet ? '' : '0', severity: f.fsev, type: f.ftype, status: f.fstatus === 'open' ? '' : f.fstatus });
 
   // ---------------------------------------------------------------- header
   const reads = () => {
     const ok = d.reads.filter((r) => !r.error), bad = d.reads.filter((r) => r.error), skip = d.reads.filter((r) => r.skipped?.length);
+    const fl = d.flowLogs || [], flOk = fl.filter((x) => x.files && !x.error), flBad = fl.filter((x) => x.error || (!x.files && x.note));
     const last = d.reads.map((r) => r.readAt).sort().pop();
     return h('div', { class: 'small muted net-reads' },
       d.reads.length ? `Read ${ago(last)} · ${ok.filter((r) => r.cloud === 'aws').length} AWS account${ok.filter((r) => r.cloud === 'aws').length === 1 ? '' : 's'} · ${ok.filter((r) => r.cloud === 'gcp').length} Google Cloud project${ok.filter((r) => r.cloud === 'gcp').length === 1 ? '' : 's'}` : 'Not read yet',
       (bad.length || skip.length) ? h('details', { class: 'net-skips' }, h('summary', null, `${bad.length ? `${bad.length} not read` : ''}${bad.length && skip.length ? ' · ' : ''}${skip.length ? `${skip.length} with reads skipped` : ''}`),
-        h('ul', { class: 'tiny' }, [...bad.map((r) => h('li', null, h('b', null, `${r.name}: `), r.error)), ...skip.map((r) => h('li', null, h('b', null, `${r.name}: `), `not allowed to call ${r.skipped.join(', ')}. Add ${r.cloud === 'aws' ? 'them to the scanner role (Accounts → Edit shows the policy)' : 'them to the reader role (Google Cloud setup)'}.`))])) : null);
+        h('ul', { class: 'tiny' }, [...bad.map((r) => h('li', null, h('b', null, `${r.name}: `), r.error)), ...skip.map((r) => h('li', null, h('b', null, `${r.name}: `), `not allowed to call ${r.skipped.join(', ')}. Add ${r.cloud === 'aws' ? 'them to the scanner role (Accounts → Edit shows the policy)' : 'them to the reader role (Google Cloud setup)'}.`))])) : null,
+      h('div', null, fl.length ? `VPC flow logs: ${flOk.length} of ${fl.length} read${flOk.length ? `, up to ${ago(flOk.map((x) => x.lastTime).sort().pop())}` : ''}` : 'No VPC flow logs to read'),
+      flBad.length ? h('details', { class: 'net-skips' }, h('summary', null, `${flBad.length} flow log${flBad.length === 1 ? '' : 's'} not read`),
+        h('ul', { class: 'tiny' }, flBad.map((x) => h('li', null, h('b', null, `${x.flowLog} (${x.owner}): `), x.error || x.note)))) : null);
   };
   const readBtn = h('button', { class: 'btn sm' }, 'Read now');
   if (!session.user?.permissions.includes('scan')) readBtn.hidden = true;
@@ -64,7 +73,9 @@ export async function networkPage(ctx) {
     tile('Findings · high', num(d.findings.high), 'click for the list', { bad: d.findings.high > 0, onClick: () => { f.fsev = 'high'; setTab('findings'); } }),
     tile('Findings · medium', num(d.findings.medium), 'click for the list', { onClick: () => { f.fsev = 'medium'; setTab('findings'); } }),
     tile('VPCs and networks', num(d.nodes.filter((n) => (n.kind === 'vpc' || n.kind === 'network') && !n.stub).length), `${d.owners.filter((o) => o.cloud === 'aws').length} accounts · ${d.owners.filter((o) => o.cloud === 'gcp').length} projects`),
-    tile('Connections', num(d.links.filter((l) => l.kind !== 'internet').length), `${d.links.filter((l) => l.cross).length} between AWS and Google Cloud`));
+    tile('Connections', num(d.links.filter((l) => l.kind !== 'internet').length), `${d.links.filter((l) => l.cross).length} between AWS and Google Cloud`),
+    tile('Not used (flow logs)', num(d.links.filter((l) => l.kind !== 'internet' && l.usage?.state === 'unused').length),
+      `${d.links.filter((l) => l.kind !== 'internet' && l.usage?.state === 'used').length} used · ${d.links.filter((l) => l.kind !== 'internet' && (!l.usage || l.usage.state === 'unknown')).length} not known`));
   const tabsEl = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Networking' });
   const drawTabs = () => tabsEl.replaceChildren(...TABS.map(([k, l]) => h('button', { role: 'tab', type: 'button', 'aria-selected': String(f.tab === k), onClick: () => setTab(k) },
     l, k === 'findings' && d.findings.high + d.findings.medium ? h('span', { class: 'rail-count', style: 'position:static;margin-left:6px' }, String(d.findings.high + d.findings.medium)) : null)));
@@ -80,7 +91,7 @@ export async function networkPage(ctx) {
     const [label, color] = LINK[l.kind] || [l.kind, 'var(--muted)'];
     const status = l.kind === 'vpn' ? `${l.up ?? 0}/${l.tunnels?.length || 0} tunnels up` : l.kind === 'internet' ? `out: ${l.egress || '—'}${l.ingress ? ` · ${l.ingress} reachable from it` : ''}` : l.status || '';
     return h('button', { class: 'net-link-row', type: 'button', onClick: () => pick(l.id) }, h('span', { class: 'net-swatch', style: `background:${color}` }), h('b', { class: 'small' }, label), ' ',
-      h('span', { class: 'small' }, l.other?.label || nodeName(l.from === f.sel ? l.to : l.from)), h('span', { class: 'tiny muted' }, ` ${status}${l.outside ? ' · outside your estate' : ''}${l.cross ? ' · across clouds' : ''}`));
+      h('span', { class: 'small' }, l.other?.label || nodeName(l.from === f.sel ? l.to : l.from)), h('span', { class: 'tiny muted' }, ` ${status}${l.outside ? ' · outside your estate' : ''}${l.cross ? ' · across clouds' : ''}${l.usage && l.usage.state !== 'unknown' ? ` · ${USE[l.usage.state][0]}${l.usage.bytes ? ` (${human(l.usage.bytes)})` : ''}` : ''}`));
   };
   async function drawPanel() {
     if (!f.sel) { panel.replaceChildren(overview()); return; }
@@ -105,15 +116,17 @@ export async function networkPage(ctx) {
         h('span', { class: `badge b-${e.severity === 'none' ? 'neutral' : e.severity}` }, e.severity === 'none' ? 'closed' : e.severity), ' ', h('b', { class: 'small' }, e.name),
         h('span', { class: 'tiny muted' }, ` ${e.addresses.join(', ')} · ${e.ports.map((p) => p.ports).join(', ')}`)))) : h('p', { class: 'small muted' }, 'Nothing reachable.')),
       sect('Legend', h('div', { class: 'stack', style: 'gap:4px' }, Object.entries(LINK).map(([, [l, c]]) => h('div', { class: 'small' }, h('span', { class: 'net-swatch', style: `background:${c}` }), ' ', l)),
-        h('div', { class: 'small' }, h('span', { class: 'net-swatch', style: `background:${RED}` }), ' red border: a high finding; amber: medium. Dashed: down or not routed.'))));
+        h('div', { class: 'small' }, h('span', { class: 'net-swatch', style: `background:${RED}` }), ' red border: a high finding; amber: medium. Dashed: down, not routed, or not used (grey, from VPC flow logs).'))));
   }
   const nodeOfExposure = (e) => (e.cloud === 'aws' ? `aws:vpc:${e.owner}:${e.vpc}` : `gcp:net:${e.vpc}`);
   function simpleNode(n) {
     const ls = d.links.filter((l) => l.from === n.id || l.to === n.id);
     return h('div', { class: 'stack', style: 'gap:12px;padding:14px' },
-      h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'eyebrow' }, n.kind === 'internet' ? 'THE INTERNET' : n.kind === 'peer' ? 'VPN OR INTERCONNECT PEER' : `${KIND[n.kind]} · NOT READ`), close),
+      h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'eyebrow' }, n.kind === 'internet' ? 'THE INTERNET' : n.kind === 'peer' ? PEER[n.sub] || 'VPN OR INTERCONNECT PEER' : `${KIND[n.kind]} · NOT READ`), close),
       h('b', { class: 'name' }, n.label),
-      n.kind === 'peer' && h('p', { class: 'small muted' }, `${n.ip ? `${n.ip}: ` : ''}a device outside AWS and Google Cloud as read here (an office, a data centre, another cloud), or a gateway in an account or project no connection reads.`),
+      n.kind === 'peer' && h('p', { class: 'small muted' }, n.sub === 'dx' ? `A Direct Connect connection${n.bandwidth ? ` (${n.bandwidth})` : ''}${n.partner ? ` through ${n.partner}` : ''}: a private line from your data centre or office into AWS.${n.state ? ` State: ${n.state}.` : ''}`
+        : n.sub === 'client-vpn' ? `People connected with the AWS VPN client, given addresses from ${n.ip}.` : n.sub === 'account' ? `AWS account ${n.owner}${n.yours ? ', yours but not read here' : ', not yours'}: it connects to a PrivateLink service you offer.`
+        : `${n.ip ? `${n.ip}: ` : ''}a device outside AWS and Google Cloud as read here (an office, a data centre, another cloud), or a gateway in an account or project no connection reads.`),
       n.stub && h('p', { class: 'small muted' }, `${CLOUD[n.cloud]} ${n.cloud === 'aws' ? 'account' : 'project'} ${n.owner}${n.ownerName ? ` (${n.ownerName})` : ''}: ${n.yours ? 'yours, but not read here, so what is inside is not known.' : 'not yours. Only what your side says about the link is known.'}${n.cidrs?.length ? ` Address range: ${n.cidrs.join(', ')}.` : ''}`),
       n.kind === 'internet' && h('p', { class: 'small muted' }, 'Each line is a VPC or network with a way out (internet gateway, NAT, a default internet route, external addresses); the number on it is how many addresses in it the internet can reach. The Exposure tab lists them.'),
       sect(`Connections (${ls.length})`, h('div', { class: 'stack', style: 'gap:4px' }, ls.map((l) => linkLine({ ...l, other: d.nodes.find((x) => x.id === (l.from === n.id ? l.to : l.from)) })))));
@@ -131,7 +144,24 @@ export async function networkPage(ctx) {
         h('tbody', null, l.tunnels.map((t) => h('tr', null, h('td', { class: 'mono tiny' }, t.aws || t.peer || '—'), h('td', null, t.awsStatus ? h('span', { class: `badge ${t.awsStatus === 'UP' ? 'b-green' : 'b-high'}` }, t.awsStatus === 'UP' ? 'up' : 'down') : ''),
           h('td', { class: 'tiny' }, t.gcp || '—'), h('td', null, t.gcpStatus ? h('span', { class: `badge ${t.gcpStatus === 'ESTABLISHED' ? 'b-green' : 'b-high'}`, title: t.gcpStatus }, t.gcpStatus === 'ESTABLISHED' ? 'up' : 'down') : '')))))),
       l.vpns?.length > 0 && sect('AWS VPN connections', h('ul', { class: 'small' }, l.vpns.map((v) => h('li', null, `${v.name} (${v.id}) to ${v.cgw || 'unknown address'} · ${v.state}`)))),
+      l.kind === 'dx' && l.vif && kv([['Virtual interface', `${l.vif} · VLAN ${l.vlan}`], ['BGP', `${l.up}/${l.total} sessions up`], l.prefixes?.length && ['Prefixes', l.prefixes.join(', ')]]),
+      l.kind === 'dx' && !l.vif && l.prefixes?.length > 0 && kv([['Allowed prefixes', l.prefixes.join(', ')]]),
+      l.kind === 'client-vpn' && l.rules?.length > 0 && sect('Who may reach what', h('ul', { class: 'small' }, l.rules.map((r) => h('li', null, `${r.everyone ? 'every user' : `group ${r.group}`} → ${r.cidr}`)))),
+      usageSect(l),
       h('div', { class: 'row' }, a && !a.stub && a.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(a.id) }, `Open ${a.label}`), b && !b.stub && b.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(b.id) }, `Open ${b.label}`)));
+  }
+  // what the VPC flow logs say about a line
+  function usageSect(l) {
+    const u = l.usage; if (!u) return null;
+    const [label, cls] = USE[u.state];
+    const why = u.state === 'used' ? `${human(u.bytes)} in ${num(u.flows)} accepted flows${u.rejected ? `, ${num(u.rejected)} refused` : ''}, last ${ago(u.last)}`
+      : u.state === 'unused' ? `Nothing accepted in ${Math.floor(u.coveredDays)} days of VPC flow logs${u.rejected ? ` (${num(u.rejected)} refused)` : ''}. If nothing needs it, remove it.`
+      : u.state === 'quiet' ? `Nothing yet: flow logs read for ${u.coveredDays} days, less than the 3 needed to call it unused.`
+      : l.kind === 'privatelink' ? 'Only the consumer side can see PrivateLink traffic, and its VPC has no flow logs read.' : 'No VPC on either side of it has flow logs read (Google Cloud flow logs are not read).';
+    const max = Math.max(1, ...(u.hourly || []).map((b) => b.bytes));
+    return sect('Use (VPC flow logs)', h('div', { class: 'row' }, h('span', { class: `badge ${cls}` }, label), h('span', { class: 'small' }, why)),
+      u.hourly && h('div', { class: 'net-spark', title: 'Bytes by the hour, the last 24 hours' }, u.hourly.map((b) => h('span', { style: `height:${Math.max(1, Math.round((b.bytes / max) * 26))}px`, class: b.rejected && !b.bytes ? 'rej' : '' }))),
+      u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${p.proto} ${p.port} (${human(p.bytes)})`).join(', ')));
   }
   function nodePanel(x) {
     const n = x.node;
@@ -160,6 +190,13 @@ export async function networkPage(ctx) {
         h('details', null, h('summary', { class: 'small' }, `Network ACLs (${x.nacls.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.nacls.map((a) => h('div', { class: 'net-rule-box' },
           h('div', { class: 'row' }, h('b', { class: 'small' }, a.name), a.isDefault && h('span', { class: 'badge b-neutral' }, 'default')),
           h('ul', { class: 'tiny mono' }, a.entries.filter((e) => !e.egress).map((e) => h('li', { class: e.action === 'allow' && world([e.cidr]) ? 'net-world' : '' }, `in #${e.n} ${e.action} ${e.proto}${e.from != null ? ` ${e.from}-${e.to}` : ''} ← ${e.cidr}`))))))),
+        x.flowLogList?.length > 0 && sect('VPC flow logs', h('ul', { class: 'small' }, x.flowLogList.map((fl) => h('li', null, `${fl.id} → ${fl.destination === 's3' ? (fl.arn || 'S3').replace('arn:aws:s3:::', 's3://') : fl.destination} · ${fl.traffic}`,
+          h('div', { class: 'tiny muted' }, fl.read ? (fl.read.error || (fl.read.files ? `${num(fl.read.files)} files read, up to ${ago(fl.read.lastTime)}${fl.read.note ? ` · ${fl.read.note}` : ''}` : fl.read.note || 'not read yet')) : 'not read yet'))))),
+        x.clientVpns?.length > 0 && sect('Client VPN', h('ul', { class: 'small' }, x.clientVpns.map((c) => h('li', null, `${c.name} · users from ${c.cidr} · ${c.auth.join(', ')}${c.split ? ' · split tunnel' : ' · all traffic'}${c.connectionLog ? '' : ' · connections not logged'}`)))),
+        x.endpointServices?.length > 0 && sect('PrivateLink services it offers', h('ul', { class: 'small' }, x.endpointServices.map((v) => h('li', null, `${v.name.split('.').pop()} · ${v.connections.length} connected${v.acceptance ? '' : ' · accepted without approval'}`,
+          h('div', { class: 'tiny muted' }, v.connections.map((c) => `${c.account} (${c.state})`).join(', ')))))),
+        (x.resolver?.endpoints.length || x.resolver?.rules.length) ? sect('DNS (Route 53 Resolver)', h('ul', { class: 'small' }, [...x.resolver.endpoints.map((e) => h('li', null, `${e.direction.toLowerCase()} endpoint ${e.name || e.id}: ${e.ips.map((i) => i.ip).join(', ')}`)),
+          ...x.resolver.rules.map((r) => h('li', null, `${r.domain} → ${r.targets.join(', ')} (${r.type.toLowerCase()})`))])) : null,
         x.gateways.length > 0 && sect('Gateways', h('ul', { class: 'small' }, x.gateways.map((g) => h('li', null, `${g.type.toUpperCase()} ${g.name !== g.id ? `${g.name} ` : ''}`, h('span', { class: 'mono tiny muted' }, g.id), g.detail ? ` · ${g.detail}` : '')))),
         x.loadBalancers.length > 0 && sect('Load balancers', h('ul', { class: 'small' }, x.loadBalancers.map((b) => h('li', null, `${b.name} · ${b.kind} · ${b.scheme} · ${b.listeners.map((l) => `${l.proto} ${l.port}`).join(', ')}`)))),
         h('details', null, h('summary', { class: 'small' }, `Network interfaces (${x.interfaces.length})`), h('table', { class: 'net-table' }, h('tbody', null, x.interfaces.map((e) => h('tr', null,
@@ -187,9 +224,20 @@ export async function networkPage(ctx) {
     }
     return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow, h('b', { class: 'name' }, n.label), h('div', { class: 'mono tiny muted' }, n.nativeId),
       x.attachments && sect(`Attachments (${x.attachments.length})`, h('table', { class: 'net-table' }, h('tbody', null, x.attachments.map((a) => h('tr', null,
-        h('td', { class: 'small' }, a.resourceType), h('td', { class: 'mono tiny' }, a.resourceId), h('td', { class: 'tiny' }, `account ${a.resourceOwner}`), h('td', { class: 'tiny' }, a.state)))))), finds, conns);
+        h('td', { class: 'small' }, a.resourceType), h('td', { class: 'mono tiny' }, a.resourceId), h('td', { class: 'tiny' }, `account ${a.resourceOwner}`), h('td', { class: 'tiny' }, a.state)))))),
+      x.routeTables?.length > 0 && h('details', null, h('summary', { class: 'small' }, `Route tables (${x.routeTables.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.routeTables.map((t) => h('div', { class: 'net-rule-box' },
+        h('div', { class: 'row' }, h('b', { class: 'small' }, t.name), t.default && h('span', { class: 'badge b-neutral' }, 'default'), h('span', { class: 'tiny muted' }, `${t.associations.length} associated`)),
+        h('ul', { class: 'tiny mono' }, t.routes.map((r) => h('li', { class: r.state === 'blackhole' ? 'net-world' : '' }, `${r.dest} → ${r.attachments.map((a) => `${a.resourceType} ${a.resourceId}`).join(', ') || 'nothing'} (${r.type}${r.state === 'blackhole' ? ', blackhole' : ''})`))))))),
+      x.vifs && sect(`Virtual interfaces (${x.vifs.length})`, h('table', { class: 'net-table' }, h('tbody', null, x.vifs.map((v) => h('tr', null, h('td', { class: 'small' }, v.name, h('div', { class: 'tiny muted' }, `${v.kind} · VLAN ${v.vlan}`)),
+        h('td', { class: 'tiny' }, v.connection), h('td', null, h('span', { class: `badge ${v.state === 'available' ? 'b-green' : 'b-high'}` }, v.state)), h('td', { class: 'tiny' }, `BGP ${v.bgp.filter((b) => b.status === 'up').length}/${v.bgp.length} up`)))))),
+      x.connections && sect('Connections', h('ul', { class: 'small' }, x.connections.map((c) => h('li', null, `${c.name} · ${c.location} · ${c.bandwidth} · ${c.state}${c.partner ? ` · via ${c.partner}` : ''}`)))),
+      x.associations && sect('Associated with', h('ul', { class: 'small' }, x.associations.map((a) => h('li', null, `${a.gatewayType === 'transitGateway' ? 'transit gateway' : 'virtual private gateway'} ${a.gateway} (account ${a.gatewayOwner}) · ${a.state}`, a.prefixes.length ? h('div', { class: 'tiny muted' }, `allowed: ${a.prefixes.join(', ')}`) : null)))),
+      x.spokes && sect(`Spokes (${x.spokes.length})`, h('ul', { class: 'small' }, x.spokes.map((sp) => h('li', null, `${sp.name} · ${sp.kind}${sp.network ? ` · ${sp.network.split('/').pop()}` : ''} · ${sp.state}`)))),
+      finds, conns);
   }
-  function pick(id) { f.sel = f.sel === id && id ? '' : id; toUrl(); if (f.tab === 'map') redrawMap(); drawPanel(); }
+  let scene = null;
+  ctx.onLeave(() => scene?.destroy());
+  function pick(id) { f.sel = f.sel === id && id ? '' : id; toUrl(); if (f.tab === 'map') redrawMap(); if (f.tab === 'space') scene?.redraw(); drawPanel(); }
 
   // ---------------------------------------------------------------- the map
   const COL = 548, MID = 250, GAP = 44, NW = 252, NH = 94, PAD = 14, HEAD = 40;
@@ -215,7 +263,8 @@ export async function networkPage(ctx) {
     // the middle: internet on top, transit gateways, then everything not read (peers, outside networks)
     if (f.internet && d.nodes.some((n) => n.kind === 'internet')) pos.set('internet', { x: X_MID + 25, y: 4, w: MID - 50, h: 52 });
     let y = 110;
-    const midNodes = d.nodes.filter((n) => shown(n) && (n.kind === 'tgw' || n.kind === 'peer' || n.stub)).sort((a, b) => (a.kind === 'tgw' ? 0 : 1) - (b.kind === 'tgw' ? 0 : 1) || (a.kind === 'peer' ? 1 : 0) - (b.kind === 'peer' ? 1 : 0));
+    const hubish = (n) => ['tgw', 'dxgw', 'hub'].includes(n.kind);
+    const midNodes = d.nodes.filter((n) => shown(n) && (hubish(n) || n.kind === 'peer' || n.stub)).sort((a, b) => (hubish(a) ? 0 : 1) - (hubish(b) ? 0 : 1) || (a.kind === 'peer' ? 1 : 0) - (b.kind === 'peer' ? 1 : 0));
     for (const n of midNodes) { pos.set(n.id, { x: X_MID, y, w: MID, h: 76 }); y += 94; }
     return { pos, cards, height: Math.max(yA, yG, y) + 20 };
   }
@@ -274,13 +323,14 @@ export async function networkPage(ctx) {
       const exposedBad = l.kind === 'internet' && l.ingress > 0 && d.nodes.find((n) => n.id === l.from)?.worst === 'high';
       const color = none ? RED : exposedBad ? RED : l.outside ? AMBER : (LINK[l.kind] || [, 'var(--muted)'])[1];
       const width = f.sel === l.id ? 3.5 : l.cross ? 2.6 : l.kind === 'internet' ? 1.1 : 1.8;
-      const dash = none || (l.kind === 'peering' && l.routed === false) ? '6 5' : l.kind === 'internet' ? '2 4' : null;
+      const unused = l.usage?.state === 'unused' && l.kind !== 'internet';
+      const dash = none || unused || (l.kind === 'peering' && l.routed === false) ? '6 5' : l.kind === 'internet' ? '2 4' : null;
       lines.push(svg('g', { opacity: dim(l.id) },
-        svg('path', { d: path, fill: 'none', stroke: color, 'stroke-width': width, 'stroke-dasharray': dash, opacity: l.kind === 'internet' && !rel.has(l.id) ? 0.55 : 0.95 }),
+        svg('path', { d: path, fill: 'none', stroke: unused ? '#5f6f68' : color, 'stroke-width': width, 'stroke-dasharray': dash, opacity: l.kind === 'internet' && !rel.has(l.id) ? 0.55 : 0.95 }),
         svg('path', { d: path, class: 'net-hit', fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 14, onClick: () => pick(l.id) }, svg('title', null, `${(LINK[l.kind] || [l.kind])[0]}: ${nodeName(l.from)} ↔ ${nodeName(l.to)}${l.kind === 'vpn' ? ` · ${l.up}/${l.tunnels.length} tunnels up` : ''}`))));
-      if (l.kind === 'vpn' || (l.kind === 'peering' && (l.crossAccount || l.crossProject || l.outside))) {
+      if (unused || l.kind === 'vpn' || (l.kind === 'peering' && (l.crossAccount || l.crossProject || l.outside))) {
         const mx = same ? (ca[0] + cb[0]) / 2 + side * (a.w / 2 + 52) : (x1 + x2) / 2, my = (y1 + y2) / 2;
-        const t = l.kind === 'vpn' ? `VPN ${l.up}/${l.tunnels.length}${down ? ' ⚠' : ''}` : l.outside ? 'outside' : l.crossAccount ? 'cross-account' : 'cross-project';
+        const t = unused ? 'not used' : l.kind === 'vpn' ? `VPN ${l.up}/${l.tunnels.length}${down ? ' ⚠' : ''}` : l.outside ? 'outside' : l.crossAccount ? 'cross-account' : 'cross-project';
         lines.push(svg('g', { opacity: dim(l.id), class: 'net-tag', onClick: () => pick(l.id) }, svg('rect', { x: mx - t.length * 3.4 - 6, y: my - 9, width: t.length * 6.8 + 12, height: 18, rx: 2, fill: 'var(--panel)', stroke: color }),
           svg('text', { x: mx, y: my + 4, 'text-anchor': 'middle', class: 'net-tag-t', fill: color }, t)));
       }
@@ -293,12 +343,12 @@ export async function networkPage(ctx) {
       const chips = n.kind === 'vpc' && !n.stub ? [`${n.subnets.public}/${n.subnets.total} public`, n.igw ? 'IGW' : null, n.nats ? `NAT×${n.nats}` : null, n.firewall ? 'firewall' : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
         : n.kind === 'network' && !n.stub ? [`${n.subnets.total} subnets`, n.auto ? 'auto' : null, n.nats ? 'Cloud NAT' : null, n.externalIps ? `${n.externalIps} ext. IP` : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
         : n.kind === 'peer' ? [n.ip || 'peer'] : n.stub ? [n.yours ? 'yours, not read' : 'not yours', ...(n.cidrs || []).slice(0, 1)] : [];
-      const sub = n.kind === 'internet' ? '' : n.kind === 'tgw' ? `transit gateway · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
+      const sub = n.kind === 'internet' ? '' : n.kind === 'tgw' || n.kind === 'dxgw' || n.kind === 'hub' ? `${n.kind === 'hub' ? 'NCC hub' : n.kind === 'dxgw' ? 'Direct Connect gateway' : 'transit gateway'} · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
       const stroke = on ? 'var(--banana)' : n.kind === 'internet' ? 'var(--faint)' : sevColor(n.worst);
       g.push(svg('g', { class: 'net-node', opacity: hit ? dim(n.id) : 0.15, onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': `${KIND[n.kind]} ${n.label}`,
         onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.id); } } },
         svg('rect', { x: p.x, y: p.y, width: p.w, height: p.h, rx: n.kind === 'internet' || n.kind === 'peer' ? 28 : 3, class: `net-box${n.stub ? ' stub' : ''}`, stroke, 'stroke-width': on || (n.worst === 'high') ? 2 : 1.2, 'stroke-dasharray': n.stub ? '4 3' : null }),
-        svg('text', { x: p.x + 12, y: p.y + 17, class: 'net-box-eyebrow' }, `${KIND[n.kind]}${n.kind === 'vpc' && n.region ? ` · ${n.region}` : ''}${n.kind === 'network' && n.regions?.length ? ` · ${n.regions.length} region${n.regions.length === 1 ? '' : 's'}` : ''}`),
+        svg('text', { x: p.x + 12, y: p.y + 17, class: 'net-box-eyebrow' }, `${n.kind === 'peer' ? PEER[n.sub] || 'PEER' : KIND[n.kind]}${n.kind === 'vpc' && n.region ? ` · ${n.region}` : ''}${n.kind === 'network' && n.regions?.length ? ` · ${n.regions.length} region${n.regions.length === 1 ? '' : 's'}` : ''}`),
         svg('text', { x: p.x + 12, y: p.y + 36, class: 'net-box-title' }, n.label.length > 30 ? `${n.label.slice(0, 29)}…` : n.label),
         sub && svg('text', { x: p.x + 12, y: p.y + 53, class: 'net-box-sub' }, sub.length > 40 ? `${sub.slice(0, 39)}…` : sub),
         chips.length ? svg('text', { x: p.x + 12, y: p.y + p.h - 12, class: 'net-box-chips' }, chips.join('  ·  ')) : null,
@@ -328,13 +378,15 @@ export async function networkPage(ctx) {
   function exposureTable(list, withWhere = true) {
     if (!list.length) return h('p', { class: 'small muted' }, 'Nothing with a public address.');
     return h('div', { class: 'scroll' }, h('table', { class: 'inbox-table net-exp' },
-      h('thead', null, h('tr', null, ['', 'What', withWhere && 'Where', 'Public address', 'Open to the internet'].filter(Boolean).map((x) => h('th', null, x)))),
+      h('thead', null, h('tr', null, ['', 'What', withWhere && 'Where', 'Public address', 'Open to the internet', 'Seen (flow logs)'].filter(Boolean).map((x) => h('th', null, x)))),
       h('tbody', null, list.map((e) => h('tr', { class: 'link', onClick: () => { if (f.tab !== 'map') { f.tab = 'map'; drawTabs(); f.sel = ''; draw(); } pick(nodeOfExposure(e)); } },
         h('td', null, h('span', { class: `badge b-${e.severity === 'none' ? 'neutral' : e.severity}` }, e.severity === 'none' ? 'closed' : e.severity)),
         h('td', null, h('div', { class: 'f-title small' }, e.name), h('div', { class: 'tiny muted' }, e.kind.replace('-', ' '))),
-        withWhere && h('td', { class: 'small' }, `${CLOUD[e.cloud]} · ${d.owners.find((o) => o.cloud === e.cloud && o.owner === e.owner)?.name || e.owner}`, h('div', { class: 'tiny muted' }, nodeName(nodeOfExposure(e)))),
+        withWhere && h('td', { class: 'small' }, `${CLOUD[e.cloud]} · ${d.owners.find((o) => o.cloud === e.cloud && o.owner === e.owner)?.name || e.owner}`, h('div', { class: 'tiny muted' }, e.vpc ? nodeName(nodeOfExposure(e)) : 'global')),
         h('td', { class: 'mono tiny' }, e.addresses.join(', ')),
-        h('td', { class: 'small' }, e.ports.length ? e.ports.map((p) => h('div', null, h('b', { class: 'mono' }, `${p.proto} ${p.ports}`), h('span', { class: 'tiny muted' }, ` via ${p.via}`))) : h('span', { class: 'muted' }, 'nothing: no rule lets the internet in')))))));
+        h('td', { class: 'small' }, e.ports.length ? e.ports.map((p) => h('div', null, h('b', { class: 'mono' }, `${p.proto} ${p.ports}`), h('span', { class: 'tiny muted' }, ` via ${p.via}`))) : h('span', { class: 'muted' }, 'nothing: no rule lets the internet in')),
+        h('td', { class: 'small' }, e.ports.length && e.ports.some((p) => p.seen) ? e.ports.map((p) => h('div', null, p.seen ? (p.seen.accepted ? `${num(p.seen.accepted)} connections${p.seen.sources ? ` from ${p.seen.sources === 1 ? 'one address' : `${num(p.seen.sources)}+ addresses`}` : ''}` : h('span', { class: 'badge b-neutral' }, 'nobody')) : '—',
+          p.seen?.rejected ? h('span', { class: 'tiny muted' }, ` · ${num(p.seen.rejected)} refused`) : null)) : h('span', { class: 'tiny muted' }, e.flowDays ? '' : e.cloud === 'gcp' ? 'not read (Google Cloud)' : 'no flow logs read')))))));
   }
   function exposureView() {
     const list = d.exposures.filter((e) => !f.cloud || e.cloud === f.cloud);
@@ -412,7 +464,12 @@ export async function networkPage(ctx) {
 
   async function draw() {
     toUrl();
-    if (f.tab === 'map') { body.replaceChildren(h('div', { class: 'net-body' }, h('section', { class: 'card net-map-card' }, mapView()), panel)); drawPanel(); }
+    scene?.destroy(); scene = null;
+    if (f.tab === 'space') {
+      if (!d.nodes.length) { body.replaceChildren(h('section', { class: 'card' }, h('div', { class: 'empty' }, emptyText()))); return; }
+      scene = networkScene(d, { pick, sel: () => f.sel, envColor });
+      body.replaceChildren(h('div', { class: 'net-body' }, h('section', { class: 'card net-map-card' }, scene.el), panel)); drawPanel();
+    } else if (f.tab === 'map') { body.replaceChildren(h('div', { class: 'net-body' }, h('section', { class: 'card net-map-card' }, mapView()), panel)); drawPanel(); }
     else if (f.tab === 'exposure') body.replaceChildren(h('section', { class: 'card' }, exposureView()));
     else if (f.tab === 'findings') body.replaceChildren(h('section', { class: 'card' }, await findingsView()));
     else body.replaceChildren(h('section', { class: 'card' }, await inventoryView()));

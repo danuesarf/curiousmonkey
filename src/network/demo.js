@@ -9,6 +9,7 @@
 // In Google Cloud, the transit network peers with acme-data-stg; a CI runner is open on SSH; acme-payments-prod still
 // has the default network and its default firewall rules.
 import { normalizeAwsRegion } from './awsReader.js';
+import { gzipSync } from 'node:zlib';
 import { normalizeGcpProject } from './gcpReader.js';
 
 const tag = (name) => [{ Key: 'Name', Value: name }];
@@ -20,8 +21,9 @@ const naclAll = (id, vpc, subnets) => ({ NetworkAclId: id, VpcId: vpc, IsDefault
   { RuleNumber: 100, Protocol: '-1', RuleAction: 'allow', Egress: false, CidrBlock: '0.0.0.0/0' }, { RuleNumber: 100, Protocol: '-1', RuleAction: 'allow', Egress: true, CidrBlock: '0.0.0.0/0' },
   { RuleNumber: 32767, Protocol: '-1', RuleAction: 'deny', Egress: false, CidrBlock: '0.0.0.0/0' }, { RuleNumber: 32767, Protocol: '-1', RuleAction: 'deny', Egress: true, CidrBlock: '0.0.0.0/0' }] });
 const sub = (id, vpc, cidr, name, pub = false, az = 'a') => ({ SubnetId: id, VpcId: vpc, CidrBlock: cidr, MapPublicIpOnLaunch: pub, AvailabilityZone: az, Tags: tag(name) });
+const LOCAL = { 'vpc-0a1b2c3d4e5f60010': '10.10.0.0/16', 'vpc-0b2b2c3d4e5f60020': '10.20.0.0/16' };
 const rt = (id, vpc, name, subnets, routes, main = false) => ({ RouteTableId: id, VpcId: vpc, Tags: tag(name),
-  Associations: [...(main ? [{ Main: true }] : []), ...subnets.map((s) => ({ SubnetId: s }))], Routes: [{ DestinationCidrBlock: '10.0.0.0/8', GatewayId: 'local' }, ...routes] });
+  Associations: [...(main ? [{ Main: true }] : []), ...subnets.map((s) => ({ SubnetId: s }))], Routes: [{ DestinationCidrBlock: LOCAL[vpc] || '172.31.0.0/16', GatewayId: 'local' }, ...routes] });
 const defaultVpc = (acct, region, n) => {
   const vpc = `vpc-0def${n}`, subs = [`subnet-0def${n}a`, `subnet-0def${n}b`];
   return {
@@ -37,6 +39,7 @@ const merge = (...parts) => { const out = {}; for (const p of parts) for (const 
 
 const PROD = '111111111111', DATA = '222222222222', VENDOR = '999999999999';
 export const DEMO_TGW = 'tgw-0a1b2c3d4e5f60001';
+export const DEMO_FLOW_LOG = 'fl-0a10000000000001', DEMO_FLOW_BUCKET = 'acme-flow-logs';
 
 function prod(region) {
   const v = 'vpc-0a1b2c3d4e5f60010', [pa, pb, app, db] = ['subnet-0a10000000000pa', 'subnet-0a10000000000pb', 'subnet-0a1000000000app', 'subnet-0a10000000000db'];
@@ -46,7 +49,8 @@ function prod(region) {
     routeTables: [
       rt('rtb-0a1000000000public', v, 'public', [pa, pb], [{ DestinationCidrBlock: '0.0.0.0/0', GatewayId: 'igw-0a1000000000000001' }, { DestinationCidrBlock: '10.20.0.0/16', VpcPeeringConnectionId: 'pcx-0a10000000000data' }]),
       rt('rtb-0a100000000private', v, 'private', [app, db], [{ DestinationCidrBlock: '0.0.0.0/0', NatGatewayId: 'nat-0a10000000000001' }, { DestinationCidrBlock: '10.20.0.0/16', VpcPeeringConnectionId: 'pcx-0a10000000000data' },
-        { DestinationCidrBlock: '10.128.0.0/9', TransitGatewayId: DEMO_TGW }, { DestinationCidrBlock: '172.20.0.0/16', VpcPeeringConnectionId: 'pcx-0a100000000vendor' }, { DestinationCidrBlock: '192.168.0.0/16', TransitGatewayId: DEMO_TGW }], true),
+        { DestinationCidrBlock: '10.128.0.0/9', TransitGatewayId: DEMO_TGW }, { DestinationCidrBlock: '172.20.0.0/16', VpcPeeringConnectionId: 'pcx-0a100000000vendor' }, { DestinationCidrBlock: '192.168.0.0/16', TransitGatewayId: DEMO_TGW },
+        { DestinationCidrBlock: '172.16.0.0/14', TransitGatewayId: DEMO_TGW }, { DestinationPrefixListId: 'pl-0a1b2c3d', GatewayId: 'vpce-0a10000000000s3' }], true),
     ],
     igws: [{ InternetGatewayId: 'igw-0a1000000000000001', Attachments: [{ VpcId: v, State: 'available' }], Tags: tag('prod-igw') }],
     nats: [{ NatGatewayId: 'nat-0a10000000000001', VpcId: v, SubnetId: pa, State: 'available', ConnectivityType: 'public', NatGatewayAddresses: [{ PublicIp: '203.0.113.10' }], Tags: tag('prod-nat-a') }],
@@ -72,6 +76,7 @@ function prod(region) {
       { TransitGatewayAttachmentId: 'tgw-attach-0a1000000vpn0', TransitGatewayId: DEMO_TGW, TransitGatewayOwnerId: PROD, ResourceType: 'vpn', ResourceId: 'vpn-0a1000000000gcp0', ResourceOwnerId: PROD, State: 'available' },
       { TransitGatewayAttachmentId: 'tgw-attach-0a1000000vpn1', TransitGatewayId: DEMO_TGW, TransitGatewayOwnerId: PROD, ResourceType: 'vpn', ResourceId: 'vpn-0a1000000000gcp1', ResourceOwnerId: PROD, State: 'available' },
       { TransitGatewayAttachmentId: 'tgw-attach-0a100000office', TransitGatewayId: DEMO_TGW, TransitGatewayOwnerId: PROD, ResourceType: 'vpn', ResourceId: 'vpn-0a10000000office', ResourceOwnerId: PROD, State: 'available' },
+      { TransitGatewayAttachmentId: 'tgw-attach-0a1000000dxgw', TransitGatewayId: DEMO_TGW, TransitGatewayOwnerId: PROD, ResourceType: 'direct-connect-gateway', ResourceId: 'dxgw-0a10main', ResourceOwnerId: PROD, State: 'available' },
     ],
     vpns: [
       { VpnConnectionId: 'vpn-0a1000000000gcp0', TransitGatewayId: DEMO_TGW, CustomerGatewayId: 'cgw-0a1000000000gcp0', State: 'available', Tags: tag('gcp-ha-0'),
@@ -93,11 +98,39 @@ function prod(region) {
         InterfaceType: 'interface', RequesterManaged: true, RequesterId: 'amazon-elb', Description: 'ELB app/payments-web/0a1b2c3d4e5f6000', Status: 'in-use' },
       { NetworkInterfaceId: 'eni-0a1000000000app01', VpcId: v, SubnetId: app, PrivateIpAddress: '10.10.10.15', Groups: [{ GroupId: 'sg-0a1000000000000app' }], InterfaceType: 'interface', Attachment: { InstanceId: 'i-0a1000000000app01' }, Description: 'payments-api', Status: 'in-use' },
       { NetworkInterfaceId: 'eni-0a10000000000db01', VpcId: v, SubnetId: db, PrivateIpAddress: '10.10.20.10', Groups: [{ GroupId: 'sg-0a10000000000000db' }], InterfaceType: 'interface', RequesterManaged: true, RequesterId: 'amazon-rds', Description: 'RDSNetworkInterface', Status: 'in-use' },
+      { NetworkInterfaceId: 'eni-0a1000000cvpn001', VpcId: v, SubnetId: app, PrivateIpAddress: '10.10.10.60', Groups: [{ GroupId: 'sg-0a1000000000000app' }], InterfaceType: 'interface', RequesterManaged: true, Description: 'ClientVPN-cvpn-endpoint-0a10000000001-associated', Status: 'in-use' },
       { NetworkInterfaceId: 'eni-0a100000000natgw', VpcId: v, SubnetId: pa, PrivateIpAddress: '10.10.0.5', Association: { PublicIp: '203.0.113.10' }, Groups: [], InterfaceType: 'nat_gateway', RequesterManaged: true, Description: 'Interface for NAT Gateway nat-0a10000000000001', Status: 'in-use' },
     ],
-    flowLogs: [{ FlowLogId: 'fl-0a10000000000001', ResourceId: v, FlowLogStatus: 'ACTIVE', TrafficType: 'ALL', LogDestinationType: 's3' }],
+    flowLogs: [{ FlowLogId: DEMO_FLOW_LOG, ResourceId: v, FlowLogStatus: 'ACTIVE', TrafficType: 'ALL', LogDestinationType: 's3', LogDestination: `arn:aws:s3:::${DEMO_FLOW_BUCKET}`, DestinationOptions: { FileFormat: 'plain-text' } }],
     lbs: [{ LoadBalancerArn: `arn:aws:elasticloadbalancing:${region}:${PROD}:loadbalancer/app/payments-web/0a1b2c3d4e5f6000`, LoadBalancerName: 'payments-web', VpcId: v, Scheme: 'internet-facing', Type: 'application',
-      DNSName: 'payments-web-123456.elb.example', AvailabilityZones: [{ SubnetId: pa }, { SubnetId: pb }], SecurityGroups: ['sg-0a1000000000000alb'], listeners: [{ Port: 443, Protocol: 'HTTPS' }, { Port: 80, Protocol: 'HTTP' }] }],
+      DNSName: 'payments-web-123456.elb.example', AvailabilityZones: [{ SubnetId: pa }, { SubnetId: pb }], SecurityGroups: ['sg-0a1000000000000alb'], listeners: [{ Port: 443, Protocol: 'HTTPS' }, { Port: 80, Protocol: 'HTTP' }] },
+    { LoadBalancerArn: `arn:aws:elasticloadbalancing:${region}:${PROD}:loadbalancer/net/payments-api-pl/0a1b2c3d4e5f6001`, LoadBalancerName: 'payments-api-pl', VpcId: v, Scheme: 'internal', Type: 'network',
+      DNSName: 'payments-api-pl.elb.example', AvailabilityZones: [{ SubnetId: app }], SecurityGroups: [], listeners: [{ Port: 443, Protocol: 'TLS' }] }],
+    // Direct Connect: one line at a Jakarta location, a transit interface to the Direct Connect gateway, which is associated with the hub
+    dxConnections: [{ connectionId: 'dxcon-0a10jk1', connectionName: 'jakarta-dx-1', location: 'Equinix JK1', bandwidth: '1Gbps', connectionState: 'available', partnerName: null, ownerAccount: PROD }],
+    dxVifs: [{ virtualInterfaceId: 'dxvif-0a10transit', virtualInterfaceName: 'dc-transit', virtualInterfaceType: 'transit', connectionId: 'dxcon-0a10jk1', directConnectGatewayId: 'dxgw-0a10main', vlan: 210, asn: 65010,
+      amazonSideAsn: 64512, virtualInterfaceState: 'available', ownerAccount: PROD, bgpPeers: [{ bgpStatus: 'up', bgpPeerState: 'available', addressFamily: 'ipv4' }, { bgpStatus: 'up', bgpPeerState: 'available', addressFamily: 'ipv6' }] }],
+    dxGateways: [{ directConnectGatewayId: 'dxgw-0a10main', directConnectGatewayName: 'dc-gateway', amazonSideAsn: 64600, directConnectGatewayState: 'available', ownerAccount: PROD }],
+    dxAssociations: [{ associationId: 'dxgwassoc-0a10hub', directConnectGatewayId: 'dxgw-0a10main', directConnectGatewayOwnerAccount: PROD, associatedGateway: { id: DEMO_TGW, type: 'transitGateway', ownerAccount: PROD, region },
+      allowedPrefixesToDirectConnectGateway: [{ cidr: '10.10.0.0/16' }, { cidr: '10.20.0.0/16' }], associationState: 'associated' }],
+    tgwRouteTables: [{ TransitGatewayRouteTableId: 'tgw-rtb-0a10000000main', TransitGatewayId: DEMO_TGW, DefaultAssociationRouteTable: true, Tags: tag('main'),
+      associations: ['tgw-attach-0a1000000prod', 'tgw-attach-0a1000000data', 'tgw-attach-0a1000000vpn0', 'tgw-attach-0a1000000vpn1', 'tgw-attach-0a100000office'].map((x) => ({ TransitGatewayAttachmentId: x, ResourceType: /vpn|office/.test(x) ? 'vpn' : 'vpc' })),
+      routes: [{ DestinationCidrBlock: '10.10.0.0/16', Type: 'propagated', State: 'active', TransitGatewayAttachments: [{ TransitGatewayAttachmentId: 'tgw-attach-0a1000000prod', ResourceType: 'vpc', ResourceId: v }] },
+        { DestinationCidrBlock: '10.20.0.0/16', Type: 'propagated', State: 'active', TransitGatewayAttachments: [{ TransitGatewayAttachmentId: 'tgw-attach-0a1000000data', ResourceType: 'vpc', ResourceId: 'vpc-0b2b2c3d4e5f60020' }] },
+        { DestinationCidrBlock: '10.128.0.0/9', Type: 'propagated', State: 'active', TransitGatewayAttachments: [{ TransitGatewayAttachmentId: 'tgw-attach-0a1000000vpn0', ResourceType: 'vpn', ResourceId: 'vpn-0a1000000000gcp0' }] },
+        { DestinationCidrBlock: '192.168.0.0/16', Type: 'static', State: 'active', TransitGatewayAttachments: [{ TransitGatewayAttachmentId: 'tgw-attach-0a100000office', ResourceType: 'vpn', ResourceId: 'vpn-0a10000000office' }] },
+        { DestinationCidrBlock: '172.16.0.0/14', Type: 'propagated', State: 'active', TransitGatewayAttachments: [{ TransitGatewayAttachmentId: 'tgw-attach-0a1000000dxgw', ResourceType: 'direct-connect-gateway', ResourceId: 'dxgw-0a10main' }] },
+        { DestinationCidrBlock: '10.40.0.0/16', Type: 'static', State: 'blackhole', TransitGatewayAttachments: [] }] }],
+    clientVpns: [{ ClientVpnEndpointId: 'cvpn-endpoint-0a10000000001', Description: 'engineers', VpcId: v, ClientCidrBlock: '172.31.200.0/22', SplitTunnel: true, Status: { Code: 'available' },
+      AuthenticationOptions: [{ Type: 'federated-authentication' }], SecurityGroupIds: ['sg-0a1000000000000app'], ConnectionLogOptions: { Enabled: false },
+      targets: [{ TargetNetworkId: app, Status: { Code: 'associated' } }], rules: [{ DestinationCidr: '10.10.0.0/16', AccessAll: true, Status: { Code: 'active' } }] }],
+    endpointServices: [{ ServiceId: 'vpce-svc-0a10000000payments', ServiceName: `com.amazonaws.vpce.${region}.vpce-svc-0a10000000payments`, AcceptanceRequired: false, ServiceState: 'Available',
+      NetworkLoadBalancerArns: [`arn:aws:elasticloadbalancing:${region}:${PROD}:loadbalancer/net/payments-api-pl/0a1b2c3d4e5f6001`],
+      connections: [{ VpcEndpointOwner: VENDOR, VpcEndpointId: 'vpce-0c99000000vendor', VpcEndpointState: 'available' }, { VpcEndpointOwner: DATA, VpcEndpointId: 'vpce-0b20000000payapi', VpcEndpointState: 'available' }] }],
+    prefixLists: [{ PrefixListId: 'pl-0a1b2c3d', PrefixListName: `com.amazonaws.${region}.s3`, OwnerId: 'AWS', entries: [{ Cidr: '52.218.0.0/17' }, { Cidr: '3.5.164.0/22' }] }],
+    resolverEndpoints: [{ Id: 'rslvr-out-0a10000000001', Name: 'to-office-dns', Direction: 'OUTBOUND', HostVPCId: v, Status: 'OPERATIONAL', SecurityGroupIds: ['sg-0a1000000000000app'],
+      ips: [{ Ip: '10.10.10.53', SubnetId: app }] }],
+    resolverRules: [{ Id: 'rslvr-rr-0a10000000001', Name: 'corp', DomainName: 'corp.acme.example.', RuleType: 'FORWARD', ResolverEndpointId: 'rslvr-out-0a10000000001', TargetIps: [{ Ip: '192.168.10.10', Port: 53 }], vpcs: [v] }],
   });
 }
 
@@ -127,6 +160,7 @@ function data(region) {
       { NetworkInterfaceId: 'eni-0b200000000etl001', VpcId: v, SubnetId: a, PrivateIpAddress: '10.20.1.50', Groups: [{ GroupId: 'sg-0b20000000000000etl' }], InterfaceType: 'interface', Attachment: { InstanceId: 'i-0b2000000000etl01' }, Description: 'etl-worker-1', Status: 'in-use' },
     ],
     firewalls: [],
+    endpoints: [{ VpcEndpointId: 'vpce-0b20000000payapi', VpcId: v, ServiceName: `com.amazonaws.vpce.${region}.vpce-svc-0a10000000payments`, VpcEndpointType: 'Interface', State: 'available', SubnetIds: [a], Groups: [{ GroupId: 'sg-0b20000000000000etl' }] }],
   });
 }
 
@@ -162,6 +196,9 @@ const GCP = {
     instances: [{ name: 'ci-runner-1', zone: `${reg('acme-shared-ci', R).replace('regions', 'zones')}-a`, status: 'RUNNING', tags: { items: ['ssh', 'ci'] },
       serviceAccounts: [{ email: 'deployer@acme-shared-ci.iam.gserviceaccount.com' }], networkInterfaces: [{ network: net('acme-shared-ci', 'ci'), subnetwork: `${reg('acme-shared-ci', R)}/subnetworks/ci-runners`, networkIP: '10.210.0.5', accessConfigs: [{ natIP: '198.51.100.77' }] }] }],
     addresses: [{ name: 'ci-runner-ip', address: '198.51.100.77', addressType: 'EXTERNAL', status: 'IN_USE', region: reg('acme-shared-ci', R), users: ['ci-runner-1'] }],
+    nccHubs: [{ name: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE' }],
+    nccSpokes: [{ name: 'projects/acme-shared-ci/locations/global/spokes/transit', hub: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE', linkedVpcNetwork: { uri: net('acme-shared-ci', 'transit') } },
+      { name: 'projects/acme-shared-ci/locations/global/spokes/ci', hub: 'projects/acme-shared-ci/locations/global/hubs/core', state: 'ACTIVE', linkedVpcNetwork: { uri: net('acme-shared-ci', 'ci') } }],
   },
   'acme-data-stg': {
     networks: [{ name: 'data-vpc', autoCreateSubnetworks: false, routingConfig: { routingMode: 'GLOBAL' },
@@ -171,6 +208,8 @@ const GCP = {
     firewalls: [fw('acme-data-stg', 'data-vpc', 'allow-internal', { IPProtocol: 'all' }, ['10.0.0.0/8']),
       fw('acme-data-stg', 'data-vpc', 'allow-redis-anywhere', { IPProtocol: 'tcp', ports: ['6379'] }, ['0.0.0.0/0'])],
     routers: [{ name: 'data-router', network: net('acme-data-stg', 'data-vpc'), region: reg('acme-data-stg', R), nats: [{ name: 'data-nat', sourceSubnetworkIpRangesToNat: 'ALL_SUBNETWORKS_ALL_IP_RANGES', natIpAllocateOption: 'AUTO_ONLY', logConfig: { enable: true } }] }],
+    forwardingRules: [{ name: 'payments-api-psc', network: net('acme-data-stg', 'data-vpc'), region: reg('acme-data-stg', R), IPAddress: '10.128.0.200', loadBalancingScheme: '',
+      target: `${reg('acme-payments-prod', R)}/serviceAttachments/payments-api`, pscConnectionStatus: 'ACCEPTED' }],
     instances: [{ name: 'etl-1', zone: `${reg('acme-data-stg', R).replace('regions', 'zones')}-b`, status: 'RUNNING', tags: { items: ['etl'] }, serviceAccounts: [{ email: 'etl-runner@acme-data-stg.iam.gserviceaccount.com' }],
       networkInterfaces: [{ network: net('acme-data-stg', 'data-vpc'), subnetwork: `${reg('acme-data-stg', R)}/subnetworks/lake`, networkIP: '10.128.0.12' }] }],
   },
@@ -187,7 +226,11 @@ const GCP = {
     instances: [{ name: 'payments-api-1', zone: `${reg('acme-payments-prod', R).replace('regions', 'zones')}-a`, status: 'RUNNING', tags: { items: ['web'] },
       serviceAccounts: [{ email: 'payments-api@acme-payments-prod.iam.gserviceaccount.com' }],
       networkInterfaces: [{ network: net('acme-payments-prod', 'default'), subnetwork: `${reg('acme-payments-prod', R)}/subnetworks/default`, networkIP: '10.130.0.8', accessConfigs: [{ natIP: '198.51.100.90' }] }] }],
-    forwardingRules: [{ name: 'payments-lb', IPAddress: '198.51.100.91', IPProtocol: 'TCP', portRange: '443-443', loadBalancingScheme: 'EXTERNAL_MANAGED', target: 'https://www.googleapis.com/compute/v1/projects/acme-payments-prod/global/targetHttpsProxies/payments' }],
+    serviceAttachments: [{ name: 'payments-api', region: reg('acme-payments-prod', R), targetService: `${reg('acme-payments-prod', R)}/forwardingRules/payments-ilb`, connectionPreference: 'ACCEPT_AUTOMATIC',
+      connectedEndpoints: [{ endpoint: `${reg('acme-data-stg', R)}/forwardingRules/payments-api-psc`, status: 'ACCEPTED', consumerNetwork: net('acme-data-stg', 'data-vpc') },
+        { endpoint: `${reg('partner-data-net-4821', R)}/forwardingRules/acme-payments`, status: 'ACCEPTED', consumerNetwork: net('partner-data-net-4821', 'partner-vpc') }] }],
+    forwardingRules: [{ name: 'payments-ilb', network: net('acme-payments-prod', 'default'), region: reg('acme-payments-prod', R), IPAddress: '10.130.0.50', loadBalancingScheme: 'INTERNAL', ports: ['443'] },
+      { name: 'payments-lb', IPAddress: '198.51.100.91', IPProtocol: 'TCP', portRange: '443-443', loadBalancingScheme: 'EXTERNAL_MANAGED', target: 'https://www.googleapis.com/compute/v1/projects/acme-payments-prod/global/targetHttpsProxies/payments' }],
   },
 };
 
@@ -197,3 +240,43 @@ export function demoGcpNetwork(projectId) {
   return { raw: GCP[projectId] || {}, skipped: [] };
 }
 export const demoGcpNormalized = (projectId) => normalizeGcpProject(projectId, GCP[projectId] || {});
+
+// ---------------------------------------------------------------- VPC flow logs (payments-prod's VPC, to S3)
+// One file per hour, generated from the hour, so reading the same hour twice gives the same records. The story: people
+// SSH to the bastion and the internet scans it; customers reach the load balancer on 443; the app calls Redis in
+// data-platform over the peering, the transit network in Google Cloud over the VPN, an on-premises service over
+// Direct Connect, S3 through the gateway endpoint, and the internet through the NAT gateway; the ETL workers in
+// data-platform reach the database over the peering; engineers come in on Client VPN. Nothing uses the vendor's
+// peering, the office VPN or the open RDP group.
+const fnv = (str) => { let h = 2166136261; for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619); return h >>> 0; };
+const pad = (n, w = 2) => String(n).padStart(w, '0');
+export function demoFlowKeys({ bucket, prefix, now = Date.now() }) {
+  if (bucket !== DEMO_FLOW_BUCKET) return [];
+  const m = prefix.match(/AWSLogs\/(\d{12})\/vpcflowlogs\/([a-z0-9-]+)\/(\d{4})\/(\d{2})\/(\d{2})\/$/); if (!m || m[1] !== PROD) return [];
+  const day = Date.UTC(+m[3], +m[4] - 1, +m[5]), out = [];
+  for (let h = 0; h < 24; h++) {
+    const end = day + (h + 1) * 36e5 + 5 * 6e4; if (end > now) break;
+    const d = new Date(end), stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}Z`;
+    out.push({ key: `${prefix}${PROD}_vpcflowlogs_${m[2]}_${DEMO_FLOW_LOG}_${stamp}_${(fnv(stamp) % 1e8).toString(16)}.log.gz`, size: 2048 });
+  }
+  return out;
+}
+export function demoFlowFile(key) {
+  const m = key.match(/_(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z_/), end = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]), start = Math.floor((end - 36e5) / 1e3), hr = new Date(end - 36e5).getUTCHours();
+  const lines = ['version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status'];
+  const busy = hr >= 1 && hr <= 12 ? 3 : 1;   // Jakarta's working day, in UTC
+  const rec = (eni, src, dst, sp, dp, n, bytes, action = 'ACCEPT', proto = 6) => { for (let i = 0; i < n; i++) lines.push(`2 ${PROD} ${eni} ${src} ${dst} ${sp + i} ${dp} ${proto} ${10 + (fnv(`${key}${eni}${i}`) % 90)} ${bytes} ${start + i * 7} ${start + i * 7 + 60} ${action} OK`); };
+  const sp = 40000 + (fnv(key) % 5000);
+  rec('eni-0a100000000bastion', '192.0.2.44', '10.10.0.20', sp, 22, busy, 52000);                         // an engineer over SSH
+  rec('eni-0a100000000bastion', '203.0.113.200', '10.10.0.20', sp, 3389, 2, 120, 'REJECT');                // scans
+  rec('eni-0a100000000bastion', '203.0.113.201', '10.10.0.20', sp, 23, 1, 80, 'REJECT');
+  rec('eni-0a1000000000alb0a', '198.51.100.140', '10.10.0.40', sp, 443, 6 * busy, 18000);                 // customers
+  rec('eni-0a1000000000app01', '10.10.10.15', '10.20.1.30', sp, 6379, 4 * busy, 9000);                    // Redis over the peering
+  rec('eni-0a1000000000app01', '10.10.10.15', '10.200.0.10', sp, 443, 2 * busy, 30000);                   // Google Cloud over the VPN
+  rec('eni-0a1000000000app01', '10.10.10.15', '172.16.5.10', sp, 8443, busy, 12000);                      // on-premises over Direct Connect
+  rec('eni-0a1000000000app01', '10.10.10.15', '52.218.10.20', sp, 443, 2, 40000);                         // S3 through the gateway endpoint
+  rec('eni-0a1000000000app01', '10.10.10.15', '198.51.100.150', sp, 443, busy, 6000);                     // the internet through NAT
+  rec('eni-0a10000000000db01', '10.20.1.50', '10.10.20.10', sp, 5432, 3 * busy, 25000);                   // the ETL workers over the peering
+  if (hr >= 2 && hr <= 10) rec('eni-0a1000000cvpn001', '10.10.10.60', '10.10.10.15', sp, 22, 1, 4000);    // an engineer on Client VPN
+  return gzipSync(lines.join('\n') + '\n');
+}
