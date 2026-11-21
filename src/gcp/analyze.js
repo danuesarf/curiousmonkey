@@ -89,7 +89,8 @@ export function analyzeGcp(s) {
   const projects = new Map(s.projects.map((p) => [p.project_id, p]));
   // the projects a binding reaches
   const reachOf = (b) => {
-    if (b.resource_type === 'organization') return [...projects.keys()];
+    // the projects under that organization (or whose organization is not known), when several are read together
+    if (b.resource_type === 'organization') return [...projects.values()].filter((p) => !p.ancestors.some((x) => x.startsWith('organizations/')) || p.ancestors.includes(b.resource)).map((p) => p.project_id);
     if (b.resource_type === 'folder') return [...projects.values()].filter((p) => p.ancestors.includes(b.resource)).map((p) => p.project_id);
     return b.project_id && projects.has(b.project_id) ? [b.project_id] : [];
   };

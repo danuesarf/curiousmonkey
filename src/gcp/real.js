@@ -109,6 +109,13 @@ export function realGcpGateway(conn, { client: injected } = {}) {
     async projects() { return (await pages(`${CRM}/projects:search?pageSize=500`, 'projects')).filter((p) => p.state === 'ACTIVE')
       .map((p) => ({ projectId: p.projectId, number: p.name.split('/')[1], name: p.displayName, parent: p.parent, labels: p.labels || {}, state: p.state })); },
     async project(id) { const p = await call('GET', `${CRM}/projects/${id}`); return { projectId: p.projectId, number: p.name.split('/')[1], name: p.displayName, parent: p.parent, labels: p.labels || {}, state: p.state }; },
+    // every folder and the organization above a project, nearest first. Needs only resourcemanager.projects.get on the
+    // project (v1 projects.getAncestry), so a reader granted on the project alone still learns what is above it
+    async ancestry(id) {
+      const r = await call('POST', `${CRM.replace('/v3', '/v1')}/projects/${encodeURIComponent(id)}:getAncestry`, {});
+      return (r.ancestor || []).map((x) => x.resourceId || {}).filter((x) => x.type === 'folder' || x.type === 'organization')
+        .map((x) => `${x.type === 'folder' ? 'folders' : 'organizations'}/${x.id}`);
+    },
     async iamPolicy(resource) { return optional(call('POST', `${CRM}/${resource}:getIamPolicy`, { options: { requestedPolicyVersion: 3 } }), null); },
     async serviceAccounts(projectId) { return optional(pages(`${IAM}/projects/${projectId}/serviceAccounts?pageSize=100`, 'accounts'), []); },
     async serviceAccountKeys(email) { return optional(call('GET', `${IAM}/projects/-/serviceAccounts/${encodeURIComponent(email)}/keys?keyTypes=USER_MANAGED`).then((r) => r.keys || []), []); },

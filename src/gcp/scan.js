@@ -8,8 +8,9 @@ import { loadPolicy } from '../controls.js';
 import { demoGcpGateway } from './demo.js';
 import { realGcpGateway } from './real.js';
 import { syncCursors } from './usage.js';
-import { analyzeUsage } from './usageAnalysis.js';
+import { analyzeUsage, refreshUsage } from './usageAnalysis.js';
 import { normalizeAsset, assetBindings } from './resources.js';
+import { mergeConnections } from './merge.js';
 import { saveGcpResources } from '../resourceSync.js';
 
 export const gcpGateway = (conn) => (config.awsMode === 'demo' ? demoGcpGateway(conn) : realGcpGateway(conn));
@@ -25,7 +26,10 @@ export async function hierarchy(conn, gw) {
     if (!p) throw Object.assign(new Error(`Project ${conn.scope_id} was not found, or the identity cannot see it.`), { retryable: false });
     const folders = await gw.folders().catch(() => []);
     const all = (await gw.projects().catch(() => [])).map((x) => ({ ...x, ancestors: ancestry(x.parent, folders) }));
-    const one = { ...p, ancestors: ancestry(p.parent, folders) };
+    // a reader granted on the project alone cannot list folders, so the listing stops at the parent: the project's own
+    // ancestry names every folder and the organization above it, so roles granted on any of them are looked for
+    const chain = gw.ancestry ? await gw.ancestry(p.projectId).catch(() => null) : null;
+    const one = { ...p, ancestors: chain?.length ? chain : ancestry(p.parent, folders) };
     return { org: null, folders, projects: [one], seen: seenOf([one, ...all.filter((x) => x.projectId !== p.projectId)]) };
   }
   const folders = await gw.folders();
@@ -55,11 +59,14 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
   const addPolicy = (resource, type, projectId, pol) => {
     for (const b of pol?.bindings || []) for (const member of b.members || []) bindings.push({ resource, resource_type: type, project_id: projectId, role: b.role, member, condition: b.condition || null });
   };
-  const read = async (resource, type, projectId) => { const pol = await gw.iamPolicy(resource); if (!pol) skipped.push(resource); addPolicy(resource, type, projectId, pol); };
+  const read = async (resource, type, projectId) => { const pol = await gw.iamPolicy(resource); if (!pol) skipped.push(resource); addPolicy(resource, type, projectId, pol); return !!pol; };
   await progress({ stage: 'policies', projects: projects.length });
   const above = new Set(projects.flatMap((p) => p.ancestors));
   if (orgName) above.add(orgName);
-  await Promise.all([...above].map((r) => read(r, r.startsWith('organizations/') ? 'organization' : 'folder', null)));
+  // the folders and organization above: which policies were read, and which were refused (their roles are missing)
+  const aboveRead = { read: [], refused: [] };
+  await Promise.all([...above].map(async (r) => { (await read(r, r.startsWith('organizations/') ? 'organization' : 'folder', null) ? aboveRead.read : aboveRead.refused).push(r); }));
+  aboveRead.read.sort(); aboveRead.refused.sort();
   await Promise.all(projects.map((p) => read(`projects/${p.projectId}`, 'project', p.projectId)));
 
   // service accounts, keys, their own policies, custom roles, federation
@@ -124,14 +131,18 @@ export async function collectGcp(conn, { gw = gcpGateway(conn), progress = async
   await progress({ stage: 'analysis' });
   const snap = { org: { domain: org?.displayName || null, domains: config.gcp.ownDomains || [] }, projects: projects.map((p) => ({ project_id: p.projectId, ancestors: p.ancestors })), bindings, roleDefs, serviceAccounts, providers };
   const result = analyzeGcp({ ...snap, keyRotateDays: config.risk.keyRotateDays, policy: await loadPolicy() });
-  return { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs };
+  return { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, above: aboveRead, result, resources, resourceRead, roleDefs };
 }
 
 export async function scanGcpConnection(conn, opts = {}) {
   const started = Date.now();
-  const { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, result, resources, resourceRead, roleDefs } = await collectGcp(conn, opts);
+  const { org, folders, projects, seen, bindings, serviceAccounts, providers, fresh, skipped, above, result, resources, resourceRead, roleDefs } = await collectGcp(conn, opts);
   const log = opts.log || (() => {});
+  let merged = null;
   await tx(async (c) => {
+    // one connection's snapshot is written at a time: the join below rewrites every connection's identities, and two
+    // scans writing at once would wait on each other's rows
+    await c.query(`SELECT pg_advisory_xact_lock(hashtext('gcp-snapshot'))`);
     const keep = new Map((await c.query('SELECT project_id, environment FROM gcp_projects WHERE connection_id=$1 AND environment IS NOT NULL', [conn.id])).rows.map((r) => [r.project_id, r.environment]));
     for (const t of ['gcp_projects', 'gcp_bindings', 'gcp_wif_providers', 'gcp_principals', 'gcp_seen_projects']) await c.query(`DELETE FROM ${t} WHERE connection_id=$1`, [conn.id]);
     if (seen.length) await c.query(`INSERT INTO gcp_seen_projects(connection_id, project_id, number, organization) SELECT $1, * FROM unnest($2::text[], $3::text[], $4::text[]) ON CONFLICT DO NOTHING`,
@@ -163,6 +174,11 @@ export async function scanGcpConnection(conn, opts = {}) {
       [conn.id, x.member, x.kind, x.email || null, sa?.display_name || null, sa?.project_id || x.project || null, sa?.unique_id || null, !!sa?.disabled, x.managed ? 'google' : null,
         JSON.stringify(sa?.keys || []), JSON.stringify(x.roles), x.permissions, x.reach, JSON.stringify(x.sources), x.origin ? JSON.stringify(x.origin) : null, x.risk, x.risk_score, JSON.stringify(x.reasons)]);
     }
+    // with other connections, each identity again over everything they all read, in the same transaction so no page
+    // sees one connection's share alone. A failure here keeps this connection's own analysis.
+    await c.query('SAVEPOINT gcp_merge');
+    try { merged = await mergeConnections(c, { domains: [org?.displayName] }); await c.query('RELEASE SAVEPOINT gcp_merge'); }
+    catch (e) { await c.query('ROLLBACK TO SAVEPOINT gcp_merge'); merged = { error: String(e.message).slice(0, 300) }; log(`identities not joined across connections: ${e.message}`); }
   });
   // the Resources page: stored after the snapshot, so a failure here never undoes the IAM scan
   if (resourceRead && !resourceRead.error) {
@@ -170,7 +186,7 @@ export async function scanGcpConnection(conn, opts = {}) {
     catch (e) { resourceRead.error = String(e.message).slice(0, 300); log(`resource-level policies not stored: ${e.message}`); }
   }
   const summary = { projects: projects.length, folders: folders.length, serviceAccounts: serviceAccounts.length, principals: result.size, bindings: bindings.length, providers: providers.length,
-    skipped, domain: org?.displayName || null, resources: resourceRead, seconds: Math.round((Date.now() - started) / 1000) };
+    skipped, above, merged, domain: org?.displayName || null, resources: resourceRead, seconds: Math.round((Date.now() - started) / 1000) };
   log(`read ${summary.projects} projects, ${summary.serviceAccounts} service accounts, ${summary.bindings} bindings in ${summary.seconds}s`);
   return summary;
 }
@@ -194,7 +210,8 @@ export async function gcpTick(workerId, { gw } = {}) {
       [conn.id, JSON.stringify(summary)]);
     // the principals were rewritten: their usage counts come back from the stored activity; new projects get cursors
     // (a failure here leaves the IAM scan standing; the usage reader retries on its own)
-    await syncCursors(conn.id).then(() => analyzeUsage(conn.id)).catch((e) => { summary.usageError = e.message; });
+    // (joined with other connections: their identities' roles changed too, so every connection's counts again)
+    await syncCursors(conn.id).then(() => (summary.merged?.connections > 1 ? refreshUsage() : analyzeUsage(conn.id))).catch((e) => { summary.usageError = e.message; });
     return { id: conn.id, ok: true, summary };
   } catch (e) {
     await query(`UPDATE gcp_connections SET status='error', status_detail=$2, next_scan_at=now() + interval '1 hour', lease_until=NULL, lease_by=NULL, progress=NULL WHERE id=$1`,

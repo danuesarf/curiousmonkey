@@ -14,6 +14,32 @@ export async function gcpProjects() {
   });
 }
 
+/**
+ * The folders and organization above each project whose IAM policy no connection could read: roles granted there
+ * are missing. Refused by one connection but read by another (an organization connected besides its projects) is
+ * read. Map project ID -> ['folders/123', 'organizations/456'], nearest first; only projects with something missing.
+ */
+export async function unreadAbove() {
+  const [conns, projects] = await Promise.all([
+    query(`SELECT status_detail FROM gcp_connections WHERE status_detail IS NOT NULL`),
+    query(`SELECT DISTINCT project_id, ancestors FROM gcp_projects`),
+  ]);
+  const read = new Set(), refused = new Set();
+  for (const { status_detail: d } of conns.rows) {
+    for (const r of d?.above?.read || []) read.add(r);
+    // a scan from before the read was noted: what it skipped
+    for (const r of d?.above?.refused || (d?.skipped || []).filter((x) => /^(folders|organizations)\//.test(x))) refused.add(r);
+  }
+  const out = new Map();
+  for (const p of projects.rows) {
+    const missing = (p.ancestors || []).filter((a) => refused.has(a) && !read.has(a));
+    if (missing.length && !out.has(p.project_id)) out.set(p.project_id, missing);
+  }
+  return out;
+}
+/** 'folders/123' -> 'folder 123', 'organizations/456' -> 'the organization (456)' */
+export const aboveLabel = (r) => (String(r).startsWith('folders/') ? `folder ${r.split('/')[1]}` : `the organization (${String(r).split('/')[1]})`);
+
 /** How a principal's ways in add up, by kind (wif, gke, token, actAs, key...), and the AWS identities among them. */
 export function summarizeSources(list) {
   const by = {};

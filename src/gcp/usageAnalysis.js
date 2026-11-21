@@ -5,8 +5,8 @@
 //   unused       granted, a kind of call Admin Activity logs, and never seen: safe to propose removing
 //   unconfirmed  granted, a read (get, list...) that only Data Access logs record, and those are not read: unknown
 //
-// Permissions are compared across the whole connection, like the role's own reach: a permission used in any project
-// it reaches counts as used.
+// Permissions are compared across every connection that reads role usage, like the identity's roles (which are joined
+// across connections, see merge.js): a permission used in any project read counts as used.
 import { query } from '../db.js';
 
 // Reads appear only in Data Access logs (ADMIN_READ, DATA_READ); everything else is in Admin Activity.
@@ -24,6 +24,14 @@ export function classify(granted, used, { readsKnown }) {
   return { used: u, unused, unconfirmed };
 }
 
+// usage projects of connections that read role usage now (what a connection read before it was turned off stays, unused)
+const READ_PROJECTS = `gcp_usage_projects u ON u.id = s.project_ref JOIN gcp_connections uc ON uc.id = u.connection_id AND uc.usage_enabled`;
+
+/** Every connection's identities again: after their roles were joined across connections (a scan, a removal). */
+export async function refreshUsage({ now = Date.now() } = {}) {
+  for (const { id } of (await query('SELECT id FROM gcp_connections ORDER BY name')).rows) await analyzeUsage(id, { now });
+}
+
 /** Recompute used / unused / unconfirmed for every identity of one connection. */
 export async function analyzeUsage(connectionId, { now = Date.now() } = {}) {
   const conn = (await query('SELECT id, usage_enabled, usage_lookback_days, usage_data_access FROM gcp_connections WHERE id=$1', [connectionId])).rows[0];
@@ -35,12 +43,12 @@ export async function analyzeUsage(connectionId, { now = Date.now() } = {}) {
   const cutoff = new Date(now - conn.usage_lookback_days * 864e5).toISOString().slice(0, 10);
   const [principals, used, last, reads] = await Promise.all([
     query('SELECT id, member, roles FROM gcp_principals WHERE connection_id=$1', [connectionId]),
+    // its identities' calls in any project read with usage on, not only this connection's
     query(`SELECT m.member, array_agg(DISTINCT pr.permission) AS perms
-             FROM gcp_usage_summary s JOIN gcp_usage_projects u ON u.id = s.project_ref
-             JOIN gcp_usage_members m ON m.id = s.member_id JOIN gcp_usage_perms pr ON pr.id = s.perm_id
-            WHERE u.connection_id = $1 AND s.last_day >= $2 AND s.count > 0 GROUP BY m.member`, [connectionId, cutoff]),
-    query(`SELECT m.member, max(s.last_day) AS last FROM gcp_usage_summary s JOIN gcp_usage_projects u ON u.id = s.project_ref
-             JOIN gcp_usage_members m ON m.id = s.member_id WHERE u.connection_id = $1 GROUP BY m.member`, [connectionId]),
+             FROM gcp_usage_summary s JOIN ${READ_PROJECTS} JOIN gcp_usage_members m ON m.id = s.member_id JOIN gcp_usage_perms pr ON pr.id = s.perm_id
+            WHERE m.member IN (SELECT member FROM gcp_principals WHERE connection_id = $1) AND s.last_day >= $2 AND s.count > 0 GROUP BY m.member`, [connectionId, cutoff]),
+    query(`SELECT m.member, max(s.last_day) AS last FROM gcp_usage_summary s JOIN ${READ_PROJECTS} JOIN gcp_usage_members m ON m.id = s.member_id
+            WHERE m.member IN (SELECT member FROM gcp_principals WHERE connection_id = $1) GROUP BY m.member`, [connectionId]),
     // Data Access counts as read only when it is turned on and at least one entry came back from it
     query(`SELECT COALESCE(sum(k.entries_read), 0)::bigint AS n FROM gcp_log_cursors k JOIN gcp_usage_projects u ON u.id = k.project_ref
             WHERE u.connection_id = $1 AND k.log = 'data_access'`, [connectionId]),
@@ -73,15 +81,15 @@ export async function principalUsage(p, { now = Date.now() } = {}) {
   const cutoff = new Date(now - conn.usage_lookback_days * 864e5).toISOString().slice(0, 10);
   const [seen, daily, defs, reads] = await Promise.all([
     query(`SELECT pr.permission, u.project_id, s.first_day, s.last_day, s.count, s.denied
-             FROM gcp_usage_members m JOIN gcp_usage_summary s ON s.member_id = m.id JOIN gcp_usage_projects u ON u.id = s.project_ref
-             JOIN gcp_usage_perms pr ON pr.id = s.perm_id WHERE m.member = $1 AND u.connection_id = $2`, [p.member, p.connection_id]),
+             FROM gcp_usage_members m JOIN gcp_usage_summary s ON s.member_id = m.id JOIN ${READ_PROJECTS}
+             JOIN gcp_usage_perms pr ON pr.id = s.perm_id WHERE m.member = $1`, [p.member]),
     // only the projects this identity was seen in (from the small summary), each read as one primary-key range
     query(`WITH m AS (SELECT id FROM gcp_usage_members WHERE member = $1),
-                pr AS (SELECT DISTINCT s.project_ref FROM gcp_usage_summary s JOIN gcp_usage_projects u ON u.id = s.project_ref
-                        WHERE s.member_id = (SELECT id FROM m) AND u.connection_id = $2 AND s.last_day >= $3)
+                pr AS (SELECT DISTINCT s.project_ref FROM gcp_usage_summary s JOIN ${READ_PROJECTS}
+                        WHERE s.member_id = (SELECT id FROM m) AND s.last_day >= $2)
            SELECT d.day, sum(d.count)::bigint AS n, sum(d.denied)::bigint AS denied FROM pr CROSS JOIN LATERAL (
-             SELECT day, count, denied FROM gcp_activity_daily WHERE project_ref = pr.project_ref AND day >= $3 AND member_id = (SELECT id FROM m)) d
-           GROUP BY d.day ORDER BY d.day`, [p.member, p.connection_id, cutoff]),
+             SELECT day, count, denied FROM gcp_activity_daily WHERE project_ref = pr.project_ref AND day >= $2 AND member_id = (SELECT id FROM m)) d
+           GROUP BY d.day ORDER BY d.day`, [p.member, cutoff]),
     query('SELECT name, permissions FROM gcp_role_defs WHERE name = ANY($1)', [p.roles.map((r) => r.role)]),
     query(`SELECT COALESCE(sum(k.entries_read), 0)::bigint AS n FROM gcp_log_cursors k JOIN gcp_usage_projects u ON u.id = k.project_ref WHERE u.connection_id = $1 AND k.log = 'data_access'`, [p.connection_id]),
   ]);

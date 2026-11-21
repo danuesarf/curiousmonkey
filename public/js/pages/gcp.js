@@ -73,11 +73,17 @@ function connectionCard(c, ctx) {
       h('dl', { class: 'kv' },
         h('dt', null, 'Access'), h('dd', null, c.authMode === 'wif' ? 'Workload identity federation from this app’s AWS role' : 'Service account key',
           h('span', { class: 'mono small muted' }, c.authMode === 'wif' ? ` · pool ${c.wif?.poolId} / ${c.wif?.providerId}${c.wif?.serviceAccount ? ` → ${c.wif.serviceAccount}` : ''}` : ` · ${c.keyHint || 'missing'}`)),
-        h('dt', null, 'Found'), h('dd', null, `${num(c.projects)} projects · ${num(c.serviceAccounts)} service accounts · ${num(c.principals)} identities`, c.high ? h('span', { class: 'badge b-high', style: 'margin-left:8px' }, `${c.high} high risk`) : null),
-        h('dt', null, 'Last scan'), h('dd', null, c.lastScanAt ? `${fmtDate(c.lastScanAt)} (${ago(c.lastScanAt)})` : 'not yet', c.detail?.skipped?.length ? h('span', { class: 'small muted' }, ` · ${c.detail.skipped.length} policies could not be read`) : null),
+        h('dt', null, 'Found'), h('dd', null, [[c.projects, 'project'], [c.serviceAccounts, 'service account'], [c.principals, 'identity', 'identities']].map(([n, one, many = `${one}s`]) => `${num(n)} ${n === 1 ? one : many}`).join(' · '), c.high ? h('span', { class: 'badge b-high', style: 'margin-left:8px' }, `${c.high} high risk`) : null),
+        h('dt', null, 'Last scan'), h('dd', null, c.lastScanAt ? `${fmtDate(c.lastScanAt)} (${ago(c.lastScanAt)})` : 'not yet', c.detail?.skipped?.length ? h('span', { class: 'small muted' }, ` · ${c.detail.skipped.length} ${c.detail.skipped.length === 1 ? 'policy' : 'policies'} could not be read`) : null),
         h('dt', null, 'Role usage'), h('dd', null, usageLine(c))),
+      c.notRead?.length ? h('div', { class: 'alert warn small' }, notReadText(c.notRead, c.scopeType === 'project' ? `project ${c.scopeId}` : 'its projects'),
+        c.scopeType === 'project' && can('accounts') ? h('div', null, h('a', { href: `#/gcp/${c.id}/edit` }, 'Edit'), ' shows the command to let its reader read them.') : null) : null,
       h('div', { class: 'row' }, det, usageDet)));
 }
+
+// a folder or the organization above a project whose IAM policy no connection could read: roles granted there are missing
+const aboveLabel = (r) => (String(r).startsWith('folders/') ? `folder ${r.split('/')[1]}` : `the organization (${String(r).split('/')[1]})`);
+const notReadText = (list, what) => `Roles granted on ${list.map(aboveLabel).join(' and ')}, above ${what}, are not read: the reader may not read ${list.length === 1 ? 'its' : 'their'} IAM policy, so a service account that holds roles only there shows without them. Connect the folder or organization, or let the reader read it.`;
 
 const gb = (b) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(2)} GB` : b >= 1024 ** 2 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${Math.max(0, Math.round((b || 0) / 1024))} KB`);
 const pct = (x) => `${Math.floor((x || 0) * 100)}%`;
@@ -399,6 +405,7 @@ export async function gcpPrincipalPage(ctx, id) {
       h('tbody', null, p.roles.map((r) => h('tr', null, h('td', null, h('div', { class: 'name' }, r.title || shortRole(r.role)), h('div', { class: 'tiny muted mono' }, r.role), r.basic && h('span', { class: 'badge b-medium' }, 'basic role')),
         h('td', null, where(r), r.condition && h('div', { class: 'tiny muted' }, `only when: ${r.condition}`)), h('td', null, r.resourceType === 'serviceAccount' ? '—' : `${r.reach} project${r.reach === 1 ? '' : 's'}`),
         h('td', null, num(r.permissions)), h('td', null, r.permissions ? h('button', { class: 'btn sm', onClick: () => showPerms(r.role) }, 'List') : null)))))) : h('p', { class: 'muted' }, 'No roles granted.'),
+    p.notRead?.length ? h('div', { class: 'alert warn small' }, notReadText(p.notRead, p.project ? `project ${p.project}` : 'its project')) : null,
     permBox);
   const becomes = p.becomes.length ? section('Who it can become', 'Service accounts this identity can impersonate, act as or mint keys for. Their permissions are effectively its permissions too.',
     h('div', { class: 'scroll' }, h('table', { class: 'small' }, h('thead', null, h('tr', null, h('th', null, 'Service account'), h('th', null, 'Risk'), h('th', null, 'How'))),

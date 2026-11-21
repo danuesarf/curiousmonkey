@@ -30,19 +30,21 @@ const denied = (e) => /AccessDenied|not authorized|UnauthorizedOperation|Authori
 
 /** Which accounts are yours, your organisations, known vendors; the workspace's policy; and a signature of all of it. */
 export async function estateFor() {
-  const [accounts, org, policy, gproj, seen] = await Promise.all([
+  const [accounts, org, policy, gproj, seen, pools] = await Promise.all([
     query('SELECT account_id, name, aws_org_id FROM cloud_accounts').then((r) => r.rows),
     query('SELECT account_id, name FROM org_accounts').then((r) => r.rows).catch(() => []),
     loadPolicy(),
     query(`SELECT p.connection_id, p.project_id, c.status_detail->>'domain' AS domain FROM gcp_projects p JOIN gcp_connections c ON c.id = p.connection_id`).then((r) => r.rows).catch(() => []),
     query(`SELECT md5(string_agg(project_id || ':' || coalesce(organization, ''), ',' ORDER BY project_id)) AS h FROM gcp_seen_projects`).then((r) => r.rows[0]?.h || '', () => ''),
+    // identity pools, from every connection: a federated identity is judged by them
+    query(`SELECT md5(string_agg(name || ':' || coalesce(aws_account_id, '') || ':' || coalesce(attribute_condition, ''), ',' ORDER BY name)) AS h FROM gcp_wif_providers`).then((r) => r.rows[0]?.h || '', () => ''),
   ]);
   const estate = { connected: new Map(accounts.map((a) => [a.account_id, a.name])), org: new Map(org.map((x) => [x.account_id, x.name])),
     orgIds: new Set(accounts.map((a) => a.aws_org_id).filter(Boolean)), vendor: knownVendor };
   const sig = docHash({ v: VERSION, c: [...estate.connected.keys()].sort(), o: [...estate.org.keys()].sort(), i: [...estate.orgIds].sort(), p: policy.sig,
     g: gproj.map((x) => `${x.connection_id}:${x.project_id}:${x.domain || ''}`).sort(),
     // whose projects and domains are yours (Configuration, and the projects the readers can see)
-    w: [config.gcp.ownProjects || [], config.gcp.ownDomains || [], seen] });
+    w: [config.gcp.ownProjects || [], config.gcp.ownDomains || [], seen], f: pools });
   return { estate, policy, sig };
 }
 
@@ -187,7 +189,9 @@ async function gcpEstate(connId, { domain, providers, roleDefs } = {}) {
   const [projects, conn, prov, accounts] = await Promise.all([
     query('SELECT connection_id, project_id FROM gcp_projects').then((r) => r.rows),
     domain === undefined ? query(`SELECT status_detail->>'domain' AS domain FROM gcp_connections WHERE id = $1`, [connId]).then((r) => r.rows[0]?.domain || null) : domain,
-    providers ? Promise.resolve(providers) : query('SELECT * FROM gcp_wif_providers WHERE connection_id = $1', [connId]).then((r) => r.rows),
+    // every connection's pools (and this scan's, not stored yet): a federated identity from a pool another connection
+    // reads (a connection per project, the pool in a shared one) is yours, not an outsider
+    query('SELECT * FROM gcp_wif_providers').then((r) => [...new Map([...r.rows, ...(providers || [])].map((x) => [x.name, x])).values()]),
     query('SELECT account_id, name FROM cloud_accounts').then((r) => r.rows),
   ]);
   return { domain: conn, own: await loadOwnership({ domains: [conn] }), providers: prov, roleDefs: roleDefs || null, awsAccounts: new Map(accounts.map((a) => [a.account_id, a.name])),

@@ -4,7 +4,7 @@ import { Router } from 'express';
 import { isEnabled } from '../extensions.js';
 import { z } from 'zod';
 import { config } from '../config.js';
-import { query } from '../db.js';
+import { query, tx } from '../db.js';
 import { audit } from '../audit.js';
 import { requireUser, requirePerm } from '../auth/sessions.js';
 import { encrypt } from '../auth/crypto.js';
@@ -13,12 +13,13 @@ import { isEnvironment, resolveEnvironment, environmentOf, defaultEnvironment } 
 import { gcpSnippets, awsRoleOf } from '../gcp/onboarding.js';
 import { gcpGateway, hierarchy } from '../gcp/scan.js';
 import { crossLinks } from '../gcp/links.js';
-import { gcpProjects, summarizeSources } from '../gcp/projects.js';
+import { gcpProjects, summarizeSources, unreadAbove } from '../gcp/projects.js';
+import { mergeConnections } from '../gcp/merge.js';
 import { spaceGcp, spaceGcpProject } from '../gcp/space.js';
 import { gcpTrust, gcpTrustCsv, gcpWays } from '../gcp/trust.js';
 import { sendCsv } from '../csv.js';
 import { syncCursors, usageStorage, coverage, LAG_MS, MAX_LOOKBACK_DAYS } from '../gcp/usage.js';
-import { analyzeUsage, principalUsage } from '../gcp/usageAnalysis.js';
+import { analyzeUsage, principalUsage, refreshUsage } from '../gcp/usageAnalysis.js';
 
 export const gcp = Router();
 gcp.use(requireUser);
@@ -70,13 +71,19 @@ const view = (c, counts = {}) => ({
 gcp.get('/gcp/connections', requirePerm('view'), unscoped, wrap(async (req, res) => {
   const [rows, counts] = await Promise.all([
     query('SELECT * FROM gcp_connections ORDER BY name'),
-    query(`SELECT connection_id, count(*) FILTER (WHERE kind='serviceAccount' AND unique_id IS NOT NULL)::int AS sas, count(*) FILTER (WHERE risk='High')::int AS high, count(*)::int AS principals,
+    // service accounts that live in its projects (a copy of one from another connection's project is not counted)
+    query(`SELECT connection_id, count(*) FILTER (WHERE kind='serviceAccount' AND unique_id IS NOT NULL
+                                                   AND EXISTS (SELECT 1 FROM gcp_projects p WHERE p.connection_id = x.connection_id AND p.project_id = x.project_id))::int AS sas,
+                  count(*) FILTER (WHERE risk='High')::int AS high, count(*)::int AS principals,
            (SELECT count(*)::int FROM gcp_projects p WHERE p.connection_id = x.connection_id) AS projects FROM gcp_principals x GROUP BY connection_id`),
   ]);
   const by = new Map(counts.rows.map((r) => [r.connection_id, r]));
   const usage = await usageProgress();
+  // the folders and organization above its projects whose policy it was refused, unless another connection read them
+  const readAny = new Set(rows.rows.flatMap((c) => c.status_detail?.above?.read || []));
+  const notRead = (c) => (c.status_detail?.above?.refused || (c.status_detail?.skipped || []).filter((x) => /^(folders|organizations)\//.test(x))).filter((x) => !readAny.has(x));
   res.json({ items: rows.rows.map((c) => view(c, { projects: by.get(c.id)?.projects || 0, serviceAccounts: by.get(c.id)?.sas || 0, high: by.get(c.id)?.high || 0, principals: by.get(c.id)?.principals || 0,
-    usageProgress: usage.get(c.id) || null })), awsMode: config.awsMode });
+    usageProgress: usage.get(c.id) || null, notRead: notRead(c) })), awsMode: config.awsMode });
 }));
 
 /** The gcloud commands for a scope, with federation pinned to the AWS role this app's worker runs as. */
@@ -162,6 +169,8 @@ gcp.patch('/gcp/connections/:id', requirePerm('accounts'), unscoped, wrap(async 
 gcp.delete('/gcp/connections/:id', requirePerm('accounts'), unscoped, wrap(async (req, res) => {
   const id = uuid.parse(req.params.id);
   const c = (await query('DELETE FROM gcp_connections WHERE id=$1 RETURNING name, scope_type, scope_id', [id])).rows[0]; if (!c) throw NotFound();
+  // what the others share no longer includes what it read: their identities again over what is left
+  await tx(async (x) => { await x.query(`SELECT pg_advisory_xact_lock(hashtext('gcp-snapshot'))`); return mergeConnections(x, { force: true }); }).then(() => refreshUsage()).catch(() => {});
   await audit(req, 'gcp.remove', { type: 'gcp', id }, { name: c.name, scope: `${c.scope_type}/${c.scope_id}` });
   clearCache();
   res.json({ ok: true });
@@ -236,7 +245,8 @@ gcp.get('/gcp/principals/:id', requirePerm('view'), unscoped, wrap(async (req, r
   const [conn, titles, becomes, links, projects] = await Promise.all([
     query('SELECT id, name, scope_type, scope_id, last_scan_at FROM gcp_connections WHERE id=$1', [p.connection_id]),
     query('SELECT name, title, cardinality(permissions) AS n FROM gcp_role_defs WHERE name = ANY($1)', [p.roles.map((r) => r.role)]),
-    query(`SELECT id, member, email, project_id, risk, sources FROM gcp_principals WHERE connection_id=$1 AND sources @> $2::jsonb`, [p.connection_id, JSON.stringify([{ member: p.member }])]),
+    // who it can become, in every connection (one copy each)
+    query(`SELECT DISTINCT ON (member) id, member, email, project_id, risk, sources FROM gcp_principals WHERE sources @> $1::jsonb ORDER BY member, analyzed_at DESC`, [JSON.stringify([{ member: p.member }])]),
     crossLinks(),
     gcpProjects(),
   ]);
@@ -245,7 +255,9 @@ gcp.get('/gcp/principals/:id', requirePerm('view'), unscoped, wrap(async (req, r
   res.json({
     ...row(p), roles: p.roles.map((r) => ({ ...r, title: t.get(r.role) || null })), sources: p.sources, keysDetail: p.keys, connection: conn.rows[0] || null, environment: env.get(p.project_id) || null,
     becomes: becomes.rows.map((b) => ({ id: b.id, member: b.member, email: b.email, project: b.project_id, risk: b.risk, via: b.sources.filter((s) => s.member === p.member).map((s) => ({ via: s.via, role: s.role, at: s.at })) })),
-    aws: { into: links.awsToGcp.filter((l) => l.gcpPrincipal === p.id), out: links.gcpToAws.filter((l) => l.gcpPrincipal === p.id) },
+    aws: { into: links.awsToGcp.filter((l) => l.gcpMember === p.member), out: links.gcpToAws.filter((l) => l.gcpMember === p.member) },
+    // roles granted on a folder or the organization above its project that no connection could read
+    notRead: (await unreadAbove()).get(p.project_id) || [],
   });
 }));
 

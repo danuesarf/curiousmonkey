@@ -15,8 +15,9 @@ export { googleTrustsOf };
 export async function crossLinks({ awsScope = null } = {}) {
   const [accounts, gcp, googleRoles] = await Promise.all([
     query(`SELECT id, account_id, name, environment FROM cloud_accounts WHERE provider='aws'`),
-    query(`SELECT p.id, p.member, p.kind, p.email, p.project_id, p.unique_id, p.sources, p.origin, p.roles, p.reach, p.risk, p.connection_id FROM gcp_principals p
-           WHERE p.kind IN ('serviceAccount','federated')`),
+    // one copy of each identity (the latest read, as every page picks it): several connections may read the same one
+    query(`SELECT DISTINCT ON (p.member) p.id, p.member, p.kind, p.email, p.project_id, p.unique_id, p.sources, p.origin, p.roles, p.reach, p.risk, p.connection_id FROM gcp_principals p
+           WHERE p.kind IN ('serviceAccount','federated') ORDER BY p.member, p.analyzed_at DESC`),
     query(`SELECT r.id, r.name, r.arn, r.account_id, r.trust_policy, r.risk FROM roles r WHERE r.deleted_at IS NULL AND r.trust_policy::text LIKE '%accounts.google.com%'`),
   ]);
   const byAwsId = new Map(accounts.rows.map((a) => [a.account_id, a]));
