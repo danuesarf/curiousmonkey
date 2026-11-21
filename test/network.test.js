@@ -396,6 +396,91 @@ test("a flow log's reading state, as the page says it", () => {
   assert.deepEqual([young.state, young.historyDays], ['current', 2]);
 });
 
+test('Google Cloud firewall: a deny before an allow takes it back; no source is anywhere; protocols as written; which tier comes first', () => {
+  const P = 'made-up-proj', net = `projects/${P}/global/networks/core`;
+  const g = (type, id, data, extra = {}) => ({ cloud: 'gcp', owner: P, type, id, name: id.split('/').pop(), vpc: net, region: null, data, ...extra });
+  const network = (d = {}) => g('network', net, { autoSubnets: false, peerings: [], legacy: false, ...d });
+  const web = g('instance', `projects/${P}/zones/z1/instances/web-1`, { status: 'RUNNING', tags: ['web'], serviceAccounts: [], interfaces: [{ network: net, subnet: 's1', ip: '10.0.0.5', natIps: ['198.51.100.10'] }] }, { region: 'z1' });
+  const fw = (name, d) => g('firewall', `projects/${P}/global/firewalls/${name}`, { direction: 'INGRESS', priority: 1000, action: 'allow', rules: [], sourceRanges: [], destinationRanges: [], sourceTags: [],
+    sourceServiceAccounts: [], targetTags: [], targetServiceAccounts: [], disabled: false, logging: false, ...d });
+  const policy = (rules) => g('firewall-policy', `projects/${P}/global/firewallPolicies/made-up-policy`, { networks: [net], rules: rules.map((r) => ({ direction: 'INGRESS', disabled: false, sourceRanges: ['0.0.0.0/0'],
+    destinationRanges: [], targetServiceAccounts: [], targetTags: [], logging: false, ...r })) }, { vpc: null });
+  // the rules given, on one instance with an external address (and a network of its own when one is given)
+  const run = (...extra) => {
+    const r = analyzeNetwork([extra.find((x) => x.type === 'network') || network(), web, ...extra.filter((x) => x.type !== 'network')], { gcpProjects: new Map([[P, {}]]) });
+    const fws = r.findings.filter((f) => /^net\.gcp-fw/.test(f.control));
+    return { titles: fws.map((f) => f.title), details: fws.map((f) => f.detail), ports: r.exposures.find((e) => e.kind === 'instance')?.ports.map((x) => `${x.proto} ${x.ports}`) || [] };
+  };
+  const ssh = fw('allow-ssh', { rules: [{ proto: 'tcp', ports: ['22'] }], sourceRanges: ['0.0.0.0/0'] });
+  const deny = (name, d) => fw(name, { action: 'deny', priority: 100, rules: [{ proto: 'tcp', ports: ['22'] }], sourceRanges: ['0.0.0.0/0'], ...d });
+  assert.deepEqual(run(ssh).titles, ['Firewall rule allow-ssh opens SSH (22) to the internet']);
+  // a deny from the internet with a higher priority, or the same (a deny wins a tie), takes it back
+  assert.deepEqual(run(ssh, deny('deny-ssh')), { titles: [], details: [], ports: [] });
+  assert.deepEqual(run(ssh, deny('deny-ssh-tie', { priority: 1000, rules: [{ proto: 'tcp' }] })).ports, []);
+  // not one that comes after it, misses some of the internet, other instances, or only some destinations
+  for (const d of [deny('later', { priority: 2000 }), deny('part', { sourceRanges: ['192.0.2.0/24'] }), deny('db-only', { targetTags: ['db'] }), deny('to-some', { destinationRanges: ['10.0.0.0/8'] }),
+    deny('udp', { rules: [{ proto: 'udp', ports: ['22'] }] }), deny('v6-only', { sourceRanges: ['::/0'] })]) assert.deepEqual(run(ssh, d).ports, ['tcp 22'], d.name);
+  // a deny of one port leaves the rest of an allow of everything
+  const everything = fw('allow-all', { rules: [{ proto: 'all' }], sourceRanges: ['0.0.0.0/0'] });
+  const most = run(everything, deny('deny-ssh'));
+  assert.deepEqual(most.ports, ['tcp 0-21, 23-65535', 'udp every port', 'sctp every port']);
+  assert.match(most.details[0], /every UDP and SCTP port/);
+  assert.deepEqual(run(everything).ports, ['all every port']);
+  // an ingress rule with no source at all is from any IPv4 address; one from tagged instances only is not
+  assert.deepEqual(run(fw('rdp-nosource', { rules: [{ proto: 'tcp', ports: ['3389'] }] })), { titles: ['Firewall rule rdp-nosource opens RDP (3389) to the internet'],
+    details: ['Ingress from 0.0.0.0/0 on RDP (3389) (every instance in the network); it reaches web-1 (198.51.100.10), with external addresses.'], ports: ['tcp 3389'] });
+  assert.deepEqual(run(fw('rdp-from-bastion', { rules: [{ proto: 'tcp', ports: ['3389'] }], sourceTags: ['bastion'] })).ports, []);
+  // UDP stays UDP
+  assert.deepEqual(run(fw('allow-ike', { rules: [{ proto: 'udp', ports: ['500', '4500'] }], sourceRanges: ['0.0.0.0/0'] })), { titles: [], details: [], ports: ['udp 500, 4500'] });
+  // every instance it applies to kept out by a deny: said so, and low
+  const shielded = run(ssh, deny('deny-web', { targetTags: ['web'] }));
+  assert.deepEqual([shielded.ports, shielded.details[0]], [[], 'Ingress from 0.0.0.0/0 on SSH (22) (every instance in the network); deny rules keep it from web-1, the instances it applies to today.']);
+  // the network firewall policy comes after the VPC firewall rules, unless the network puts it first
+  const policyDeny = policy([{ priority: 10, action: 'deny', layer4: [{ proto: 'tcp', ports: ['22'] }] }]);
+  assert.deepEqual(run(ssh, policyDeny).ports, ['tcp 22']);
+  assert.deepEqual(run(ssh, policyDeny, network({ policyOrder: 'BEFORE_CLASSIC_FIREWALL' })).ports, []);
+  const policyAllow = policy([{ priority: 10, action: 'allow', layer4: [{ proto: 'tcp', ports: ['22'] }] }]);
+  assert.deepEqual(run(policyAllow, deny('deny-ssh', { priority: 65000 })), { titles: [], details: [], ports: [] }, 'a VPC deny comes before the policy');
+  assert.deepEqual(run(policyAllow).titles, ['Firewall policy made-up-policy, rule 10 opens SSH (22) to the internet']);
+});
+
+test('AWS: a Classic Load Balancer is known by its interfaces; overlapping VPCs on one transit gateway; flow logs of a VPC whose owner is not connected', () => {
+  const a = (type, id, vpc, data, extra = {}) => ({ cloud: 'aws', owner: PROD, type, id, name: id, vpc, region: 'us-east-1', data, ...extra });
+  const eni = (id, subnet, ip, description, groups) => a('eni', id, 'vpc-made1', { subnet, privateIp: '10.1.0.9', publicIp: ip, publicIps: [], groups, kind: 'interface', instance: null, description });
+  const att = (id, vpc) => a('tgw-attachment', id, vpc, { tgw: 'tgw-made', tgwOwner: PROD, resourceType: 'vpc', resourceId: vpc, resourceOwner: PROD, state: 'available' });
+  const items = [
+    a('vpc', 'vpc-made1', 'vpc-made1', { cidrs: ['10.1.0.0/16'] }), a('vpc', 'vpc-made2', 'vpc-made2', { cidrs: ['10.1.128.0/17'] }), a('vpc', 'vpc-made3', 'vpc-made3', { cidrs: ['10.9.0.0/16'] }),
+    a('subnet', 'subnet-pub1', 'vpc-made1', { cidr: '10.1.0.0/24' }), a('subnet', 'subnet-pub2', 'vpc-made1', { cidr: '10.1.1.0/24' }),
+    a('route-table', 'rtb-1', 'vpc-made1', { main: true, subnets: [], routes: [{ dest: '0.0.0.0/0', target: { type: 'igw', id: 'igw-1' }, state: 'active' }] }),
+    a('igw', 'igw-1', 'vpc-made1', { vpcs: ['vpc-made1'] }),
+    a('sg', 'sg-clb', 'vpc-made1', { groupName: 'clb', isDefault: false, ingress: [{ proto: 'tcp', from: 443, to: 443, cidrs: ['0.0.0.0/0'], ipv6: [], groups: [], prefixLists: [] }], egress: [] }),
+    // a Classic Load Balancer: an interface in each zone, "ELB <name>"; an Application Load Balancer's is "ELB app/…"
+    eni('eni-clb1', 'subnet-pub1', '203.0.113.20', 'ELB legacy-web', ['sg-clb']), eni('eni-clb2', 'subnet-pub2', '203.0.113.21', 'ELB legacy-web', ['sg-clb']),
+    eni('eni-alb1', 'subnet-pub1', '203.0.113.30', 'ELB app/made-up-alb/0123456789abcdef', ['sg-clb']),
+    a('tgw', 'tgw-made', null, { owner: PROD }), att('tgw-attach-1', 'vpc-made1'), att('tgw-attach-2', 'vpc-made2'), att('tgw-attach-3', 'vpc-made3'),
+  ];
+  const est = { awsAccounts: new Map([[PROD, { name: 'payments-prod' }]]) };
+  const r = analyzeNetwork(items, est);
+  const lbs = r.exposures.filter((e) => e.kind === 'load-balancer');
+  assert.deepEqual(lbs.map((e) => [e.name, e.addresses.sort(), e.ports.map((x) => `${x.proto} ${x.ports}`)]), [['legacy-web (Classic Load Balancer)', ['203.0.113.20', '203.0.113.21'], ['tcp 443']]]);
+  assert.ok(!r.exposures.some((e) => e.kind === 'interface'), 'its interfaces, and the other load balancer\'s, are not counted on their own');
+  // the two overlapping VPCs on the transit gateway, and not the third
+  const overlap = (res) => res.findings.filter((f) => f.control === 'net.cidr-overlap').map((f) => f.title);
+  assert.deepEqual(overlap(r), ['vpc-made1 and vpc-made2 use overlapping addresses on transit gateway tgw-made']);
+  // with its route tables read: kept apart, nothing; routed to each other, the finding
+  const rt = (id, assoc, to) => a('tgw-route-table', id, null, { tgw: 'tgw-made', default: false, associations: [{ attachment: assoc, resourceType: 'vpc', resourceId: null }],
+    routes: to ? [{ dest: '10.1.128.0/17', type: 'propagated', state: 'active', attachments: [{ attachment: to, resourceType: 'vpc', resourceId: null }] }] : [] });
+  assert.deepEqual(overlap(analyzeNetwork([...items, rt('tgw-rtb-a', 'tgw-attach-1'), rt('tgw-rtb-b', 'tgw-attach-2')], est)), []);
+  const joined = analyzeNetwork([...items, rt('tgw-rtb-a', 'tgw-attach-1', 'tgw-attach-2'), rt('tgw-rtb-b', 'tgw-attach-2')], est).findings.find((f) => f.control === 'net.cidr-overlap');
+  assert.match(joined.detail, /route tables send one to the other/);
+
+  // a VPC shared with a connected member account whose owner is not connected: its flow logs cannot be seen from there
+  const member = demoAwsNetwork(DATA, 'us-east-1').items.map((i) => ({ ...i, cloud: 'aws', owner: DATA }));
+  const m = analyzeNetwork(member, { awsAccounts: new Map([[DATA, { name: 'data-platform-stg' }]]) });
+  assert.ok(m.items.some((i) => i.type === 'vpc' && i.id === DEMO_SHARED_VPC && i.data.ownerNotRead));
+  assert.ok(!m.findings.some((f) => f.control === 'net.flow-logs-off' && (f.vpc === DEMO_SHARED_VPC || f.nativeId === DEMO_SHARED_VPC)));
+});
+
 // ---------------------------------------------------------------- with the database
 let pg, db, ext, sync, api, gscan;
 const owner = { id: null, scope_accounts: null };
@@ -510,6 +595,15 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
   const far = so.nodes.find((n) => n.id === `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`);
   assert.deepEqual([far.hidden, far.cidrs, far.worst], [true, [], 'none'], 'the other end of its peering: a name, nothing inside');
   assert.ok(!so.nodes.some((n) => n.cloud === 'gcp'));
+  // which VPCs' flow logs would tell what a line carries: only VPCs it may see are named, the rest counted
+  const named = new Set(so.nodes.filter((n) => !n.hidden).map((n) => n.id));
+  assert.ok(so.links.every((l) => (l.usage?.unlogged || []).every((id) => named.has(id))), 'no VPC of another account by its ID');
+  const peering = so.links.find((l) => l.kind === 'peering' && [l.from, l.to].includes(`aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`));
+  assert.equal(peering.usage.unloggedHidden, 1);
+  // and a VPC's panel draws the far end of its lines as the map does: a name, nothing inside
+  const own = await api.networkDetail(scoped, `aws:vpc:${DATA}:vpc-0b2b2c3d4e5f60020`);
+  const across = own.links.find((l) => l.id === peering.id);
+  assert.deepEqual([across.other.hidden, across.other.cidrs, across.other.tenants, across.usage.unloggedHidden], [true, [], undefined, 1]);
   assert.ok(so.exposures.every((e) => e.cloud === 'aws' && e.owner === DATA));
   assert.ok((await api.networkFindings(scoped, {})).items.every((x) => x.cloud === 'aws' && x.owner === DATA));
   await assert.rejects(api.networkDetail(scoped, 'gcp:net:projects/acme-shared-ci/global/networks/ci'), /Not found/);
@@ -690,4 +784,29 @@ test('a read that is refused is kept apart; a finding that goes away is resolved
   assert.equal(await sync.networkTick(), null);
   const l = await ext.listExtensions();
   assert.equal(l.find((x) => x.key === 'networking').enabled, false);
+});
+
+test('an account or a project that is gone takes its networking with it', async () => {
+  const conn = (await db.query('SELECT * FROM gcp_connections LIMIT 1')).rows[0];
+  const item = (cloud, ownerId, connId = null) => db.query(`INSERT INTO net_items(cloud, owner, gcp_connection_id, type, native_id, name, data) VALUES ($1, $2, $3, 'network', $4, 'x', '{}')`,
+    [cloud, ownerId, connId, `projects/${ownerId}/global/networks/x`]);
+  const read = (cloud, ownerId) => db.query(`INSERT INTO net_reads(cloud, owner) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [cloud, ownerId]);
+  const count = async (sql, p) => (await db.query(sql, p)).rows[0].n;
+  // a project taken out of the connection, and an account no longer connected
+  await item('gcp', 'made-up-gone', conn.id); await read('gcp', 'made-up-gone'); await read('aws', '333333333333');
+  assert.equal(await sync.forgetGone(), 2);
+  assert.equal(await count(`SELECT count(*)::int AS n FROM net_items WHERE owner = 'made-up-gone'`), 0);
+  assert.equal(await count(`SELECT count(*)::int AS n FROM net_reads WHERE owner IN ('made-up-gone', '333333333333')`), 0);
+  assert.equal(await count(`SELECT count(*)::int AS n FROM net_reads WHERE owner IN ($1, 'acme-data-stg')`, [PROD]), 2, 'what is still connected stays');
+  assert.equal(await sync.forgetGone(), 0);
+  // a project now in another connection: gone from this one when this one is read
+  const other = (await db.query(`INSERT INTO gcp_connections(name, scope_type, scope_id, auth_mode, wif, environment, status) VALUES ('made-up-other','project','made-up-moved','wif','{}','shared','connected') RETURNING id`)).rows[0];
+  await db.query(`INSERT INTO gcp_projects(project_id, connection_id) VALUES ('made-up-moved', $1)`, [other.id]);
+  await item('gcp', 'made-up-moved', conn.id);
+  assert.equal(await sync.forgetGone(), 0);
+  const r = await sync.readGcpNetwork(conn);
+  assert.deepEqual([r.projects, r.errors], [3, 0]);
+  assert.equal(await count(`SELECT count(*)::int AS n FROM net_items WHERE owner = 'made-up-moved'`), 0);
+  assert.ok(await count(`SELECT count(*)::int AS n FROM net_items WHERE owner = 'acme-data-stg'`) > 0);
+  await db.query('DELETE FROM gcp_connections WHERE id = $1', [other.id]);
 });

@@ -23,7 +23,8 @@ async function model() {
       loadUsage({ hourStart: start }), query('SELECT * FROM net_flow_reads').then((r) => r.rows).catch(() => []), flowStorage().catch(() => null)]);
     const r = analyzeNetwork(items, estate, policy, usage);
     // r.items: what was read with shared VPCs merged (one VPC under its owner, each interface once)
-    return { ...r, accts, projects, hourStart: start, flowReads: new Map(flowReads.map((x) => [x.flow_log, x])), flowBytes, targetOf: targets(r.graph, r.items, r.vpcOwnerOf) };
+    const byId = new Map(r.graph.nodes.map((n) => [n.id, n]));
+    return { ...r, accts, projects, hourStart: start, flowReads: new Map(flowReads.map((x) => [x.flow_log, x])), flowBytes, targetOf: targets(r.graph, r.items, r.vpcOwnerOf), nodeOf: (id) => byId.get(id) || null };
   }, { freshMs: 30e3, staleMs: 120e3 });
 }
 /** Every active AWS flow log in what was read, with whether and how far it is read (src/network/flows.js). */
@@ -84,6 +85,17 @@ function participantView(n, v) {
     tenants: (n.tenants || []).map((y) => (v.ok('aws', y.account) ? y : { account: y.account, name: y.name, owner: y.owner, read: y.read, hidden: true })) };
 }
 
+// the far end of a link into something this person may not see: its name and owner only
+const stubOf = (n) => ({ id: n.id, kind: n.kind, cloud: n.cloud, owner: n.owner, nativeId: n.nativeId, label: n.label, ownerName: n.ownerName, yours: n.yours, read: false, stub: true, hidden: true, cidrs: [], worst: 'none', findings: 0 });
+const seenAs = (n, v) => (!n || v.full(n) ? n : v.node(n) ? participantView(n, v) : stubOf(n));
+// a line's use names the VPCs whose flow logs would tell; those in accounts this person may not see are only counted
+function lineFor(l, v, nodeOf) {
+  const u = l.usage;
+  if (!v.scoped || !u?.unlogged?.length) return l;
+  const mine = u.unlogged.filter((id) => { const n = nodeOf(id); return !!n && v.node(n); });
+  return mine.length === u.unlogged.length ? l : { ...l, usage: { ...u, unlogged: mine, unloggedHidden: u.unlogged.length - mine.length } };
+}
+
 // a node is drawn when it is visible, or is the other end of a link from one that is
 function shownOf(m, v) {
   const shown = new Set(m.graph.nodes.filter((n) => n.cloud && v.node(n) && !n.stub).map((n) => n.id));
@@ -96,10 +108,7 @@ export async function networkOverview(user) {
   const m = await model(), v = visible(user, m);
   const reads = (await query('SELECT * FROM net_reads ORDER BY cloud, owner')).rows.filter((r) => v.ok(r.cloud, r.owner));
   const { shown, links } = shownOf(m, v);
-  const partOf = (n) => participantView(n, v);
-  // the far end of a link into something this person may not see: its name and owner only
-  const nodes = m.graph.nodes.filter((n) => shown.has(n.id)).map((n) => (v.full(n) ? n : v.node(n) ? partOf(n)
-    : { id: n.id, kind: n.kind, cloud: n.cloud, owner: n.owner, nativeId: n.nativeId, label: n.label, ownerName: n.ownerName, yours: n.yours, read: false, stub: true, hidden: true, cidrs: [], worst: 'none', findings: 0 }));
+  const nodes = m.graph.nodes.filter((n) => shown.has(n.id)).map((n) => seenAs(n, v));
   const env = new Map([...m.accts.map((a) => [`aws|${a.account_id}`, { name: a.name, environment: environmentOf(a.environment), id: a.id }]),
     ...m.projects.map((p) => [`gcp|${p.project_id}`, { name: p.project_id, title: p.name, environment: environmentOf(p.environment) }])]);
   for (const n of nodes) { const e = env.get(`${n.cloud}|${n.owner}`); n.environment = e?.environment || null; n.ownerLabel = e?.name || n.ownerName || n.owner; n.accountId = e?.id || null; }
@@ -112,7 +121,7 @@ export async function networkOverview(user) {
   const owners = [...new Set(nodes.filter((n) => n.cloud && !n.stub).map((n) => `${n.cloud}|${n.owner}`))].map((k) => { const [cloud, owner] = k.split('|'); const e = env.get(k); return { cloud, owner, name: e?.name || owner, title: e?.title || null, environment: e?.environment || null, accountId: e?.id || null }; });
   return {
     reads: reads.map((r) => ({ cloud: r.cloud, owner: r.owner, name: env.get(`${r.cloud}|${r.owner}`)?.name || r.owner, readAt: r.read_at, skipped: r.skipped, error: r.error, counts: r.counts })),
-    owners, nodes, links, exposures: m.exposures.filter((e) => v.ok(e.cloud, e.owner)).sort((a, b) => SEV[a.severity] - SEV[b.severity]),
+    owners, nodes, links: links.map((l) => lineFor(l, v, m.nodeOf)), exposures: m.exposures.filter((e) => v.ok(e.cloud, e.owner)).sort((a, b) => SEV[a.severity] - SEV[b.severity]),
     findings: sev, linkFindings: onLinks, pending: await pendingNetworkRead(), ports: { admin: ADMIN_PORTS, data: DATA_PORTS }, hourStart: new Date(m.hourStart).toISOString(),
     flowLogs: flowLogsOf(m, (i) => v.ok('aws', i.owner)),
     flow: { lookbackDays: LOOKBACK_DAYS, keepDays: KEEP_DAYS, storedBytes: m.flowBytes, step: await flowStep().catch(() => null) },
@@ -174,7 +183,7 @@ export async function networkDetail(user, nodeId) {
     && (!RESOURCE.has(i.type) || ((!only || i.owner === only) && v.ok(i.cloud, i.owner)));
   const list = (type) => m.items.filter((i) => i.type === type && mine(i));
   const ends = new Set([asked.id, n.id]);
-  const links = m.graph.links.filter((l) => ends.has(l.from) || ends.has(l.to)).map((l) => ({ ...l, other: m.graph.nodes.find((x) => x.id === (ends.has(l.from) ? l.to : l.from)) }));
+  const links = m.graph.links.filter((l) => ends.has(l.from) || ends.has(l.to)).map((l) => ({ ...lineFor(l, v, m.nodeOf), other: seenAs(m.nodeOf(ends.has(l.from) ? l.to : l.from), v) }));
   // what is open on this box: in it (whoever runs it), or about it (a transit gateway's route table, a Direct Connect gateway)
   const inIt = (r) => r.vpc === n.nativeId && m.vpcOwnerOf(r.owner, r.vpc) === n.owner && (!only || r.owner === only);
   const findings = (await query(`SELECT id, control, severity, title, detail, suggestion, item_name, item_type, native_id, vpc, cloud, owner, decision FROM net_findings WHERE status = 'open' AND cloud = $1

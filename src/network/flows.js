@@ -16,7 +16,7 @@
 import zlib from 'node:zlib';
 import { query, tx, pool } from '../db.js';
 import { getGateway } from '../aws/gateway.js';
-import { range4, shareAware, portsIn, ADMIN_PORTS, DATA_PORTS } from './analyze.js';
+import { range4, shareAware, portsIn, classicLbId, ADMIN_PORTS, DATA_PORTS } from './analyze.js';
 import { isEnabled } from '../extensions.js';
 
 export const LOOKBACK_DAYS = Math.max(1, Number(process.env.FLOW_LOOKBACK_DAYS || 7));
@@ -209,6 +209,7 @@ export function flowRouter(rawItems, graph, { logged = new Map() } = {}) {
   for (const e of eniById.values()) {
     const vpce = String(e.data.description || '').match(/vpce-[0-9a-z]+/); if (vpce && e.data.kind === 'vpc_endpoint') for (const ip of [e.data.privateIp]) endpointEni.set(ip, vpce[0]);
     const elb = String(e.data.description || '').match(/^ELB ((?:app|net)\/[^/]+\/[0-9a-z]+)/); if (elb) { const lb = lbs.find((b) => b.id.endsWith(`/${elb[1]}`)); if (lb) lbOfEni.set(e.id, lb.id); }
+    const clb = String(e.data.description || '').match(/^ELB ([^/\s]+)$/); if (clb) lbOfEni.set(e.id, classicLbId(e.owner, e.region, clb[1]));
   }
   // the lines between two nodes (fewest hops), not through the internet
   const paths = new Map();

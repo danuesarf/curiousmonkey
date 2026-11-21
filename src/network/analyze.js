@@ -32,17 +32,31 @@ const inCidr = (ip, cidr) => { const r = range4(cidr), v = ip4(ip); return !!(r 
 
 /** Port ranges a rule opens, as [from, to] pairs; null = every port (all protocols, or tcp/udp with no ports). */
 function awsPorts(r) { if (r.proto === 'all' || r.from == null || (r.from <= 0 && r.to >= 65535) || r.from === -1) return r.proto === 'icmp' || r.proto === 'icmpv6' ? [] : null; if (!['tcp', 'udp'].includes(r.proto)) return []; return [[r.from, r.to]]; }
-function gcpPorts(rules) {
-  const out = [];
+/**
+ * What a Google Cloud rule opens, protocol by protocol: Map(tcp|udp|sctp -> ranges, null for every port), and
+ * whether it names every protocol (then all three are there, every port).
+ */
+function gcpOpen(rules) {
+  const m = new Map(); let all = false;
+  const put = (proto, r) => { const cur = m.get(proto); m.set(proto, !m.has(proto) ? r : cur === null || r === null ? null : [...cur, ...r]); };
   for (const x of rules) {
-    const p = String(x.proto).toLowerCase();
-    if (p === 'all') return null;
-    if (!['tcp', 'udp', 'sctp', '6', '17'].includes(p)) continue;
-    if (!x.ports?.length) return null;
-    for (const s of x.ports) { if (s === 'all') return null; const [a, b] = String(s).split('-').map(Number); out.push([a, b ?? a]); }
+    const p = String(x.proto).toLowerCase(), proto = { 6: 'tcp', 17: 'udp', 132: 'sctp' }[p] || p;
+    if (proto === 'all') { all = true; for (const y of ['tcp', 'udp', 'sctp']) m.set(y, null); continue; }
+    if (!['tcp', 'udp', 'sctp'].includes(proto)) continue;
+    put(proto, !x.ports?.length || x.ports.includes('all') ? null : x.ports.map((s) => { const [a, b] = String(s).split('-').map(Number); return [a, b ?? a]; }));
   }
-  return out;
+  return { open: m, all };
 }
+/** Port ranges less those a deny takes away (null: every port). */
+function minusPorts(ranges, cut) {
+  if (cut === null) return [];
+  if (!cut.length) return ranges;
+  let cur = ranges === null ? [[0, 65535]] : ranges;
+  for (const [c1, c2] of cut) cur = cur.flatMap(([a, b]) => (c2 < a || c1 > b ? [[a, b]] : [...(a < c1 ? [[a, c1 - 1]] : []), ...(b > c2 ? [[c2 + 1, b]] : [])]));
+  return cur;
+}
+/** Every protocol's ranges as one list, for what a port number is (null when any protocol is every port). */
+const anyProto = (open) => { let u = []; for (const r of open.values()) { if (r === null) return null; u = u.concat(r); } return u; };
 const covers = (ranges, port) => ranges === null || ranges.some(([a, b]) => port >= a && port <= b);
 const portText = (ranges) => (ranges === null ? 'every port' : ranges.map(([a, b]) => (a === b ? String(a) : `${a}-${b}`)).join(', '));
 const span = (ranges) => (ranges === null ? 65536 : ranges.reduce((n, [a, b]) => n + (b - a + 1), 0));
@@ -56,6 +70,8 @@ const named = (ports, dict) => [...new Set(ports.map((p) => `${dict[p]} (${p})`)
 
 // ---------------------------------------------------------------- shared VPCs (AWS RAM, Google Cloud Shared VPC)
 const ACCOUNT = /^\d{12}$/;
+/** A Classic Load Balancer's ID, as exposure and flow logs know it (it has no ARN among what is read). */
+export const classicLbId = (owner, region, name) => `clb:${owner}:${region}:${name}`;
 // a Google Cloud network's project, from its path (projects/<project>/global/networks/<name>)
 const projectOf = (path) => (/^projects\//.test(path || '') ? path.split('/')[1] : null);
 /**
@@ -224,7 +240,8 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
     if (v.data.isDefault) f('net.default-vpc', inUse ? 'medium' : 'low', it, inUse ? `The default VPC in ${v.region} is in use` : `The default VPC in ${v.region} is still there`,
       inUse ? `${inUse} network interface${inUse === 1 ? '' : 's'} sit in it. Its subnets give every instance a public address and its route table sends everything to the internet.` : 'Nothing runs in it, but anything launched without a VPC chosen lands there, with a public address.',
       inUse ? 'Move what runs there into a VPC you designed, then delete the default VPC.' : 'Delete it.');
-    if ((!v.data.isDefault || inUse) && !flowOn.has(key(v.owner, v.id)) && !subs.every((s) => flowOn.has(key(v.owner, s.id))))
+    // a VPC shared with a member account, its owner not connected: AWS lets no member see the owner's flow logs
+    if (!v.data.ownerNotRead && (!v.data.isDefault || inUse) && !flowOn.has(key(v.owner, v.id)) && !subs.every((s) => flowOn.has(key(v.owner, s.id))))
       f('net.flow-logs-off', 'medium', it, `No flow logs for VPC ${v.name}`, 'Without VPC flow logs nothing records which addresses talked to what: an investigation has nothing to go on.', 'Turn on VPC flow logs (to S3 or CloudWatch Logs), at least for rejected traffic (CIS 3.7).');
     const auto = subs.filter((s) => s.data.mapPublicIp && publicSubnet.get(key(s.owner, s.id)));
     if (auto.length && !v.data.isDefault) f('net.subnet-auto-public-ip', 'low', it, `${auto.length} subnet${auto.length === 1 ? '' : 's'} in ${v.name} give every instance a public address`, `${auto.map((s) => s.name).slice(0, 5).join(', ')} route to an internet gateway and assign public IPs on launch: an instance is on the internet unless someone remembers not to.`, 'Turn off auto-assign public IPv4 and give public addresses only to what needs one.');
@@ -299,12 +316,28 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
     return out;
   };
   const sevPorts = (list) => worstOf(list.map((x) => { const c = classifyPorts(x.ranges); return c.all || c.admin.length || c.data.length ? 'high' : c.wide ? 'medium' : 'low'; }));
+  // a Classic Load Balancer is not among the load balancers read (those are the v2 kinds): it is known by its
+  // interfaces, one per zone, described "ELB <name>", with its public addresses and its security groups
+  const classic = new Map();
   for (const n of enis) {
     const ips = [...new Set([n.data.publicIp, ...(n.data.publicIps || [])].filter(Boolean))];
-    if (!ips.length || n.data.kind === 'nat_gateway' || /^ELB /.test(n.data.description || '')) continue;
+    if (!ips.length || n.data.kind === 'nat_gateway' || /^ELB (app|net|gwy)\//.test(n.data.description || '')) continue;
+    const clb = String(n.data.description || '').match(/^ELB ([^/\s]+)$/);
+    if (clb) {
+      // there since its first interface was (no date: before the first read)
+      const k = classicLbId(n.owner, n.region, clb[1]), c = classic.get(k) || classic.set(k, { n, id: k, name: clb[1], ips: new Set(), groups: new Set(), first: n.firstSeen || null }).get(k);
+      ips.forEach((x) => c.ips.add(x)); n.data.groups.forEach((g) => c.groups.add(g));
+      c.first = c.first && n.firstSeen ? (n.firstSeen < c.first ? n.firstSeen : c.first) : null;
+      continue;
+    }
     const open = worldPorts(n.owner, n.data.groups);
     exposures.push({ cloud: 'aws', owner: n.owner, vpc: n.vpc, vpcOwner: n.vpcOwner || n.owner, region: n.region, kind: 'interface', id: n.id, name: n.data.instance ? `${n.name !== n.id ? n.name : 'instance'} (${n.data.instance})` : n.name,
       addresses: ips, ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: `security group ${x.via}` })), severity: open.length ? sevPorts(open) : 'none', firstSeen: n.firstSeen || null });
+  }
+  for (const c of classic.values()) {
+    const open = worldPorts(c.n.owner, [...c.groups]);
+    exposures.push({ cloud: 'aws', owner: c.n.owner, vpc: c.n.vpc, vpcOwner: c.n.vpcOwner || c.n.owner, region: c.n.region, kind: 'load-balancer', id: c.id, name: `${c.name} (Classic Load Balancer)`,
+      addresses: [...c.ips], ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: `security group ${x.via}` })), severity: open.length ? sevPorts(open) : 'none', firstSeen: c.first });
   }
   for (const b of lbs.filter((x) => x.data.scheme === 'internet-facing')) {
     const open = b.data.groups.length ? worldPorts(b.owner, b.data.groups) : null;
@@ -321,33 +354,79 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
   const instances = gby('instance');
   const inNet = (path) => instances.filter((i) => i.data.interfaces.some((x) => x.network === path));
   const pubOf = (i) => i.data.interfaces.flatMap((x) => x.natIps);
-  const targetsOf = (rule, path) => inNet(path).filter((i) => (!rule.targetTags?.length && !rule.targetServiceAccounts?.length)
-    || (rule.targetTags || []).some((t) => i.data.tags.includes(t)) || (rule.targetServiceAccounts || []).some((s) => i.data.serviceAccounts.includes(s)));
-  const gfw = (it, rule, ranges, path, label) => {
-    const c = classifyPorts(ranges); if (!c.all && !c.admin.length && !c.data.length && !c.wide) return;
-    const t = targetsOf(rule, path), pub = t.filter((i) => pubOf(i).length);
-    const where = pub.length ? `it reaches ${pub.map((i) => `${i.name} (${pubOf(i).join(', ')})`).slice(0, 4).join(', ')}, with external addresses` : t.length ? `it applies to ${t.map((i) => i.name).slice(0, 4).join(', ')}, none with an external address` : 'no instance it targets runs today';
+  const applies = (rule, i) => (!rule.targetTags?.length && !rule.targetServiceAccounts?.length)
+    || (rule.targetTags || []).some((t) => i.data.tags.includes(t)) || (rule.targetServiceAccounts || []).some((s) => i.data.serviceAccounts.includes(s));
+  const targetsOf = (rule, path) => inNet(path).filter((i) => applies(rule, i));
+  // Every ingress rule from the internet, allow or deny. A VPC firewall rule with no source at all is from any IPv4
+  // address (Google Cloud's default); a firewall policy rule names its sources. In a tier the matching rule with the
+  // highest priority decides (a deny wins a tie); the VPC firewall rules come before the network firewall policy,
+  // unless the network says the policy comes first.
+  const gRules = [];
+  for (const x of gby('firewall')) {
+    const d = x.data;
+    if (d.disabled || d.direction !== 'INGRESS' || !['allow', 'deny'].includes(d.action)) continue;
+    const world = !d.sourceRanges.length && !d.sourceTags?.length && !d.sourceServiceAccounts?.length ? ['0.0.0.0/0'] : d.sourceRanges.filter((s) => WORLD.has(s));
+    if (!world.length) continue;
+    gRules.push({ it: { ...x, cloud: 'gcp' }, rule: d, ...gcpOpen(d.rules), world, path: x.vpc, label: `Firewall rule ${x.name}`, deny: d.action === 'deny', prio: d.priority ?? 1000, tier: 0 });
+  }
+  for (const p of gby('firewall-policy')) for (const r of p.data.rules) {
+    const world = r.sourceRanges.filter((s) => WORLD.has(s));
+    if (r.disabled || r.direction !== 'INGRESS' || !['allow', 'deny'].includes(r.action) || !world.length) continue;
+    for (const path of p.data.networks) gRules.push({ it: { ...p, cloud: 'gcp', vpc: path, id: `${p.id}#${r.priority}` }, rule: r, ...gcpOpen(r.layer4), world, path, label: `Firewall policy ${p.name}, rule ${r.priority}`,
+      deny: r.action === 'deny', prio: r.priority, tier: 1, policy: p.id });
+  }
+  // a deny counts only where it surely matches: every destination (none named, or anywhere)
+  const gAllows = gRules.filter((g) => !g.deny), gDenies = gRules.filter((g) => g.deny && !(g.rule.destinationRanges || []).some((x) => !WORLD.has(x)));
+  // a deny that reaches every instance an allow could target (when none runs today)
+  const coversAll = (d, a) => (!d.targetTags?.length && !d.targetServiceAccounts?.length)
+    || (!!(a.targetTags?.length || a.targetServiceAccounts?.length) && (a.targetTags || []).every((t) => (d.targetTags || []).includes(t)) && (a.targetServiceAccounts || []).every((x) => (d.targetServiceAccounts || []).includes(x)));
+  // the deny rules that come before an allow, for all of its sources: in its own tier, those of no lower priority; and
+  // every deny of the tier evaluated first
+  const policyFirst = (path) => networks.get(path)?.data.policyOrder === 'BEFORE_CLASSIC_FIREWALL';
+  const before = (a) => (a.before ||= gDenies.filter((d) => d.path === a.path && a.world.every((s) => d.world.includes(s))
+    && (d.tier === a.tier ? (d.tier === 0 || d.policy === a.policy) && d.prio <= a.prio : (d.tier === 1) === policyFirst(a.path))));
+  /** What allow `a` lets in from the internet to instance `i` (or to whatever it targets, i null): Map(proto -> ranges). */
+  const opened = new Map();   // allow -> Map(instance or null -> what it opens), each worked out once
+  const opens = (a, i) => {
+    const seen = opened.get(a) || opened.set(a, new Map()).get(a);
+    if (seen.has(i)) return seen.get(i);
+    const out = new Map();
+    for (const [proto, ranges] of a.open) {
+      let r = ranges;
+      for (const d of before(a)) if ((i ? applies(d.rule, i) : coversAll(d.rule, a.rule)) && d.open.has(proto)) { r = minusPorts(r, d.open.get(proto)); if (r && !r.length) break; }
+      if (r === null || r.length) out.set(proto, r);
+    }
+    seen.set(i, out);
+    return out;
+  };
+  const together = (maps) => {
+    const out = new Map();
+    for (const m of maps) for (const [p, r] of m) { const cur = out.get(p); out.set(p, !out.has(p) ? r : cur === null || r === null ? null : [...cur, ...r]); }
+    return out;
+  };
+  const gfw = (a) => {
+    const { it, rule, label } = a;
+    // what it still opens on each instance it targets once the deny rules before it have their say; with no instance
+    // left, on whatever it could target
+    const all = targetsOf(rule, a.path), t = all.filter((i) => opens(a, i).size), eff = t.length ? together(t.map((i) => opens(a, i))) : opens(a, null);
+    if (!eff.size) return;
+    const ranges = anyProto(eff), c = classifyPorts(ranges); if (!c.all && !c.admin.length && !c.data.length && !c.wide) return;
+    const pub = t.filter((i) => pubOf(i).length);
+    const where = pub.length ? `it reaches ${pub.map((i) => `${i.name} (${pubOf(i).join(', ')})`).slice(0, 4).join(', ')}, with external addresses`
+      : t.length ? `it applies to ${t.map((i) => i.name).slice(0, 4).join(', ')}, none with an external address`
+        : all.length ? `deny rules keep it from ${all.map((i) => i.name).slice(0, 4).join(', ')}, the instances it applies to today` : 'no instance it targets runs today';
+    const from = a.world.join(' and '), every = [...eff.keys()].filter((p) => eff.get(p) === null);
     const sev = (hi) => (pub.length ? hi : t.length ? 'medium' : 'low');
     const fix = 'Allow only the ranges that need it (Identity-Aware Proxy for SSH: 35.235.240.0/20), or remove the rule.';
     const scope = rule.targetTags?.length ? ` (instances tagged ${rule.targetTags.join(', ')})` : rule.targetServiceAccounts?.length ? ` (instances running as ${rule.targetServiceAccounts.join(', ')})` : ' (every instance in the network)';
-    if (c.all) f('net.gcp-fw-all-open', sev('high'), it, `${label} lets the internet in on every port`, `Ingress from 0.0.0.0/0 on every protocol and port${scope}; ${where}.`, fix, { keyPart: `${it.id}|all` });
+    if (c.all) f('net.gcp-fw-all-open', sev('high'), it, `${label} lets the internet in on every port`, `Ingress from ${from} on ${a.all && every.length === 3 ? 'every protocol and port' : `every ${every.map((x) => x.toUpperCase()).join(' and ')} port`}${scope}; ${where}.`, fix, { keyPart: `${it.id}|all` });
     else {
-      if (c.admin.length) f('net.gcp-fw-admin-open', sev('high'), it, `${label} opens ${named(c.admin, ADMIN_PORTS)} to the internet`, `Ingress from 0.0.0.0/0 on ${named(c.admin, ADMIN_PORTS)}${scope}; ${where}.`, fix, { keyPart: `${it.id}|admin` });
-      if (c.data.length) f('net.gcp-fw-data-open', sev('high'), it, `${label} opens ${named(c.data, DATA_PORTS)} to the internet`, `Ingress from 0.0.0.0/0 on ${named(c.data, DATA_PORTS)}${scope}; ${where}.`, fix, { keyPart: `${it.id}|data` });
-      if (c.wide && !c.admin.length && !c.data.length) f('net.gcp-fw-wide-open', pub.length ? 'medium' : 'low', it, `${label} opens a wide port range to the internet`, `Ingress from 0.0.0.0/0 on ${c.text}${scope}; ${where}.`, 'Open only the ports the service listens on.', { keyPart: `${it.id}|wide` });
+      if (c.admin.length) f('net.gcp-fw-admin-open', sev('high'), it, `${label} opens ${named(c.admin, ADMIN_PORTS)} to the internet`, `Ingress from ${from} on ${named(c.admin, ADMIN_PORTS)}${scope}; ${where}.`, fix, { keyPart: `${it.id}|admin` });
+      if (c.data.length) f('net.gcp-fw-data-open', sev('high'), it, `${label} opens ${named(c.data, DATA_PORTS)} to the internet`, `Ingress from ${from} on ${named(c.data, DATA_PORTS)}${scope}; ${where}.`, fix, { keyPart: `${it.id}|data` });
+      if (c.wide && !c.admin.length && !c.data.length) f('net.gcp-fw-wide-open', pub.length ? 'medium' : 'low', it, `${label} opens a wide port range to the internet`, `Ingress from ${from} on ${c.text}${scope}; ${where}.`, 'Open only the ports the service listens on.', { keyPart: `${it.id}|wide` });
     }
   };
-  const gfwRules = [];   // [{ it, rule, ranges, path, label }] ingress allows from the internet, for exposure too
-  for (const x of gby('firewall')) {
-    const d = x.data;
-    if (d.disabled || d.direction !== 'INGRESS' || d.action !== 'allow' || !d.sourceRanges.some((s) => WORLD.has(s))) continue;
-    gfwRules.push({ it: { ...x, cloud: 'gcp' }, rule: d, ranges: gcpPorts(d.rules), path: x.vpc, label: `Firewall rule ${x.name}` });
-  }
-  for (const p of gby('firewall-policy')) for (const r of p.data.rules) {
-    if (r.disabled || r.direction !== 'INGRESS' || r.action !== 'allow' || !r.sourceRanges.some((s) => WORLD.has(s))) continue;
-    for (const path of p.data.networks) gfwRules.push({ it: { ...p, cloud: 'gcp', vpc: path, id: `${p.id}#${r.priority}` }, rule: r, ranges: gcpPorts(r.layer4), path, label: `Firewall policy ${p.name}, rule ${r.priority}` });
-  }
-  for (const g of gfwRules) gfw(g.it, g.rule, g.ranges, g.path, g.label);
+  for (const a of gAllows) gfw(a);
   for (const n of networks.values()) {
     const it = { ...n, cloud: 'gcp' };
     if (n.name === 'default' || n.data.autoSubnets) f('net.gcp-default-network', 'medium', it, n.name === 'default' ? `Project ${n.owner} still has the default network` : `Network ${n.name} creates subnets on its own`,
@@ -373,7 +452,12 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
   for (const i of instances) {
     const ips = pubOf(i); if (!ips.length) continue;
     const open = [];
-    for (const g of gfwRules) if (i.data.interfaces.some((x) => x.network === g.path) && targetsOf(g.rule, g.path).includes(i)) { if (g.ranges && !g.ranges.length) continue; open.push({ ranges: g.ranges, via: g.label.toLowerCase(), proto: g.ranges === null ? 'all' : 'tcp' }); }
+    for (const a of gAllows) if (i.data.interfaces.some((x) => x.network === a.path) && applies(a.rule, i)) {
+      const m = opens(a, i);
+      // every protocol, every port, nothing denied: one line; else a line per protocol it still opens
+      if (a.all && m.size === 3 && [...m.values()].every((r) => r === null)) open.push({ ranges: null, via: a.label.toLowerCase(), proto: 'all' });
+      else for (const [proto, r] of m) open.push({ ranges: r, via: a.label.toLowerCase(), proto });
+    }
     exposures.push({ cloud: 'gcp', owner: i.owner, vpc: i.vpc, vpcOwner: i.vpcOwner || i.owner, region: i.region, kind: 'instance', id: i.id, name: i.name, addresses: ips,
       ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: x.via })), severity: open.length ? sevPorts(open) : 'none' });
   }
@@ -396,13 +480,40 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
   // connected networks whose address ranges overlap: traffic between them cannot be routed as it should
   const cidrs = new Map(graph.nodes.map((n) => [n.id, n.cidrs || []]));
   for (const l of graph.links) {
-    if (!['peering', 'vpn', 'tgw'].includes(l.kind)) continue;
+    if (!['peering', 'vpn'].includes(l.kind)) continue;   // a transit gateway's VPCs: below
     const a = cidrs.get(l.from) || [], b = cidrs.get(l.to) || [];
     const clash = a.flatMap((x) => b.filter((y) => overlaps(x, y)).map((y) => `${x} and ${y}`));
     if (!clash.length) continue;
     const na = graph.nodes.find((n) => n.id === l.from), nb = graph.nodes.find((n) => n.id === l.to);
     f('net.cidr-overlap', 'low', { cloud: na.cloud, owner: na.owner, type: na.kind, id: na.nativeId, name: na.label, vpc: na.nativeId }, `${na.label} and ${nb.label} use overlapping addresses`,
       `They are connected (${l.kind}) but both use ${clash.slice(0, 3).join(', ')}: traffic to the shared range stays on one side.`, 'Renumber one side, or connect them only through NAT.', { keyPart: `${l.id}` });
+  }
+  // VPCs on one transit gateway whose ranges overlap, when its route tables send one to the other (or are not known)
+  const tgwRts = by('tgw-route-table');
+  const onTgw = new Map();   // transit gateway node -> [{ vpc node, attachment }]
+  for (const a of atts.values()) if (a.data.resourceType === 'vpc') {
+    const t = `aws:tgw:${a.data.tgw}`;
+    (onTgw.get(t) || onTgw.set(t, []).get(t)).push({ v: `aws:vpc:${a.data.resourceOwner}:${a.data.resourceId}`, att: a.id, tgw: a.data.tgw });
+  }
+  // every pair on one transit gateway, the same way round every read (the finding's key is the pair)
+  const tgwPairs = [];
+  for (const [t, all] of onTgw) {
+    const list = [...all].sort((p, q) => (p.v < q.v ? -1 : p.v > q.v ? 1 : 0));
+    list.forEach((x, i) => list.slice(i + 1).forEach((y) => { if (x.v !== y.v) tgwPairs.push([t, x, y]); }));
+  }
+  for (const [t, x, y] of tgwPairs) {
+    const a = cidrs.get(x.v) || [], b = cidrs.get(y.v) || [];
+    const clash = a.flatMap((p) => b.filter((q) => overlaps(p, q)).map((q) => `${p} and ${q}`));
+    if (!clash.length) continue;
+    const tables = tgwRts.filter((r) => r.data.tgw === x.tgw), tableOf = (att) => tables.find((r) => r.data.associations.some((z) => z.attachment === att));
+    const routes = (from, to) => !!tableOf(from)?.data.routes.some((r) => r.state === 'active' && r.attachments.some((z) => z.attachment === to));
+    const known = tables.length > 0, joined = routes(x.att, y.att) || routes(y.att, x.att);
+    if (known && !joined) continue;   // kept apart by the route tables: fine
+    const na = graph.nodes.find((n) => n.id === x.v), nb = graph.nodes.find((n) => n.id === y.v), hub = graph.nodes.find((n) => n.id === t);
+    if (!na || !nb) continue;
+    f('net.cidr-overlap', 'low', { cloud: 'aws', owner: na.owner, type: 'vpc', id: na.nativeId, name: na.label, vpc: na.nativeId }, `${na.label} and ${nb.label} use overlapping addresses on transit gateway ${hub?.label || x.tgw}`,
+      `Both are attached to ${hub?.label || x.tgw}${known ? ', and its route tables send one to the other,' : ' (its route tables are not read)'} but both use ${clash.slice(0, 3).join(', ')}: the shared range can be routed to only one of them.`,
+      'Renumber one side, or keep them in transit gateway route tables that never route to each other.', { keyPart: `${t}|${x.v}|${y.v}` });
   }
   // a VPC counts what is open in it whoever runs it; a member's slice counts its own part
   const about = (n) => findings.filter((x) => x.cloud === n.cloud && (n.kind === 'slice' ? x.owner === n.owner && x.vpc === n.nativeId && x.vpcOwner === n.vpcOwner
@@ -452,7 +563,9 @@ function applyUsage(graph, exposures, usage, f, now, hold) {
     const u = usage.links.get(l.id), read = cover(l, days), covered = Math.min(read, age(l.born)), known = Math.min(cover(l, span), age(l.born));
     const state = u?.bytes > 0 ? 'used' : covered >= QUIET_DAYS ? 'unused' : covered > 0 ? 'quiet' : 'unknown';
     // the VPCs whose flow logs would tell, when they do not
-    const unlogged = state === 'unknown' ? [...new Set((l.kind === 'privatelink' ? [l.from] : [l.from, l.to]).flatMap(needs))].filter((v) => !days(v)) : [];
+    // (an attachment carries only its own VPC's traffic: that VPC's flow logs see all of it)
+    const ends = l.kind === 'privatelink' ? [l.from] : l.kind === 'tgw' ? [l.from, l.to].filter((x) => x.startsWith('aws:vpc:')) : [l.from, l.to];
+    const unlogged = state === 'unknown' ? [...new Set(ends.flatMap(needs))].filter((v) => !days(v)) : [];
     l.usage = { state, bytes: u?.bytes || 0, flows: u?.flows || 0, rejected: u?.rejected || 0, last: u?.last || null, ports: u?.ports || [], hourly: u?.hourly || null, coveredDays: Math.round(covered * 10) / 10,
       unlogged, ...(age(l.born) < read ? { firstSeen: l.born } : {}) };
     if (!FLOW_LINKS.includes(l.kind) || u?.bytes > 0) continue;

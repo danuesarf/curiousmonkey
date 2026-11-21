@@ -19,7 +19,7 @@ export function normalizeGcpProject(projectId, r) {
     const path = `projects/${projectId}/global/networks/${n.name}`;
     add('network', path, n.name, path, null, { autoSubnets: !!n.autoCreateSubnetworks, legacy: !n.subnetworks && !!n.IPv4Range, routingMode: n.routingConfig?.routingMode || null, mtu: n.mtu || null,
       peerings: (n.peerings || []).map((p) => ({ name: p.name, network: netPath(p.network), state: p.state, exportCustom: !!p.exportCustomRoutes, importCustom: !!p.importCustomRoutes })),
-      firewallPolicy: n.firewallPolicy ? last(n.firewallPolicy) : null });
+      firewallPolicy: n.firewallPolicy ? last(n.firewallPolicy) : null, policyOrder: n.networkFirewallPolicyEnforcementOrder || null });
   }
   for (const s of r.subnetworks || []) add('subnet', `projects/${projectId}/regions/${region(s.region)}/subnetworks/${s.name}`, s.name, netPath(s.network), region(s.region), {
     cidr: s.ipCidrRange, secondary: (s.secondaryIpRanges || []).map((x) => ({ name: x.rangeName, cidr: x.ipCidrRange })), privateGoogleAccess: !!s.privateIpGoogleAccess,
