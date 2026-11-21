@@ -1,14 +1,14 @@
-// Networking → Space: the networks as a scene, like Space does for identities. AWS is the plane in front, Google
-// Cloud the plane behind; each account or project is a zone, each VPC or network a ring on it (subnets around the
-// rim: public ones raised and amber), its way out a beam up to the internet above. Transit gateways, Direct Connect
-// gateways and hubs float between the planes; VPN peers, offices and networks outside your estate sit off the edges.
+// Networking → Space: the networks as a scene, like Space does for identities. AWS is on the left, Google Cloud on
+// the right; each account or project is a zone, each VPC or network a ring on it (subnets around the rim: public ones
+// raised and amber), its way out a beam up to the internet above. Transit gateways, Direct Connect gateways and hubs
+// float in the aisle between the clouds; VPN peers, offices and networks outside your estate sit off the outer edges.
 // Lines are arcs above the planes. With VPC flow logs read, a line carries light while it carries traffic, the hour
 // bar replays the last 24 hours, a line with nothing on it in days is dashed and marked NOT USED.
 // Drag to turn, Shift+drag or two fingers to move, wheel or pinch to zoom.
 import { h, svg, num } from '../lib.js';
 import { wheelKind } from './spaceRelated.js';
 
-const W = 1400, H = 820, D = 2600, HOME = { az: 0, el: 40 };
+const W = 1400, H = 820, D = 2600, HOME = { az: 0, el: 56 };
 const f = (v) => Math.round(v * 10) / 10;
 const KIND_COLOR = { peering: '#8ec5ff', tgw: '#6fe3b0', 'tgw-peering': '#6fe3b0', vpn: '#f6e016', dx: '#ff9f6b', 'client-vpn': '#7fd1ff', privatelink: '#d6a2ff', psc: '#d6a2ff', ncc: '#6fe3b0', interconnect: '#c59bff', internet: '#7e978a' };
 const RED = '#ff6b5e', AMBER = '#f0b45a', IDLE = '#5f6f68';
@@ -24,44 +24,50 @@ function arc(a, b, P, lift) {
   return { pts, d: `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')}` };
 }
 
-/** Lays the scene out in plane coordinates from the overview (/api/network). */
+/**
+ * Lays the scene out in plane coordinates from the overview (/api/network): AWS on the left, Google Cloud on the
+ * right, each account or project a zone (stacked from front to back), its VPCs or networks two to a row; hubs in the
+ * aisle between the clouds; peers and outsiders off the outer edge of their cloud; the internet above the aisle.
+ */
 function layout(d, envColor) {
   const P = new Map(), zones = [];
+  const FW = 640, AISLE = 170;   // a cloud's width, and half the aisle between them
   const ringsOf = (cloud, owner) => d.nodes.filter((n) => n.cloud === cloud && n.owner === owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network'));
-  const field = (cloud, y0, y1) => {
+  const field = (cloud, x0) => {
     const owners = d.owners.filter((o) => o.cloud === cloud && ringsOf(cloud, o.owner).length);
-    const widths = owners.map((o) => Math.max(260, Math.ceil(ringsOf(cloud, o.owner).length / 2) * 230));
-    const total = widths.reduce((a, b) => a + b, 0) + Math.max(0, owners.length - 1) * 40;
-    let x = -total / 2;
+    const depths = owners.map((o) => Math.max(280, Math.ceil(ringsOf(cloud, o.owner).length / 2) * 260));
+    const total = depths.reduce((a, b) => a + b, 0) + Math.max(0, owners.length - 1) * 40;
+    let y = -total / 2;
     owners.forEach((o, i) => {
-      const w = widths[i], rings = ringsOf(cloud, o.owner).sort((a, b) => (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || a.label.localeCompare(b.label));
-      zones.push({ x0: x, x1: x + w, y0, y1, owner: o, color: envColor(o.environment), cloud });
+      const dep = depths[i], rings = ringsOf(cloud, o.owner).sort((a, b) => (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || a.label.localeCompare(b.label));
+      zones.push({ x0, x1: x0 + FW, y0: y, y1: y + dep, owner: o, color: envColor(o.environment), cloud });
+      const rows = Math.ceil(rings.length / 2);
       rings.forEach((n, k) => {
-        const col = Math.floor(k / 2), row = k % 2, cols = Math.ceil(rings.length / 2);
-        const cx = x + (w / cols) * (col + 0.5), cy = y0 + (y1 - y0) * (rings.length === 1 ? 0.5 : row ? 0.72 : 0.28);
+        const row = Math.floor(k / 2), col = k % 2, last = k === rings.length - 1 && rings.length % 2;
+        const cx = x0 + FW * (last ? 0.5 : col ? 0.73 : 0.27), cy = y + (dep / rows) * (row + 0.5);
         P.set(n.id, { x: cx, y: cy, z: 0, r: Math.min(84, 34 + 7 * Math.sqrt(n.subnets?.total || 1)) });
       });
-      x += w + 40;
+      y += dep + 40;
     });
     return total;
   };
-  const wa = field('aws', -560, -70), wg = field('gcp', 110, 560);
-  const span = Math.max(wa, wg, 900) / 2;
-  // hubs between the planes, under what they connect; peers and outsiders off the edges
-  const near = (id) => { const xs = d.links.filter((l) => l.from === id || l.to === id).map((l) => P.get(l.from === id ? l.to : l.from)?.x).filter((x) => x != null); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0; };
+  const da = field('aws', -AISLE - FW), dg = field('gcp', AISLE);
+  const depth = Math.max(da, dg, 500);
+  // hubs in the aisle, level with what they connect, at least 150 apart
+  const near = (id) => { const ys = d.links.filter((l) => l.from === id || l.to === id).map((l) => P.get(l.from === id ? l.to : l.from)?.y).filter((y) => y != null); return ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : 0; };
   const hubs = d.nodes.filter((n) => ['tgw', 'dxgw', 'hub'].includes(n.kind));
-  // in a row between the planes, near what they connect, at least 170 apart
-  const xs = hubs.map((n) => ({ n, x: near(n.id) })).sort((a, b) => a.x - b.x);
-  for (let i = 1; i < xs.length; i++) if (xs[i].x - xs[i - 1].x < 170) xs[i].x = xs[i - 1].x + 170;
-  const shift = xs.length ? (xs[0].x + xs[xs.length - 1].x) / 2 - xs.reduce((a, b) => a + b.x, 0) / xs.length : 0;
-  xs.forEach(({ n, x }, i) => P.set(n.id, { x: x - shift, y: 20, z: 80 + (i % 2) * 30, r: 16, hub: true }));
+  const ys = hubs.map((n) => ({ n, y: near(n.id) })).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < ys.length; i++) if (ys[i].y - ys[i - 1].y < 150) ys[i].y = ys[i - 1].y + 150;
+  const shift = ys.length ? (ys[0].y + ys[ys.length - 1].y) / 2 - ys.reduce((a, b) => a + b.y, 0) / ys.length : 0;
+  ys.forEach(({ n, y }, i) => P.set(n.id, { x: (i % 2 ? 40 : -40), y: y - shift, z: 80 + (i % 2) * 30, r: 16, hub: true }));
+  // peers and outsiders: off the outer edge of the cloud they connect to
   const outer = d.nodes.filter((n) => n.kind === 'peer' || (n.stub && n.kind !== 'tgw'));
   const left = [], right = [];
   for (const n of outer) (n.cloud === 'gcp' || (n.kind === 'peer' && d.links.some((l) => (l.from === n.id || l.to === n.id) && [l.from, l.to].some((x) => x.startsWith('gcp:')))) ? right : left).push(n);
-  left.forEach((n, i) => P.set(n.id, { x: -span - 220, y: -520 + i * (480 / Math.max(1, left.length - 1 || 1)), z: 20, r: 14, outer: true }));
-  right.forEach((n, i) => P.set(n.id, { x: span + 220, y: 130 + i * (430 / Math.max(1, right.length - 1 || 1)), z: 20, r: 14, outer: true }));
-  P.set('internet', { x: 0, y: 0, z: 470, r: 26 });
-  return { P, zones, span };
+  const spread = (list, x) => list.forEach((n, i) => P.set(n.id, { x, y: list.length === 1 ? 0 : -depth / 2 + (depth * i) / (list.length - 1), z: 20, r: 14, outer: true }));
+  spread(left, -AISLE - FW - 200); spread(right, AISLE + FW + 200);
+  P.set('internet', { x: 0, y: depth / 2 + 40, z: 300, r: 26 });
+  return { P, zones, span: AISLE + FW };
 }
 
 /**
@@ -105,7 +111,7 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
     for (const z of L.zones) {
       const pts = [[z.x0, z.y0], [z.x1, z.y0], [z.x1, z.y1], [z.x0, z.y1]].map(([x, y]) => P(x, y, 0));
       out.push(svg('path', { d: `M${pts.map((p) => `${f(p[0])} ${f(p[1])}`).join(' L')} Z`, fill: z.color, 'fill-opacity': 0.06, stroke: z.color, 'stroke-opacity': 0.55, 'stroke-dasharray': z.cloud === 'gcp' ? '5 4' : null }));
-      const lp = P(z.x0 + 10, z.y0 + 4, 0);
+      const lp = P(z.x0 + 10, z.y1 - 4, 0);   // on the back edge, clear of the ring labels
       out.push(svg('text', { x: f(lp[0]), y: f(lp[1] - 6), class: 'ns-zone', fill: z.color }, `${z.cloud === 'aws' ? 'AWS' : 'GOOGLE CLOUD'} · ${z.owner.name}`));
     }
     const ent = (id) => { const p = L.P.get(id); return p ? [p.x, p.y, p.z] : null; };
@@ -139,7 +145,7 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
       }
     }
     // the internet, above
-    const sky = P(0, 0, 470);
+    const sky = P(L.P.get('internet').x, L.P.get('internet').y, L.P.get('internet').z);
     out.push(svg('g', { class: 'ns-node', opacity: fade('internet'), onClick: () => pick('internet') },
       svg('ellipse', { cx: f(sky[0]), cy: f(sky[1]), rx: f(120 * sky[3] * 1.6), ry: f(36 * sky[3] * 1.6), fill: 'url(#ns-sky)' }),
       svg('text', { x: f(sky[0]), y: f(sky[1] + 4), 'text-anchor': 'middle', class: 'ns-sky-t' }, 'INTERNET')));
