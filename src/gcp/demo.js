@@ -200,14 +200,27 @@ export function demoLogEntries({ projectId, filter, pageToken = '' }, pageSize =
   return { entries: all.slice(at, at + pageSize), ...(at + pageSize < all.length ? { nextPageToken: String(at + pageSize) } : {}) };
 }
 
-export function demoGcpGateway() {
+// DEMO_GCP_PROJECT_ONLY=1: a connection on a project reads as a reader granted on that project alone would, with no
+// right to list folders or read the IAM policy of the folders and organization above it
+export function demoGcpGateway(conn = null) {
   const projects = PROJECTS.map((p) => ({ ...p, state: 'ACTIVE' }));
-  const policy = (resource) => ({ version: 3, bindings: POLICIES[resource] || [] });
+  const only = process.env.DEMO_GCP_PROJECT_ONLY === '1' && conn?.scope_type === 'project' ? conn.scope_id : null;
+  const policy = (resource) => (only && /^(folders|organizations)\//.test(resource) ? null : { version: 3, bindings: POLICIES[resource] || [] });
+  if (only) {
+    const denied = () => Object.assign(new Error('The caller does not have permission'), { status: 403 });
+    return { ...demoGcpGateway(), async folders() { throw denied(); }, async organization() { throw denied(); },
+      async projects() { return projects.filter((p) => p.projectId === only); }, async iamPolicy(resource) { return policy(resource); } };
+  }
   return {
     async organization() { return { name: ORG, displayName: DEMO_ORG.domain }; },
     async folders() { return FOLDERS; },
     async projects() { return projects; },
     async project(id) { return projects.find((p) => p.projectId === id) || null; },
+    async ancestry(id) {
+      const out = []; let at = projects.find((p) => p.projectId === id)?.parent;
+      while (at) { out.push(at); at = FOLDERS.find((f) => f.name === at)?.parent; }
+      return out;
+    },
     async iamPolicy(resource) { return policy(resource); },
     async serviceAccounts(projectId) { return SAS[projectId] || []; },
     async serviceAccountKeys(email) { return KEYS[email] || []; },

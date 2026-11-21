@@ -33,6 +33,9 @@ const o2 = (n) => Math.round(n * 100) / 100;
 const kfmt = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e4 ? `${Math.round(n / 1e3)}k` : num(Math.round(n)));
 const still = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 const lg = (n) => Math.log10(n + 1);
+// a folder or the organization above a Google Cloud project whose IAM policy no connection could read
+const aboveLabel = (r) => (String(r).startsWith('folders/') ? `folder ${r.split('/')[1]}` : `the organization (${String(r).split('/')[1]})`);
+const notReadText = (list, what) => `Roles granted on ${list.map(aboveLabel).join(' and ')}, above ${what}, are not shown: no connection may read ${list.length === 1 ? 'its' : 'their'} IAM policy. Connect the folder or organization, or let the project's reader read it (Google Cloud → Edit).`;
 // "1 role", "3 roles": a count and the word for it
 const nOf = (n, one, more = `${one}s`) => `${num(n)} ${n === 1 ? one : more}`;
 function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -274,7 +277,7 @@ function accountModel(d) {
   const events = d.events.map((e) => ({ id: e.id, kind: CHANGE_KIND[e.kind] || e.kind.toUpperCase(), tone: e.severity, hour: e.hour, text: e.title, where: e.roleName || d.account.name, target: e.roleId && byRole.has(e.roleId) ? e.roleId : null }));
   for (const t of towers) t.denied = roles.reduce((n, r) => n + (r.services.find((v) => v.name === t.name)?.denied || 0), 0);
   return { view: 'account', account: d.account, usage: d.usage !== false, zones: [], groups, roles, byRole, towers, gates, doors, rim, sources, scanner, fars, links, events, hidden: d.outside.hidden, resources: res.marks,
-    coldCount: d.coldCount, roleCount: d.roleCount, calledCount: d.calledCount ?? roles.filter((r) => r.calls7 > 0).length, hourStart: new Date(d.hourStart).getTime(),
+    coldCount: d.coldCount, roleCount: d.roleCount, calledCount: d.calledCount ?? roles.filter((r) => r.calls7 > 0).length, hourStart: new Date(d.hourStart).getTime(), notRead: d.notRead || [],
     defaultSel: events.find((e) => e.target)?.target || [...roles].sort((a, b) => b.calls7 - a.calls7)[0]?.id || null };
 }
 
@@ -964,7 +967,7 @@ export async function spacePage(ctx) {
       stats: [{ k: V.Many, v: num(M.roleCount) }, { k: 'Called · 7 d', v: usage1 ? num(M.calledCount) : '—' }, { k: 'Never called', v: usage1 ? num(M.coldCount) : '—', tone: usage1 && M.roleCount && M.coldCount / M.roleCount > 0.5 ? 'warn' : null },
         { k: 'Refused calls', v: usage1 ? num(denied.reduce((n, r) => n + r.denied7, 0)) : '—', tone: denied.length ? 'bad' : null }, ...(outside1 ? [{ k: 'Risky ways in', v: num(risky), tone: risky ? 'bad' : null }] : []), { k: G1 ? 'Accounts, projects' : 'Other accounts', v: num(M.fars.length) },
         ...(showRes ? [{ k: 'Open resources', v: num(M.resources.length), tone: M.resources.some((r) => r.risk === 'high') ? 'bad' : M.resources.length ? 'warn' : null }] : [])],
-      rows: [],
+      rows: [...(G1 && M.notRead.length ? [{ k: 'Not read', v: notReadText(M.notRead, 'this project'), tone: 'warn' }] : [])],
       lists: [...(outside1 ? [{ title: 'Ways in to check first', hint: 'Identities outside your org, worst first: trust into roles, and resource policies.', items: ways, empty: 'No identity outside your org can get in.',
         full: { label: 'See all in Trust map', href: G1 ? V.trust() : V.trust(`account:${M.account.awsAccountId}`), eyebrow: `TRUST MAP · ${M.account.name.toUpperCase()}` } }] : []),
         ...(M.resources?.length ? [{ title: 'Resources open from outside', hint: `Their own ${G1 ? 'IAM policy lets in anyone, or an identity outside your organization' : 'policy lets in anyone, or an account outside your estate'}. Boxes beside the towers; filled = open to anyone.`,
@@ -1106,7 +1109,7 @@ export async function spacePage(ctx) {
           tags: [...(r.risk === 'High' ? [{ t: '⚠ HIGH RISK', c: RED, href: V.open(r.id) }] : []), ...(r.denied7 ? [tag(`⚠ ${num(r.denied7)} DENIED`, RED)] : []), ...(r.keys ? [tag(`${r.keys} KEY${r.keys === 1 ? '' : 'S'}`, WARN)] : [])],
           summary: `${usage1 ? (r.calls7 ? `Called ${kfmt(r.calls7)} times this week into ${pl(r.services.length, 'service')}.` : 'Quiet this week.') : `Its roles reach ${pl(r.services.length, 'service')}; calls are not read for this project.`} ${n} can become it${goes.length ? `; ${pl(goes.length, 'AWS role')} trust${goes.length === 1 ? 's' : ''} it` : ''}.`,
           stats: [usage1 ? { k: 'Calls · 7 d', v: kfmt(r.calls7) } : { k: 'Permissions', v: num(r.permissions || 0) }, { k: 'Refused', v: usage1 ? num(r.denied7 || 0) : '—', tone: r.denied7 ? 'bad' : null }, { k: 'Can become it', v: num(n), tone: callers.some((c) => c.tone === 'bad') ? 'bad' : null }],
-          rows: [],
+          rows: [...(M.notRead.length ? [row('Not read', notReadText(M.notRead, 'its project'), 'warn')] : [])],
           lists: [{ title: usage1 ? 'Calls into' : 'Its roles reach', items: r.services.map((v) => ({ label: SVC[v.name] || v.name, value: usage1 ? kfmt(v.calls) : `${v.calls} role${v.calls === 1 ? '' : 's'}`, meta: v.denied ? `⚠ ${num(v.denied)} refused` : null, tone: v.denied ? 'bad' : null, pick: `svc:${v.name}` })) },
             ...(st.dir === 'out' ? [] : [{ title: 'Can become it', items: [...callers, ...chained], empty: 'only identities inside your organization' }]),
             ...(st.dir === 'in' ? [] : [{ title: 'Into AWS', items: goes, empty: 'no AWS role trusts it' }])],
@@ -1192,7 +1195,8 @@ export async function spacePage(ctx) {
         { k: 'High risk', v: num(g.high), tone: g.high ? 'bad' : null }, { k: 'Calls · 7 d', v: g.usage ? kfmt(g.calls7) : '—' }, { k: 'Calls · 24 h', v: g.usage ? kfmt(g.calls24h) : '—' },
         { k: 'Ways in', v: num(trustIn.length + awsIn), tone: risky || broad ? 'bad' : null }],
       rows: [...(g.resources ? [row('Resources open', [g.resources.public ? `${g.resources.public} to anyone` : '', g.resources.external ? `${g.resources.external} to outside identities` : ''].filter(Boolean).join(' · '), g.resources.worst === 'high' ? 'bad' : null)] : []),
-        ...(p.keys ? [row('Keys', `${plural(p.keys, 'user-managed key')} on its service accounts`, 'warn')] : [])],
+        ...(p.keys ? [row('Keys', `${plural(p.keys, 'user-managed key')} on its service accounts`, 'warn')] : []),
+        ...(p.notRead?.length ? [row('Not read', notReadText(p.notRead, 'it'), 'warn')] : [])],
       lists: [
         ...(fromOut.some((o) => o.t.resources?.length) ? [{ title: 'Who can use its resources · from outside', hint: 'Resource-level IAM that lets in anyone, or an identity outside your organization: no service account to become.',
           full: { label: 'See all in Resource access', href: `#/resources?cloud=gcp&q=${encodeURIComponent(p.projectId)}`, eyebrow: `RESOURCE ACCESS · ${p.projectId.toUpperCase()}` },

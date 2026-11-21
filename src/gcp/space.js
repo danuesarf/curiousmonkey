@@ -10,7 +10,7 @@ import { read as query } from '../db.js';
 import { environmentOf } from '../environments.js';
 import { crossLinks } from './links.js';
 import { gcpWays } from './trust.js';
-import { gcpProjects, summarizeSources } from './projects.js';
+import { gcpProjects, summarizeSources, unreadAbove } from './projects.js';
 import { parseMember } from './analyze.js';
 
 const num = (x) => Number(x || 0);
@@ -193,10 +193,10 @@ const principalsOf = () => query(`SELECT DISTINCT ON (member) id, member, kind, 
 // ---------------------------------------------------------------- the estate's second field
 export async function spaceGcp(day = 0) {
   const start = await hourStart(day);
-  const [projects, principals, wif, ways] = await Promise.all([gcpProjects(), principalsOf(), query(`SELECT * FROM gcp_wif_providers`), gcpWays()]);
+  const [projects, principals, wif, ways, unread] = await Promise.all([gcpProjects(), principalsOf(), query(`SELECT * FROM gcp_wif_providers`), gcpWays(), unreadAbove()]);
   const ids = projects.map((p) => p.projectId), has = new Set(ids);
   const [use, res] = await Promise.all([usageOf(ids, start), resourceSide(ids)]);
-  const byProject = new Map(projects.map((p) => [p.projectId, { ...p, accounts: [], risky: 0, keys: 0, usage: use.on.has(p.projectId), calls7: 0, calls24h: 0, cold: 0,
+  const byProject = new Map(projects.map((p) => [p.projectId, { ...p, accounts: [], risky: 0, keys: 0, usage: use.on.has(p.projectId), calls7: 0, calls24h: 0, cold: 0, notRead: unread.get(p.projectId) || [],
     hourly: Array.from({ length: 24 }, () => ({ sessions: 0, calls: 0, denied: 0 })), resources: res.exposure.get(p.projectId) || null }]));
   for (const p of principals.rows) {
     if (p.kind !== 'serviceAccount' || !byProject.has(p.project_id)) continue;
@@ -231,7 +231,7 @@ export async function spaceGcpProject(projectId, day = 0) {
   const project = (await gcpProjects()).find((p) => p.projectId === projectId);
   if (!project) return null;
   const start = await hourStart(day);
-  const [principals, ways, links, accounts] = await Promise.all([principalsOf(), gcpWays(), crossLinks(), query(`SELECT id, name, account_id, environment FROM cloud_accounts`)]);
+  const [principals, ways, links, accounts, unread] = await Promise.all([principalsOf(), gcpWays(), crossLinks(), query(`SELECT id, name, account_id, environment FROM cloud_accounts`), unreadAbove()]);
   const sas = principals.rows.filter((p) => p.kind === 'serviceAccount' && p.project_id === projectId && p.managed_by !== 'google');
   const [use, res, exposed] = await Promise.all([
     usageOf([projectId], start, { services: sas.map((p) => p.member) }),
@@ -324,6 +324,8 @@ export async function spaceGcpProject(projectId, day = 0) {
     cloud: 'gcp', usage, hourStart: new Date(start).toISOString(),
     account: { id: `gcp:${projectId}`, cloud: 'gcp', name: projectId, projectId, title: project.name, number: project.number, awsAccountId: project.number, environment: project.environment, ou: null, connection: project.connection, connectionName: project.connectionName },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort(order).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
+    // folders and the organization above it whose roles no connection could read
+    notRead: unread.get(projectId) || [],
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
     calledCount: usage ? out.filter((r) => r.calls7 > 0).length : 0,
     neighbours, outside: { items, hidden: Math.max(0, all.length - MAX_SOURCES) }, scanner: null, events: [],

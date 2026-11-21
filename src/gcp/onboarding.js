@@ -65,6 +65,16 @@ gcloud iam service-accounts add-iam-policy-binding ${sa} --project=${home} \\
     steps.push({ title: 'A key for it (prefer federation: a key works from anywhere until deleted)', code:
 `gcloud iam service-accounts keys create curious-monkey-key.json --iam-account=${sa}` });
   }
+  if (scopeType === 'project') {
+    // a project's reader sees its ancestry, but not the IAM policy of the folders and organization above it: roles
+    // granted there (to its service accounts, or to anyone over the project) are missing until it may read them
+    steps.push({ title: 'Roles granted on the folders and organization above the project: let it read their IAM policy (or connect the folder or organization instead)', code:
+`# one line per folder above the project (gcloud projects get-ancestors ${id}), and the organization
+gcloud resource-manager folders add-iam-policy-binding FOLDER_ID \
+  --member="serviceAccount:${sa}" --role="roles/iam.securityReviewer" --condition=None
+gcloud organizations add-iam-policy-binding ORG_ID \
+  --member="serviceAccount:${sa}" --role="roles/iam.securityReviewer" --condition=None` });
+  }
   if (usage && custom) {
     steps.push({ title: 'Already connected? Add the log permissions to the existing role instead', code:
 `gcloud iam roles update curiousMonkeyReader ${roleParent} \\
