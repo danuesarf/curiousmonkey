@@ -5,6 +5,7 @@
 // With an S3 trail, reading that trail's log objects (and decrypting them with a CloudTrail KMS context) is the
 // only exception to the data Deny.
 import { config } from './config.js';
+import { AWS_NETWORK_READS } from './network/awsReader.js';
 
 export const SCANNER_ALLOW = [
   'iam:ListRoles', 'iam:GetRole', 'iam:ListRolePolicies', 'iam:GetRolePolicy', 'iam:ListAttachedRolePolicies', 'iam:GetPolicy', 'iam:GetPolicyVersion',
@@ -34,8 +35,10 @@ export const SCANNER_DENY = ['s3:GetObject', 's3:GetObjectVersion', 'kms:Decrypt
 const clean = (p) => (p ? `${p.replace(/^\/+|\/+$/g, '')}/` : '');
 export const trailObjectsArn = ({ bucket, prefix }) => `arn:aws:s3:::${bucket}/${clean(prefix)}AWSLogs/*`;
 
-export function scannerPolicy({ s3 } = {}) {
+export function scannerPolicy({ s3, network = false } = {}) {
   const st = [{ Sid: 'ReadIamAndTrailMetadata', Effect: 'Allow', Action: SCANNER_ALLOW, Resource: '*' }];
+  // the Networking extension: VPC networking, Network Firewall and load balancer metadata, read-only
+  if (network) st.push({ Sid: 'ReadNetworking', Effect: 'Allow', Action: AWS_NETWORK_READS, Resource: '*' });
   if (s3?.bucket) {
     st.push(
       { Sid: 'ListTrailBucket', Effect: 'Allow', Action: ['s3:ListBucket', 's3:GetBucketLocation'], Resource: `arn:aws:s3:::${s3.bucket}` },
@@ -55,8 +58,8 @@ export function scannerPolicy({ s3 } = {}) {
 
 const indent = (o, n = 2) => JSON.stringify(o, null, 2).replace(/\n/g, `\n${' '.repeat(n)}`);
 
-export function scannerSnippets({ mode = 'assume_role', principalArn, roleName, userName = 'curious-monkey-scanner', externalId, s3 }) {
-  const perms = scannerPolicy({ s3 });
+export function scannerSnippets({ mode = 'assume_role', principalArn, roleName, userName = 'curious-monkey-scanner', externalId, s3, network = false }) {
+  const perms = scannerPolicy({ s3, network });
   if (mode === 'access_key') {
     const terraform = `resource "aws_iam_user" "curious_monkey" {
   name = "${userName}"

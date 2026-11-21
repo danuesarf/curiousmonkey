@@ -9,9 +9,10 @@ export const DOMAINS = {
   credentials: 'IAM user credentials',
   gcp: 'Google Cloud',
   resource: 'Resource access: who resource policies let in',
+  network: 'Networking (extension)',
   custom: 'Custom',
 };
-export const INBOX = 'Findings inbox', TRUST = 'Trust map; high and medium also in the Findings inbox', RESOURCES = 'Resource access';
+export const INBOX = 'Findings inbox', TRUST = 'Trust map; high and medium also in the Findings inbox', RESOURCES = 'Resource access', NETWORK = 'Networking page (when the extension is on)';
 const RISK = 'Risk score of the IAM user', GCP = 'Google Cloud page and its risk score';
 const EVIDENCE_SEV = 'Low; medium when the actions that cannot be verified change access (IAM, resource policies, grants, logging), write to every bucket or table, or are iam:PassRole on every role. Never high: nothing was seen to be wrong.';
 
@@ -59,6 +60,31 @@ export const BUILTIN = [
   c('res.cross-account', 'resource', 'Shared with another of your accounts', 'Another connected account, an account of your organisation, or the whole organisation can use the resource.', 'low', RESOURCES, 'Fine when intended. Name the role that needs it rather than the whole account.'),
   c('res.broad-actions', 'resource', 'Every action of a service granted outside the account', 'A resource policy allows * or service:* to a principal outside the resource\'s account.', 'low', RESOURCES, 'Grant the actions it uses.'),
   c('res.deleted-principal', 'resource', 'Resource policy names a deleted identity', 'A statement holds a unique ID where an ARN was.', 'low', RESOURCES, 'Remove the statement.'),
+
+  c('net.sg-admin-open', 'network', 'Admin port open to the internet (security group)', 'A security group allows 0.0.0.0/0 or ::/0 on SSH, RDP, Telnet, WinRM, VNC, the Docker API or the kubelet.', null, NETWORK, 'Allow only your own ranges, or use Session Manager or a VPN.', 'High when something with a public address uses it; medium when it is in use with no public address; low when nothing uses it.'),
+  c('net.sg-data-open', 'network', 'Database port open to the internet (security group)', 'A security group allows 0.0.0.0/0 on a database or cache port (MySQL, PostgreSQL, SQL Server, Oracle, MongoDB, Redis, Elasticsearch…).', null, NETWORK, 'Allow only the application tier.', 'High when something with a public address uses it; medium when it is in use with no public address; low when nothing uses it.'),
+  c('net.sg-all-open', 'network', 'Every port open to the internet (security group)', 'A security group allows all traffic from 0.0.0.0/0.', null, NETWORK, 'Open only the ports the service listens on, to the addresses that need them.', 'High when something with a public address uses it; medium when it is in use with no public address; low when nothing uses it.'),
+  c('net.sg-wide-open', 'network', 'Wide port range open to the internet (security group)', 'More than 1,000 ports open to 0.0.0.0/0, none of them an admin or database port.', null, NETWORK, 'Open only the ports the service listens on.', 'Medium when something with a public address uses it, low otherwise.'),
+  c('net.sg-unused', 'network', 'Security group not used', 'No network interface or load balancer uses it.', 'low', NETWORK, 'Delete it.'),
+  c('net.default-sg-used', 'network', 'Default security group in use', 'Something uses the VPC\'s default security group.', 'low', NETWORK, 'Give it its own group; leave the default one empty (CIS 5.4).'),
+  c('net.nacl-admin-open', 'network', 'Network ACL lets the internet reach admin ports', 'The ACL of a public subnet allows 0.0.0.0/0 to SSH or RDP before any deny.', 'low', NETWORK, 'Deny the admin ports from 0.0.0.0/0 in the ACL (CIS 5.1).'),
+  c('net.default-vpc', 'network', 'Default VPC', 'A default VPC exists in a region read.', null, NETWORK, 'Delete it once nothing runs there.', 'Medium when something runs in it, low when empty.'),
+  c('net.flow-logs-off', 'network', 'VPC without flow logs', 'A VPC (other than an empty default one) has no active flow log on it or on all its subnets.', 'medium', NETWORK, 'Turn on VPC flow logs (CIS 3.7).'),
+  c('net.subnet-auto-public-ip', 'network', 'Public subnets that assign public IPs', 'Subnets routed to an internet gateway give every instance a public address on launch.', 'low', NETWORK, 'Turn off auto-assign public IPv4.'),
+  c('net.peering-external', 'network', 'VPC peering outside your estate', 'An active peering connection with an account that is neither connected here nor in your organisation.', 'medium', NETWORK, 'Confirm it; route only what is needed.'),
+  c('net.tgw-external', 'network', 'Transit gateway attachment outside your estate', 'A VPC of another account on your transit gateway, or yours on someone else\'s.', 'medium', NETWORK, 'Confirm it; give it its own route table.'),
+  c('net.tgw-auto-accept', 'network', 'Transit gateway accepts shared attachments on its own', 'Auto accept shared attachments is on.', 'low', NETWORK, 'Turn it off.'),
+  c('net.vpn-down', 'network', 'VPN tunnels down (AWS)', 'A site-to-site VPN with one or both tunnels down.', null, NETWORK, 'Bring the tunnel up, or delete the VPN.', 'Medium when every tunnel is down, low when one is.'),
+  c('net.cidr-overlap', 'network', 'Connected networks with overlapping addresses', 'Two VPCs or networks connected by peering, a transit gateway or a VPN use overlapping ranges.', 'low', NETWORK, 'Renumber one side, or connect through NAT.'),
+  c('net.gcp-fw-admin-open', 'network', 'Admin port open to the internet (Google Cloud firewall)', 'A firewall rule or firewall policy rule allows 0.0.0.0/0 on SSH, RDP and other admin ports.', null, NETWORK, 'Allow only your ranges, or Identity-Aware Proxy (35.235.240.0/20).', 'High when it reaches an instance with an external address; medium when its targets have none; low when nothing it targets runs.'),
+  c('net.gcp-fw-data-open', 'network', 'Database port open to the internet (Google Cloud firewall)', 'A firewall rule allows 0.0.0.0/0 on a database or cache port.', null, NETWORK, 'Allow only the application tier.', 'High when it reaches an instance with an external address; medium when its targets have none; low when nothing it targets runs.'),
+  c('net.gcp-fw-all-open', 'network', 'Every port open to the internet (Google Cloud firewall)', 'A firewall rule allows every protocol from 0.0.0.0/0.', null, NETWORK, 'Open only the ports needed.', 'High when it reaches an instance with an external address; medium when its targets have none; low when nothing it targets runs.'),
+  c('net.gcp-fw-wide-open', 'network', 'Wide port range open to the internet (Google Cloud firewall)', 'More than 1,000 ports open to 0.0.0.0/0.', null, NETWORK, 'Open only the ports needed.', 'Medium when it reaches an external address, low otherwise.'),
+  c('net.gcp-default-network', 'network', 'Default or auto mode network', 'A project has the default network, or a network that creates a subnet in every region.', 'medium', NETWORK, 'Use a custom mode network (CIS 3.1).'),
+  c('net.gcp-legacy-network', 'network', 'Legacy network', 'A network with no subnets.', 'medium', NETWORK, 'Move to a VPC network (CIS 3.2).'),
+  c('net.gcp-flow-logs-off', 'network', 'Subnets without flow logs (Google Cloud)', 'Subnets with VPC flow logs off.', 'low', NETWORK, 'Turn on flow logs (CIS 3.8).'),
+  c('net.gcp-peering-external', 'network', 'Network peering with a project that is not yours', 'An active peering to a network in a project no connection reads and that is not listed as yours.', 'medium', NETWORK, 'Confirm it; keep firewall rules for its ranges tight.'),
+  c('net.gcp-vpn-down', 'network', 'VPN tunnel not up (Google Cloud)', 'A Cloud VPN tunnel whose status is not ESTABLISHED.', 'low', NETWORK, 'Check the peer, or delete the tunnel.'),
 
   c('cred.console-no-mfa', 'credentials', 'Console password without MFA', 'An IAM user can sign in to the console with a password alone.', 'high', RISK, 'Add an MFA device, or remove the password.'),
   c('cred.key-old', 'credentials', 'Access key older than the rotation age', 'An active access key is older than the rotation age set in Configuration.', 'medium', RISK, 'Rotate it, or move the workload to a role.', 'Medium past the rotation age; weighs more past a year.'),

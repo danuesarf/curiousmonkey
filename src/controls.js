@@ -114,7 +114,8 @@ export async function setOverride(user, id, body) {
   [id, next.severity, next.enabled, next.note, user.id]);
   // open findings follow now; a severity that goes back to "varies", and a control turned on again, need the next analysis
   let touched = 0;
-  const table = id.startsWith('res.') ? 'resource_findings' : 'flags';    // resource findings: the worker works out exposure and "worst" again within a minute
+  // resource findings: the worker works out exposure and "worst" again within a minute; network findings are their own table
+  const table = id.startsWith('res.') ? 'resource_findings' : id.startsWith('net.') ? 'net_findings' : 'flags';
   if (!next.enabled) touched = (await query(`UPDATE ${table} SET status = 'resolved', updated_at = now() WHERE control = $1 AND status = 'open'`, [id])).rowCount;
   else if (next.severity || b.severity) touched = (await query(`UPDATE ${table} SET severity = $2, updated_at = now() WHERE control = $1 AND status = 'open' AND severity <> $2`, [id, next.severity || b.severity])).rowCount;
   return { id, before, after: { severity: next.severity, enabled: next.enabled }, findingsChanged: touched };

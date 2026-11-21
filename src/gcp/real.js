@@ -11,6 +11,7 @@ const CRM = 'https://cloudresourcemanager.googleapis.com/v3';
 const IAM = 'https://iam.googleapis.com/v1';
 const LOGGING = 'https://logging.googleapis.com/v2';
 const ASSET = 'https://cloudasset.googleapis.com/v1', STORAGE = 'https://storage.googleapis.com/storage/v1', BQ = 'https://bigquery.googleapis.com/bigquery/v2';
+const COMPUTE = 'https://compute.googleapis.com/compute/v1';
 const PUBSUB = 'https://pubsub.googleapis.com/v1', SECRETS = 'https://secretmanager.googleapis.com/v1', RUN = 'https://run.googleapis.com/v2', FUNCTIONS = 'https://cloudfunctions.googleapis.com/v2';
 // Partial responses: the `fields` system parameter, which every Google REST API takes
 // (https://cloud.google.com/apis/docs/system-parameters). The reader never falls back to whole entries. The first
@@ -174,6 +175,31 @@ export function realGcpGateway(conn, { client: injected } = {}) {
       }
     },
     /** A bucket's public access prevention ('enforced' refuses allUsers and allAuthenticatedUsers whatever IAM says). */
+    /**
+     * One project's networking (the Networking extension): every list at once. A list the reader may not make (403),
+     * or a project without the Compute Engine API (403/404), is skipped and named.
+     */
+    async network(projectId) {
+      const base = `${COMPUTE}/projects/${projectId}`, skipped = [];
+      const agg = async (kind) => {
+        const out = []; let token = '';
+        do {
+          const r = await call('GET', `${base}/aggregated/${kind}?maxResults=500&returnPartialSuccess=true${token ? `&pageToken=${encodeURIComponent(token)}` : ''}`);
+          for (const v of Object.values(r.items || {})) out.push(...(v[kind] || []));
+          token = r.nextPageToken || '';
+        } while (token);
+        return out;
+      };
+      const list = async (path) => pages(`${base}/${path}?maxResults=500`, 'items');
+      const safe = async (kind, p) => { try { return await p; } catch (e) { if (e.status === 403 || e.status === 404 || e.status === 400) { skipped.push(kind); return []; } throw e; } };
+      const [networks, subnetworks, firewalls, firewallPolicies, routers, routes, vpnGateways, targetVpnGateways, externalVpnGateways, vpnTunnels, interconnectAttachments, addresses, forwardingRules, globalForwardingRules, instances] = await Promise.all([
+        safe('networks', list('global/networks')), safe('subnetworks', agg('subnetworks')), safe('firewalls', list('global/firewalls')), safe('firewallPolicies', list('global/firewallPolicies')),
+        safe('routers', agg('routers')), safe('routes', list('global/routes')), safe('vpnGateways', agg('vpnGateways')), safe('targetVpnGateways', agg('targetVpnGateways')),
+        safe('externalVpnGateways', list('global/externalVpnGateways')), safe('vpnTunnels', agg('vpnTunnels')), safe('interconnectAttachments', agg('interconnectAttachments')),
+        safe('addresses', agg('addresses')), safe('forwardingRules', agg('forwardingRules')), safe('globalForwardingRules', list('global/forwardingRules')), safe('instances', agg('instances'))]);
+      return { raw: { networks, subnetworks, firewalls, firewallPolicies, routers, routes, vpnGateways, targetVpnGateways, externalVpnGateways, vpnTunnels, interconnectAttachments, addresses,
+        forwardingRules: [...forwardingRules, ...globalForwardingRules], instances }, skipped };
+    },
     async bucketPublicAccess(name) {
       return optional(call('GET', `${STORAGE}/b/${encodeURIComponent(name)}?fields=iamConfiguration`).then((b) => b.iamConfiguration?.publicAccessPrevention || null), null);
     },

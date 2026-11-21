@@ -9,6 +9,7 @@ import * as totp from '../auth/totp.js';
 import { createSession, destroySession, requireUser, needsMfaSetup, throttle } from '../auth/sessions.js';
 import { PERMS } from '../auth/rbac.js';
 import { ssoVersion } from '../sso.js';
+import { enabledExtensions } from '../extensions.js';
 
 /** Workspace display settings every member needs: the time zone times are shown in. */
 const display = () => ({ timeZone: config.display.timeZone });
@@ -75,7 +76,7 @@ auth.post('/signin', wrap(async (req, res) => {
   req.user = u;
   const csrf = await createSession(res, u, req);
   await audit(req, 'auth.signin', { type: 'user', id: u.id });
-  res.json({ user: publicUser(u), csrf, display: display() });
+  res.json({ user: publicUser(u), csrf, display: display(), extensions: [...await enabledExtensions()] });
 }));
 
 // ---------- password reset (link made by an owner on the Members page) ----------
@@ -115,7 +116,7 @@ auth.post('/signout', wrap(async (req, res) => { await audit(req, 'auth.signout'
 
 auth.get('/me', wrap(async (req, res) => {
   if (!req.user) return res.status(401).json({ error: 'unauthenticated' });
-  res.json({ user: publicUser(req.user), csrf: req.session.csrf, display: display() });
+  res.json({ user: publicUser(req.user), csrf: req.session.csrf, display: display(), extensions: [...await enabledExtensions()] });
 }));
 
 auth.post('/mfa/start', requireUser, wrap(async (req, res) => {

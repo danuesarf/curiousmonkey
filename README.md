@@ -354,6 +354,26 @@ Terms are `key operator value`, joined with `AND`, `OR` and `NOT` and grouped wi
 
 Not part of the policy: how the risk score weighs what it finds, and the informational facts the Trust map and Google Cloud show.
 
+## Extensions
+
+Optional features, off until an owner or admin turns them on under **Admin → Extensions**. Each one says what it adds and what the scanner has to read for it; turning it on shows its page in the rail and starts its reads within a minute, turning it off hides the page and stops the reads (what it stored is kept).
+
+### Networking
+
+A network analyzer next to the IAM one. Once a day (or on **Read now**) the worker reads, for every connected AWS account (every region it reads) and every Google Cloud project a connection reads:
+
+- **AWS**: VPCs, subnets, route tables, internet, egress-only and NAT gateways, security groups, network ACLs, VPC peering, transit gateways and their attachments, site-to-site VPNs with their customer and virtual private gateways, VPC endpoints, network interfaces, flow logs, Network Firewall and load balancers (with their listeners).
+- **Google Cloud**: VPC networks and their peerings, subnetworks, firewall rules and network firewall policies, Cloud Routers with Cloud NAT and BGP peers, routes, HA and Classic VPN gateways, peer VPN gateways, VPN tunnels, Interconnect attachments, external addresses, forwarding rules and instances (where they sit, their tags, external addresses and service accounts, which is how firewall rules pick their targets).
+
+The **Networking** page (Watch → Network) has four tabs:
+
+- **Map**: AWS accounts on the left, Google Cloud projects on the right, each with its VPCs or networks; the internet, transit gateways, VPN peers and networks outside your estate in the middle. Lines are VPC and network peering (cross-account and cross-project marked; dashed when no route table uses it), transit gateway attachments, VPNs, Interconnect and the way out to the internet. A VPN between the clouds is matched by its addresses: the AWS customer gateway's IP is a Google HA VPN gateway interface, or a Google tunnel's peer IP is an AWS tunnel's outside IP; the line shows how many of its tunnels are up on both sides. Click a VPC or network for its subnets (public or private, from its route table), route tables, security groups and firewall rules (rules open to the internet in red), network ACLs, gateways, endpoints, load balancers, interfaces or instances, connections and findings. Drag to move, wheel to zoom.
+- **Exposure**: every public address (instances, interfaces, load balancers, forwarding rules) and what the internet reaches on it, port by port, through which security group, firewall rule, firewall policy or listener. High when it is an admin port (SSH, RDP, WinRM, VNC, Telnet, Docker, kubelet), a database or cache port, or every port.
+- **Findings**: the `net.*` controls on the Policy page (domain *Networking*): admin, database, every or a wide range of ports open to the internet (high when something with a public address uses the group or the rule reaches an instance with an external address, medium when used without one, low when nothing uses it), unused security groups, the default security group in use, network ACLs of public subnets letting the internet reach SSH or RDP (CIS 5.1), default VPCs, VPCs without flow logs (CIS 3.7), public subnets that assign public IPs, VPC peering and transit gateway attachments with accounts outside your estate, transit gateways that accept shared attachments on their own, VPN tunnels down, connected networks with overlapping ranges; in Google Cloud, default or auto mode networks (CIS 3.1), legacy networks, subnets without flow logs (CIS 3.8), peering with a project that is not yours, tunnels not up. Reviewers mark a finding *Expected* (with a reason) or *Investigate*; a control changed on the Policy page applies at once.
+- **Inventory**: everything read, by type, searchable (a name, an ID, an address).
+
+Permissions: with the extension on, the scanner policy shown on Accounts gets a `ReadNetworking` statement (`ec2:Describe*` for the objects above, `network-firewall:ListFirewalls`/`DescribeFirewall`, `elasticloadbalancing:DescribeLoadBalancers`/`DescribeListeners`), and the Google Cloud setup adds the `compute.*.list` permissions (or `roles/compute.networkViewer` on a folder), with a command to add them to an existing role. A read that is refused is listed at the top of the page by owner and call; what was read before stays. A member limited to some AWS accounts sees those accounts' networks only, the far end of a link into another account as a name with nothing inside, and no Google Cloud.
+
 ## Unidentified calls
 
 Each account has an **Unidentified calls** page. It accounts for every CloudTrail event read: role sessions, role calls, and events outside scope (IAM users, root, services, roles the account doesn't have). It also covers three cases that need care:
