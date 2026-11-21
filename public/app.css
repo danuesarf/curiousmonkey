@@ -586,11 +586,16 @@ button.sp-item:hover,a.sp-item:hover{background:#0b1c14}
 .tm2-body{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start;padding-top:14px}
 .tm2-view{min-width:0}
 .tm2-panel{position:sticky;top:64px;max-height:calc(100vh - 80px);overflow:auto;display:flex;flex-direction:column;gap:14px;padding:14px}
-/* under about 1300 px the panel is a drawer, shown while something is picked */
+/* under about 1300 px the panel is a drawer, shown while something is picked; on Ways in (a wide table) under 1600 px */
 @media (max-width:1300px){
   .tm2-body{grid-template-columns:minmax(0,1fr)}
   .tm2-panel{display:none;position:fixed;top:52px;right:0;bottom:0;width:min(380px,92vw);max-height:none;z-index:30;box-shadow:-8px 0 24px rgba(0,0,0,.35)}
   .tm2-panel.open{display:flex}
+}
+@media (max-width:1600px){
+  .tm2-body.tm2-wide{grid-template-columns:minmax(0,1fr)}
+  .tm2-wide .tm2-panel{display:none;position:fixed;top:52px;right:0;bottom:0;width:min(380px,92vw);max-height:none;z-index:30;box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+  .tm2-wide .tm2-panel.open{display:flex}
 }
 .tm2-map{position:relative;outline:none;background:var(--panel);border:1px solid var(--line);padding:10px 12px 12px}
 .tm2-map:focus-visible{outline:2px solid var(--banana);outline-offset:2px}
@@ -654,7 +659,7 @@ span.tm2-dot-high{background:var(--red)}span.tm2-dot-medium{background:var(--amb
 .tm2-row-sel td{background:var(--raise)}
 .th-sort{font:inherit;letter-spacing:inherit;text-transform:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}.th-sort:hover{color:var(--ink)}
 .tm2-ways{display:flex;flex-direction:column}
-.tm2-way-head,.tm2-way-main{display:grid;grid-template-columns:12px minmax(150px,1.1fr) minmax(170px,1.3fr) minmax(110px,.8fr) minmax(170px,1.4fr) minmax(110px,.6fr) 70px;gap:12px;align-items:start;padding:10px 16px}
+.tm2-way-head,.tm2-way-main{display:grid;grid-template-columns:12px minmax(170px,1.6fr) minmax(150px,1.25fr) minmax(90px,.7fr) minmax(150px,1.3fr) minmax(80px,.55fr) minmax(72px,.5fr);gap:12px;align-items:start;padding:10px 16px}
 .tm2-way-head{border-bottom:1px solid var(--line)}
 .tm2-th{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
 .tm2-way{border-top:1px solid var(--line2)}
@@ -662,6 +667,7 @@ span.tm2-dot-high{background:var(--red)}span.tm2-dot-medium{background:var(--amb
 .tm2-way-main:hover{background:var(--surface)}.tm2-way.open .tm2-way-main{background:var(--raise)}
 .tm2-way-main>span{min-width:0}.tm2-way-main .tm2-dot{margin-top:5px}
 .tm2-c-role,.tm2-c-from{display:flex;flex-direction:column;gap:2px}.tm2-c-role .name{overflow-wrap:anywhere}
+.tm2-src{display:flex;align-items:flex-start;gap:6px;min-width:0}.tm2-src .src-tag{margin-top:2px}.tm2-src-name{min-width:0;overflow-wrap:anywhere}
 .tm2-c-guard{display:flex;flex-wrap:wrap;gap:4px}
 .tm2-guard{font-size:11px;padding:1px 6px;border:1px solid var(--edge);color:var(--ink2)}
 .tm2-none{color:var(--amber-ink)}
