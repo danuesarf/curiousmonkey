@@ -227,7 +227,11 @@ export async function spaceEstate(user, who = 'all', day = 0) {
   };
   const pairs = new Map(), todayOf = new Map();
   const scanner = await scannerOf(ids, start);
-  const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && !scanner.principalIds.has(e.id) && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
+  // the roles and users filter: an entry made by an IAM user (by its ARN, or by an AIDA unique ID when CloudTrail gave no
+  // ARN) shows with users, any other with roles
+  const byUser = (e) => e.kind === 'user' || (e.kind === 'account' && /^acct:\d{12}:AIDA/.test(e.key));
+  const keep = (e) => (who === 'users' ? byUser(e) : who === 'roles' ? !byUser(e) : true);
+  const cross = entries.rows.map((e) => ({ e, c: callerOf(e) })).filter(({ e, c }) => c && keep(e) && !scanner.principalIds.has(e.id) && byAws.has(c.aws) && byAws.get(c.aws) !== e.dst && inScope.has(byAws.get(c.aws)));
   if (cross.length) {
     for (const x of (await query(`SELECT principal_id, date_trunc('hour', started_at) AS h, count(*)::int AS n FROM role_sessions WHERE started_at >= ${since(start)} AND started_at < ${until(start)} AND principal_id = ANY($1) GROUP BY 1, 2`,
       [cross.map(({ e }) => e.id)])).rows) { if (!todayOf.has(x.principal_id)) todayOf.set(x.principal_id, []); todayOf.get(x.principal_id).push([bucketOf(x.h, start), x.n]); }
@@ -324,8 +328,12 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
   const services = [...total].sort((m, n) => n[1] - m[1]).slice(0, 8).map(([name, calls]) => ({ name, calls }));
   const groups = new Map();
   for (const r of out.filter((x) => !x.cold)) { const k = r.services[0]?.name || 'quiet this week'; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+  // the busiest five services keep a ring each, the rest share one; roles used before but not this week keep their own
+  // ring, so they are never counted under "Other services" as if they had called something
+  const quiet = groups.get('quiet this week'); groups.delete('quiet this week');
   let clusters = [...groups].map(([key, rs]) => ({ key, roles: rs, calls: rs.reduce((t, r) => t + r.calls7, 0) })).sort((m, n) => n.roles.length - m.roles.length || n.calls - m.calls);
   if (clusters.length > 6) clusters = [...clusters.slice(0, 5), { key: 'other', roles: clusters.slice(5).flatMap((c) => c.roles) }];
+  if (quiet) clusters.push({ key: 'quiet this week', roles: quiet, calls: 0 });
 
   const ids = new Set([a.id]);
   // Trust into this account's roles (for the outside identities and your accounts that may come in), and trust in
@@ -341,16 +349,26 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
   const outside = await outsiders(user, ids, null, { edgeCap: 500, rows: inTrust.rows, grants });
   const byAws = new Map((await query('SELECT id, account_id, name, environment FROM cloud_accounts')).rows.map((x) => [x.account_id, x]));
   const byId = new Map([...byAws.values()].map((x) => [x.id, x]));
-  const roleHere = new Map((await query('SELECT id, name FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [a.id])).rows.map((r) => [r.name, r.id]));
-  // which role here a principal names (arn:aws:iam::<this>:role/path/name), or null for the whole account or a user
-  const hereRole = (principal) => { const m = String(principal).match(new RegExp(`^arn:aws[a-z-]*:iam::${a.account_id}:role/(?:.*/)?([^/]+)$`)); return m ? roleHere.get(m[1]) || null : null; };
+  // roles and IAM users here, by id, and by kind and name (a role and a user may share a name)
+  const hereRows = (await query('SELECT id, name, kind FROM roles WHERE account_id=$1 AND deleted_at IS NULL', [a.id])).rows;
+  const hereById = new Map(hereRows.map((r) => [r.id, r]));
+  const roleHere = new Map(hereRows.map((r) => [`${r.kind === 'iam-user' ? 'user' : 'role'}|${r.name}`, r.id]));
+  // which role or IAM user here a principal names (arn:aws:iam::<this>:role/path/name, …:user/path/name, or a session
+  // of a role here), or null for the whole account. An IAM user named in a trust policy is that user, not the account.
+  const hereRole = (principal) => {
+    const s = String(principal), m = s.match(new RegExp(`^arn:aws[a-z-]*:iam::${a.account_id}:(role|user)/(?:.*/)?([^/]+)$`)) || s.match(new RegExp(`^arn:aws[a-z-]*:sts::${a.account_id}:(assumed-role)/([^/]+)/[^/]+$`));
+    return m ? roleHere.get(`${m[1] === 'user' ? 'user' : 'role'}|${m[2]}`) || null : null;
+  };
+  // the roles and users filter: a line from a role or IAM user here is kept only while that kind is shown; a line from
+  // the whole account always is (any role or user here may use it)
+  const shown = (roleId) => { if (!roleId) return true; const k = hereById.get(roleId)?.kind; return who === 'users' ? k === 'iam-user' : who === 'roles' ? k !== 'iam-user' : true; };
   const SEVR = { high: 0, medium: 1, low: 2, info: 3, none: 4 };
 
   // one line per role here and direction, however many roles it pairs with on the other side; the busiest are drawn.
   // A line is used (sessions seen chaining), allowed (a trust policy lets it), or both.
   const neighbours = new Map();
   const link = (otherId, dir, roleId) => {
-    const o = byId.get(otherId); if (!o || otherId === a.id || !inScope(user, otherId)) return null;
+    const o = byId.get(otherId); if (!o || otherId === a.id || !inScope(user, otherId) || !shown(roleId)) return null;
     if (!neighbours.has(otherId)) neighbours.set(otherId, { id: otherId, name: o.name, environment: environmentOf(o.environment), awsAccountId: o.account_id, sessions: 0, allowedIn: 0, allowedOut: 0, byLink: new Map() });
     const n = neighbours.get(otherId), k = `${dir}:${roleId || '*'}`;
     if (!n.byLink.has(k)) n.byLink.set(k, { dir, roleId, sessions: 0, allowed: 0, worst: 'none', others: new Map() });
@@ -373,7 +391,7 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
     const x = link(from.id, 'in', e.roleId); if (!x) continue;
     allow(x[0], x[1], e.type === 'aws-root' ? 'whole account' : e.principal.split('/').pop(), e);
   }
-  // out: a role in another of your accounts trusts this account, or a role here
+  // out: a role in another of your accounts trusts this account, or a role or IAM user here
   for (const e of outTrust.rows) {
     if (e.principalAccount !== a.account_id || e.accountId === a.id || !/^aws-/.test(e.type)) continue;
     const x = link(e.accountId, 'out', hereRole(e.principal)); if (!x) continue;
@@ -385,7 +403,7 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
     const links = [...byLink.values()].sort((m, k) => k.sessions - m.sessions || k.allowed - m.allowed);
     return { ...n, moreLinks: Math.max(0, links.length - LINKS_PER_NEIGHBOUR), links: links.slice(0, LINKS_PER_NEIGHBOUR).map((l) => {
       const others = [...l.others].sort((m, k) => k[1] - m[1]);
-      return { dir: l.dir, roleId: l.roleId, sessions: l.sessions, allowed: l.allowed, worst: l.worst,
+      return { dir: l.dir, roleId: l.roleId, roleName: hereById.get(l.roleId)?.name || null, sessions: l.sessions, allowed: l.allowed, worst: l.worst,
         otherRole: others.length > 1 ? `${others[0][0]} +${others.length - 1} more` : others[0]?.[0] || '' };
     }) };
   });
@@ -394,6 +412,8 @@ export async function spaceAccount(user, accountId, who = 'all', day = 0) {
     account: { id: a.id, name: a.name, awsAccountId: a.account_id, environment: environmentOf(a.environment), ou: a.ou || null },
     services, clusters: clusters.map((c) => ({ key: c.key, roles: c.roles.sort((m, n) => n.calls7 - m.calls7).slice(0, 40), more: Math.max(0, c.roles.length - 40) })),
     cold: out.filter((r) => r.cold).map((r) => ({ id: r.id, name: r.name })).slice(0, 80), coldCount: out.filter((r) => r.cold).length, roleCount: out.length,
+    // called this week: every one with a call in 7 days (the rings draw at most 40 a service)
+    calledCount: out.filter((r) => r.calls7 > 0).length,
     neighbours: nearest, outside, scanner: (await scannerOf([a.id], start)).item, events: ev,
     // resources here that anyone, or an account outside the estate, can use (the worst 60)
     resources: exposed.rows,
