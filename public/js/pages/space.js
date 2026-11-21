@@ -342,7 +342,10 @@ export async function spacePage(ctx) {
   const box = h('div', { class: 'space-box' }, stage);
   const hud = h('div', { class: 'space-hud', 'aria-live': 'polite' }), cam = h('div', { class: 'space-cam', role: 'group', 'aria-label': 'Camera' });
   const bar = h('div', { class: 'space-timeline' });
-  const scene = h('div', { class: 'scene space-scene' }, h('div', { class: 'space-stage' }, box, hud, cam), bar);
+  // a line under the pointer: what it is (lineTip), and when several are as near, which one (lineMenu)
+  const lineTip = h('div', { class: 'sp-tip', hidden: true, 'aria-hidden': 'true' }), lineMenu = h('div', { class: 'sp-lines', hidden: true, role: 'menu', 'aria-label': 'Lines here' });
+  const stageWrap = h('div', { class: 'space-stage' }, box, hud, cam, lineTip, lineMenu);
+  const scene = h('div', { class: 'scene space-scene' }, stageWrap, bar);
   const page = h('div', { class: 'stack space-page', style: 'gap:0' }, h('div', { class: 'scene-layout space-layout' }, left, scene, right));
   // the page opens with something described in the sidebar but the whole scene lit; once the user picks something,
   // everything not connected to it fades so what belongs to what is plain
@@ -445,7 +448,85 @@ export async function spacePage(ctx) {
     ev.preventDefault(); set({ px: clampPan(st.px + d[0], W), py: clampPan(st.py + d[1], H) });
   });
   stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
-  stage.addEventListener('click', (ev) => { if (drag?.moved) { ev.stopPropagation(); return; } if (ev.target === stage) set({ sel: null }); });
+
+  // Lines are picked by nearness, not by landing on a stroke a pixel or two wide: the line nearest the pointer, within
+  // about a fingertip, lights up and says what it is, and a click picks it. Where several are about as near (lines
+  // crossing, both directions between two accounts), a click lists them to choose from. A thing (an account, a role, a
+  // label) under the pointer comes first: it picks itself.
+  let lines = [], hoverId = null, hoverN = 0, moveEv = null, moveRaf = 0;
+  const lineHover = svg('g', { class: 'sp-line-hover', 'pointer-events': 'none' });
+  const lineText = (l) => clip(linkTitle(l).replace(/ · click .*$/, ''), 120);
+  const segDist = (x, y, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy, t = L ? Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / L)) : 0; return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy); };
+  // the lines within reach of the pointer, nearest first, in screen pixels (a faded line counts as a little further)
+  const linesNear = (ev) => {
+    const m = stage.getScreenCTM(); if (!m || !lines.length) return [];
+    const q = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(m.inverse()), k = m.a || 1;
+    const reach = ev.pointerType === 'touch' || ev.pointerType === 'pen' ? 26 : 16;
+    const out = [];
+    for (const g of lines) {
+      let d = Infinity;
+      for (let i = 1; i < g.pts.length; i++) d = Math.min(d, segDist(q.x, q.y, g.pts[i - 1], g.pts[i]));
+      d *= k;
+      if (d <= reach) out.push({ g, d: d + (g.faded ? 6 : 0) });
+    }
+    return out.sort((a, b) => a.d - b.d);
+  };
+  const onThing = (ev) => !!ev.target?.closest?.('.sp-hit');
+  function drawLineHover() {
+    const g = hoverId && lines.find((x) => x.id === hoverId);
+    if (hoverId && !g) hoverId = null;
+    lineHover.replaceChildren(...(g ? [svg('path', { d: g.d, fill: 'none', stroke: g.color, 'stroke-width': 7, opacity: 0.25, 'stroke-linecap': 'round' }),
+      svg('path', { d: g.d, fill: 'none', stroke: '#fff', 'stroke-width': 2.2, opacity: 0.9, 'stroke-linecap': 'round' })] : []));
+    stage.classList.toggle('sp-on-line', !!g);
+  }
+  function hoverLine(near, ev) {
+    const id = near[0]?.g.id || null;
+    if (id !== hoverId || near.length !== hoverN) { hoverId = id; hoverN = near.length; drawLineHover(); }
+    if (!id || !lineMenu.hidden) { lineTip.hidden = true; return; }
+    const r = stageWrap.getBoundingClientRect();
+    lineTip.textContent = `${lineText(near[0].g.l)}${near.length > 1 ? ` · ${near.length} lines here: click to choose` : ''}`;
+    lineTip.hidden = false;
+    const x = Math.min(ev.clientX - r.left + 14, r.width - lineTip.offsetWidth - 6), y = ev.clientY - r.top + 18;
+    lineTip.style.left = `${Math.max(6, x)}px`; lineTip.style.top = `${y + lineTip.offsetHeight > r.height - 6 ? ev.clientY - r.top - lineTip.offsetHeight - 12 : y}px`;
+  }
+  stage.addEventListener('pointermove', (ev) => {
+    if (drag?.moved || st.dragging || ev.pointerType === 'touch') { if (hoverId) hoverLine([], ev); return; }
+    moveEv = ev;
+    if (!moveRaf) moveRaf = requestAnimationFrame(() => { moveRaf = 0; const e = moveEv; hoverLine(onThing(e) ? [] : linesNear(e), e); });
+  });
+  stage.addEventListener('pointerleave', () => { if (lineMenu.hidden) hoverLine([], null); });
+  const closeLines = () => { if (lineMenu.hidden) return; lineMenu.hidden = true; lineMenu.replaceChildren(); };
+  const pickLine = (id) => { closeLines(); lastPick = { id, at: Date.now() }; set({ sel: st.sel === id ? null : id }); };
+  function chooseLine(near, ev) {
+    const r = stageWrap.getBoundingClientRect();
+    lineMenu.replaceChildren(h('div', { class: 'sp-lines-h' }, `${near.length} lines here`),
+      ...near.map(({ g }) => h('button', { type: 'button', role: 'menuitem', onClick: (e) => { e.stopPropagation(); pickLine(g.id); },
+        onPointerenter: () => { hoverId = g.id; drawLineHover(); }, onFocus: () => { hoverId = g.id; drawLineHover(); } },
+        h('span', { class: 'sp-lines-sw', style: `background:${g.color}` }), h('span', null, lineText(g.l)))));
+    lineMenu.hidden = false; lineTip.hidden = true;
+    const x = Math.min(ev.clientX - r.left + 10, r.width - lineMenu.offsetWidth - 8), y = Math.min(ev.clientY - r.top + 10, r.height - lineMenu.offsetHeight - 8);
+    lineMenu.style.left = `${Math.max(8, x)}px`; lineMenu.style.top = `${Math.max(8, y)}px`;
+    lineMenu.querySelector('button')?.focus();
+  }
+  lineMenu.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); closeLines(); stage.focus(); return; }
+    const all = [...lineMenu.querySelectorAll('button')], i = all.indexOf(document.activeElement);
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') { ev.preventDefault(); all[(i + (ev.key === 'ArrowDown' ? 1 : all.length - 1)) % all.length]?.focus(); }
+  });
+  stage.addEventListener('wheel', closeLines, { passive: true });
+  // a press anywhere but on the list closes it
+  const outside = (ev) => { if (!lineMenu.hidden && !lineMenu.contains(ev.target)) closeLines(); };
+  document.addEventListener('pointerdown', outside, true);
+  ctx.onLeave(() => document.removeEventListener('pointerdown', outside, true));
+  stage.addEventListener('click', (ev) => {
+    if (drag?.moved) { ev.stopPropagation(); return; }
+    if (onThing(ev)) return;                                  // a thing picks itself
+    const near = linesNear(ev);
+    if (!near.length) { if (ev.target === stage) set({ sel: null }); return; }
+    // one line, or one clearly nearer than the next: pick it. Several about as near: say which
+    if (near.length === 1 || near[1].d - near[0].d > 5) pickLine(near[0].g.id);
+    else chooseLine(near.slice(0, 8), ev);
+  });
 
   function camera(fitPts) {
     const D = 2600, el = (st.el * Math.PI) / 180, ce = Math.cos(el), se = Math.sin(el), az = (st.az * Math.PI) / 180, ca = Math.cos(az), sa = Math.sin(az);
@@ -634,6 +715,7 @@ export async function spacePage(ctx) {
     // paths above the plane
     const flagC = [];
     const rnd = rng(7);
+    const geo = [];                          // the lines that can be picked: where they run on screen, for picking by nearness
     for (const l of M.links) {
       const a = ent.get(l.from), b = ent.get(l.to); if (!a || !b || !dirs.link(l)) continue;
       const t = l.from === sel || l.to === sel || sel === l.id || (selRole && l.owner === selRole.id);
@@ -675,11 +757,12 @@ export async function spacePage(ctx) {
       if (focus === 'outer' && a.env !== 'outer' && b.env !== 'outer') o *= 0.25;
       const g3 = arc3(a.p3, b.p3, l.from < l.to ? 1 : -1, P, liftOf(l, a.p3, b.p3));
       out.arcs.push(svg('path', { d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: color, 'stroke-width': f(sel === l.id ? w + 1.2 : w), opacity: o2(o), 'stroke-dasharray': dash, class: cls, 'stroke-linecap': 'round' }));
-      // every path but the per-cluster service bundles can be clicked: a wide invisible stroke along it
+      // every path but the per-cluster service bundles can be picked: the nearest to the pointer (see pickLine)
       const ext = /^(ext|res)/.test(l.kind), mid = g3.pts[ext ? 6 : 12];
       tops.set(l.id, mid);
-      if (l.kind !== 'use' && l.kind !== 'fan' && l.kind !== 'resfan' && (o > 0.15 || (rel && !on && o > 0.15 * FADE))) out.paths.push(svg('path', { class: 'sp-hit', d: cut < 1 ? g3.part(cut) : g3.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 12, 'pointer-events': 'stroke', onClick: pick(l.id) },
-        svg('title', null, linkTitle(l))));
+      if (l.kind !== 'use' && l.kind !== 'fan' && l.kind !== 'resfan' && (o > 0.15 || (rel && !on && o > 0.15 * FADE))) {
+        geo.push({ id: l.id, l, pts: cut < 1 ? g3.pts.slice(0, Math.round(cut * 24) + 1) : g3.pts, d: cut < 1 ? g3.part(cut) : g3.d, color, faded: !on });
+      }
       if (sel === l.id) out.marks.push(svg('circle', { cx: f(mid[0]), cy: f(mid[1]), r: 6, fill: 'none', stroke: '#fff', 'stroke-width': 1.6 }));
       if (cut < 1 && t) { const q = g3.pts[Math.round(cut * 24)]; out.sparks.push(svg('g', null, svg('circle', { cx: f(q[0]), cy: f(q[1]), r: 5, fill: 'none', stroke: RED, 'stroke-width': 1.4, class: 'sp-pulse' }))); }
       if (motion) for (let i = 0; i < flow; i++) {
@@ -774,7 +857,8 @@ export async function spacePage(ctx) {
         svg('linearGradient', { id: 'sp-floor-g', x1: 0, y1: 0, x2: 0, y2: 1 }, svg('stop', { offset: 0, 'stop-color': '#030a14' }), svg('stop', { offset: 1, 'stop-color': '#0a1f3a' })),
         ...Object.entries(ENV).map(([k, e]) => svg('radialGradient', { id: `sp-h-${k}` }, svg('stop', { offset: 0, 'stop-color': e.base, 'stop-opacity': 0.8 }), svg('stop', { offset: 0.5, 'stop-color': e.base, 'stop-opacity': 0.24 }), svg('stop', { offset: 1, 'stop-color': e.base, 'stop-opacity': 0 })))),
       svg('g', { 'pointer-events': 'none' }, ...out.floor), svg('g', { 'pointer-events': 'none' }, ...out.halo), ...out.rings, svg('g', { 'pointer-events': 'none' }, ...out.towers, ...out.stems, ...out.stars.map(([, el]) => el)),
-      svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.paths, ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels);
+      svg('g', { 'pointer-events': 'none' }, ...out.arcs, ...out.parts, ...out.sparks), ...out.paths, ...out.sats, svg('g', { 'pointer-events': 'none' }, ...out.marks), ...out.hits, ...out.labels, lineHover);
+    lines = geo; drawLineHover();
     // The side panels change only with what is picked and shown, not with the camera or (mostly) the hour: rebuilding
     // them on every frame cost time and took the keyboard focus away.
     const sKey = JSON.stringify([st.sel, st.zone, st.dir, st.lit, st.sel === CM_ID ? st.hour : null, (() => { const x = sessions.get(st.sel); return Array.isArray(x) ? x.length : x || null; })()]);
