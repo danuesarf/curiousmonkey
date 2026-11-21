@@ -42,7 +42,7 @@ const OUT_KINDS = new Set(['out']);
  * picked, In is everything from outside your org and the scanner, Out the paths between your accounts.
  */
 // paths that count as a way in or out of an account or project (not the scanner, not paths inside one)
-const WAY_KINDS = /^(ext|extWarn|extHigh|res|resWarn|resHigh|chain|new|xcloud|xcloudHigh)$/;
+const WAY_KINDS = /^(ext|extWarn|extHigh|res|resWarn|resHigh|chain|new|gchain|xcloud|xcloudHigh)$/;
 
 /**
  * The In / Out numbers for a picked account or project on the estate, or for the one account or project shown: who is at the other end (an outside identity,

@@ -123,6 +123,70 @@ function outsidersOf(ways, grants, projects) {
       resources: t.res.sort((a, b) => (a.expected - b.expected) || SEV[a.severity] - SEV[b.severity]), resourceCount: t.resCount })) }));
 }
 
+/**
+ * Project to project: a service account that lives in one project and can act in another of the projects read (a role
+ * granted on that project, a resource in it, or a service account there it can become), and the calls it was seen
+ * making there (audit logs). The Google Cloud side of AWS's account-to-account paths. Roles granted on a folder or the
+ * folder reaches the projects under it, and is drawn to each of them; one on the organization reaches every project, so
+ * it is one decision on the identity's page, not a line to each.
+ */
+const BASIC = /^roles\/(owner|editor)$/;
+const onLabel = (r) => r.resourceType === 'project' ? 'the project' : r.resourceType === 'serviceAccount' ? `becomes ${String(r.resource).split('/serviceAccounts/')[1]?.split('@')[0] || 'a service account'}`
+  : `${r.resourceType} ${String(r.resource).replace(/^\/\/[^/]+\//, '').split('/').pop()}`;
+export async function projectPairs(principals, has, start) {
+  const [anc, days, hours] = await Promise.all([
+    query(`SELECT DISTINCT project_id, ancestors FROM gcp_projects`).catch(() => ({ rows: [] })),
+    query(`SELECT m.member, u.project_id, sum(d.count)::bigint AS n FROM gcp_activity_daily d JOIN gcp_usage_members m ON m.id = d.member_id JOIN gcp_usage_projects u ON u.id = d.project_ref
+            WHERE d.day >= current_date - 6 AND m.member LIKE 'serviceAccount:%' GROUP BY 1, 2`).catch(() => ({ rows: [] })),
+    query(`SELECT m.member, u.project_id, h.hour, sum(h.count)::bigint AS n FROM gcp_activity_hourly h JOIN gcp_usage_members m ON m.id = h.member_id JOIN gcp_usage_projects u ON u.id = h.project_ref
+            WHERE h.hour >= to_timestamp($1) AND h.hour < to_timestamp($2) AND m.member LIKE 'serviceAccount:%' GROUP BY 1, 2, 3`, [start / 1000, (start + 864e5) / 1000]).catch(() => ({ rows: [] })),
+  ]);
+  const under = (folder) => [...new Set(anc.rows.filter((x) => (x.ancestors || []).includes(folder)).map((x) => x.project_id))];
+  const calls = new Map(), hourly = new Map();
+  for (const r of days.rows) calls.set(`${r.member}|${r.project_id}`, num(r.n));
+  for (const r of hours.rows) { const k = `${r.member}|${r.project_id}`; if (!hourly.has(k)) hourly.set(k, Array(24).fill(0)); hourly.get(k)[bucketOf(r.hour, start)] += num(r.n); }
+  const pairs = new Map();
+  const pair = (a, b) => {
+    const k = `${a}|${b}`;
+    if (!pairs.has(k)) pairs.set(k, { from: `gcp:${a}`, to: `gcp:${b}`, fromProject: a, toProject: b, allowed: 0, calls7: 0, today: Array(24).fill(0), worst: 'none', grants: new Map() });
+    return pairs.get(k);
+  };
+  const grantOf = (x, p, key, base) => x.grants.get(key) || x.grants.set(key, { caller: p.email, callerId: p.id, roles: [], calls7: 0, ...base }).get(key);
+  for (const p of principals) {
+    if (p.kind !== 'serviceAccount' || p.managed_by === 'google' || !has.has(p.project_id)) continue;
+    const A = p.project_id, seen = new Set();
+    for (const r of p.roles || []) {
+      if (r.resourceType === 'organization') continue;
+      const folder = r.resourceType === 'folder';
+      for (const B of folder ? under(r.resource) : [r.project]) {
+        if (!B || B === A || !has.has(B)) continue;
+        const x = pair(A, B), on = folder ? `every project in ${r.resource}` : onLabel(r);
+        const g = grantOf(x, p, `${p.id}|${on}`, { on, target: r.resourceType === 'serviceAccount' ? String(r.resource).split('/serviceAccounts/')[1] || null : null, folder });
+        g.roles.push(r.role); x.allowed++;
+        if (BASIC.test(r.role)) { x.worst = worse(x.worst, 'medium'); g.broad = true; }
+        seen.add(B);
+      }
+    }
+    // calls it made in other projects, allowed by a role here or not (a folder or organization role, say)
+    for (const B of has) {
+      if (B === A) continue;
+      const n = calls.get(`${p.member}|${B}`) || 0, h = hourly.get(`${p.member}|${B}`);
+      if (!n && !h) continue;
+      const x = pair(A, B);
+      const list = [...x.grants.values()].filter((g) => g.callerId === p.id);
+      const g = list[0] || grantOf(x, p, `${p.id}|calls`, { on: seen.has(B) ? 'the project' : 'a role on the organization', target: null });
+      g.calls7 += n; x.calls7 += n;
+      if (h) h.forEach((v, i) => { x.today[i] += v; });
+    }
+  }
+  return [...pairs.values()].map((x) => {
+    const grants = [...x.grants.values()].sort((a, b) => b.calls7 - a.calls7 || (b.broad ? 1 : 0) - (a.broad ? 1 : 0));
+    return { from: x.from, to: x.to, fromProject: x.fromProject, toProject: x.toProject, allowed: x.allowed, calls7: x.calls7, worst: x.worst,
+      today: x.today.reduce((a, b) => a + b, 0), hours: x.today.map((n, b) => (n ? b : -1)).filter((b) => b >= 0),
+      grants: grants.slice(0, 40).map((g) => ({ ...g, roles: [...new Set(g.roles)] })), moreGrants: Math.max(0, grants.length - 40) };
+  }).sort((a, b) => b.calls7 - a.calls7 || b.allowed - a.allowed);
+}
+
 const principalsOf = () => query(`SELECT DISTINCT ON (member) id, member, kind, email, display_name, project_id, reach, permissions, roles, risk, risk_score, risk_reasons, sources, origin, keys, managed_by
                                     FROM gcp_principals ORDER BY member, analyzed_at DESC`);
 
@@ -152,6 +216,8 @@ export async function spaceGcp(day = 0) {
     outside: outside.slice(0, MAX_SOURCES * 2), hidden: Math.max(0, outside.length - MAX_SOURCES * 2),
     providers: wif.rows.map((w) => ({ name: w.name, project: w.project_id, pool: w.pool_id, provider: w.provider_id, type: w.type, awsAccountId: w.aws_account_id, issuer: w.issuer, condition: w.attribute_condition, disabled: w.disabled })),
     links: await crossLinks(),
+    // service accounts acting in another of your projects
+    chains: await projectPairs(principals.rows, has, start),
   };
 }
 
@@ -215,6 +281,33 @@ export async function spaceGcpProject(projectId, day = 0) {
     const o = [...l.others];
     return { dir: l.dir, roleId: l.roleId, sessions: 0, allowed: l.allowed, worst: l.worst, otherRole: o.length > 1 ? `${o[0]} +${o.length - 1} more` : o[0] || '' };
   }) }));
+  // your other projects: service accounts here acting there (out), and service accounts there acting here (in). One
+  // line per service account here and direction; "sessions" are its calls there in 7 days
+  const projects = await gcpProjects();
+  const pinfo = new Map(projects.map((p) => [p.projectId, p]));
+  const byEmail = new Map(sas.map((p) => [p.email, p.id]));
+  const gnb = new Map();
+  for (const x of await projectPairs(principals.rows, new Set(pinfo.keys()), start)) {
+    const dir = x.fromProject === projectId ? 'out' : x.toProject === projectId ? 'in' : null; if (!dir) continue;
+    const other = dir === 'out' ? x.toProject : x.fromProject, info = pinfo.get(other);
+    if (!gnb.has(other)) gnb.set(other, { id: `gcp:${other}`, cloud: 'gcp', name: other, environment: info?.environment || null, awsAccountId: info?.number || null, sessions: 0, allowedIn: 0, allowedOut: 0, byLink: new Map() });
+    const n = gnb.get(other);
+    for (const g of x.grants) {
+      const hereId = dir === 'out' ? g.callerId : (g.target && byEmail.get(g.target)) || null;
+      const k = `${dir}:${hereId || '*'}`;
+      if (!n.byLink.has(k)) n.byLink.set(k, { dir, roleId: hereId, sessions: 0, allowed: 0, worst: 'none', others: [] });
+      const l = n.byLink.get(k);
+      l.sessions += g.calls7; l.allowed += g.roles.length; if (g.broad) l.worst = worse(l.worst, 'medium');
+      l.others.push(dir === 'out' ? `${g.roles.join(', ') || 'calls'} on ${g.on}` : `${g.caller.split('@')[0]}${g.roles.length ? ` · ${g.roles.join(', ')}` : ''}`);
+      n.sessions += g.calls7; if (dir === 'in') n.allowedIn += g.roles.length; else n.allowedOut += g.roles.length;
+    }
+  }
+  const gWeight = (n) => n.sessions * 10 + n.allowedIn + n.allowedOut;
+  neighbours.push(...[...gnb.values()].sort((m, k) => gWeight(k) - gWeight(m)).slice(0, 8).map(({ byLink, ...n }) => {
+    const links = [...byLink.values()].sort((m, k) => k.sessions - m.sessions || k.allowed - m.allowed);
+    return { ...n, moreLinks: Math.max(0, links.length - 40), links: links.slice(0, 40).map((l) => ({ dir: l.dir, roleId: l.roleId, sessions: l.sessions, allowed: l.allowed, worst: l.worst,
+      otherRole: l.others.length > 1 ? `${l.others[0]} +${l.others.length - 1} more` : l.others[0] || '' })) };
+  }));
 
   // outsiders: one gate each. A role granted straight on the project has no service account to fan to: it is listed on
   // the outsider's card, and its path still goes to the gate

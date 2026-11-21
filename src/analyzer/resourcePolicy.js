@@ -67,6 +67,22 @@ export function accessOf(actions, notActions = []) {
   return data ? 'data' : 'read';
 }
 export const ACCESS = { admin: 'administer it or change who has access', data: 'read or change what it holds', read: 'read its settings only' };
+/** The same, worded by what the actions really are: a grant of s3:PutObject alone can only write into it, not read it. */
+export function accessText(actions, access) {
+  if (access !== 'data' || !actions.length || actions.some((a) => a.startsWith('NOT '))) return ACCESS[access];
+  let reads = false, writes = false;
+  for (const a of actions) {
+    const list = /[*?]/.test(a) ? expandAction(a) : [a];
+    for (const x of list.length ? list : [a]) {
+      const level = accessLevel(x);
+      if (isDataRead(x) || level === 'Read' || DATA.some((p) => globMatch(p, x, { ci: true }))) reads = true;
+      else if (level === 'Write') writes = true;
+    }
+  }
+  return writes && !reads ? 'write into it, not read it' : ACCESS[access];
+}
+/** Accounts AWS itself runs to deliver a service (ELB and Redshift log delivery, CloudTrail, GuardDuty…), named "… (AWS)". */
+export const isAwsOwned = (name) => /\(AWS\)$/.test(String(name || ''));
 
 /**
  * Narrowing from one statement's conditions (positive operators) or from the policy's Deny guards (negative ones, as
@@ -122,6 +138,7 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
   const connected = estate.connected || new Map(), org = estate.org || new Map(), orgIds = estate.orgIds || new Set();
   const classify = (acct) => (!acct ? 'public' : acct === own ? 'same' : connected.has(acct) ? 'connected' : org.has(acct) ? 'org' : 'external');
   const nameOf = (acct) => (acct === own ? null : connected.get(acct) || org.get(acct) || estate.vendor?.(acct) || null);
+  const awsOwned = (acct) => !!acct && acct !== own && !connected.has(acct) && !org.has(acct) && isAwsOwned(estate.vendor?.(acct));
   const doc = resource.policy;
   if (!doc) return { exposure: 'none', grants: [], findings: [] };
   const statements = normalizeStatements(doc);
@@ -147,7 +164,7 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
     }
 
     for (const p of list) {
-      const g = { statement: st.index, sid: st.sid, principal: p.raw, kind: p.kind, account: null, accountName: null, actions, access, conditions: condText, narrowedBy: [], findings: [] };
+      const g = { statement: st.index, sid: st.sid, principal: p.raw, kind: p.kind, account: null, accountName: null, actions, access, accessText: accessText(actions, access), conditions: condText, narrowedBy: [], findings: [] };
       let reach;
       if (p.kind === 'public' || p.kind === 'not-principal' || p.raw === '*') { g.kind = p.kind === 'not-principal' ? 'not-principal' : 'public'; reach = 'public'; }
       else if (p.kind === 'service' || /^arn:aws[a-z-]*:iam::cloudfront:user\//.test(p.raw)) { g.kind = 'service'; reach = 'service'; }
@@ -159,6 +176,8 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
           : /:assumed-role\//.test(p.raw) ? 'session' : /^A[IR]OA[A-Z0-9]{12,}$/.test(p.raw) ? 'deleted' : 'other';
         reach = g.kind === 'deleted' ? 'same' : classify(g.account);   // a deleted identity lets nobody in
         g.accountName = g.account ? nameOf(g.account) : null;
+        // an account AWS runs for a service (ELB access logs, say) is the service delivering, not a third party
+        if (g.kind !== 'deleted' && awsOwned(g.account)) { g.kind = 'service'; g.awsOwned = true; reach = 'service'; }
       }
 
       // what the conditions (and the policy's Deny guards) leave of it
@@ -178,7 +197,9 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
       const sourced = nw.source || guard.source;
       g.sourceAccounts = [...new Set([...(nw.accounts || []), ...(guard.accounts || [])])];
       if (reach === 'service') {
-        g.serviceScoped = sourced;
+        // a log-delivery account writing under this account's own prefix (…/AWSLogs/<account>/*) cannot write for anyone else
+        const ownPath = g.awsOwned && st.resources.length > 0 && st.resources.every((r) => String(r).includes(`/${own}/`) || String(r).includes(`/${own}*`));
+        g.serviceScoped = sourced || ownPath;
         reach = narrowTo.length ? narrowTo.reduce(narrowest) : 'service';
       } else if (narrowTo.length) reach = narrowTo.reduce(narrowest, reach);
       g.network = [...nw.network, ...guard.network];
@@ -192,7 +213,7 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
           principal: p.raw, principalAccount: g.account, statement: st.index, sid: st.sid, actions, conditions: condText };
         g.findings.push(control); findings.push(finding);
       };
-      const what = `${ACCESS[access]}${actions.length ? ` (${actions.slice(0, 6).join(', ')}${actions.length > 6 ? ', …' : ''})` : ''}`;
+      const what = `${accessText(actions, access)}${actions.length ? ` (${actions.slice(0, 6).join(', ')}${actions.length > 6 ? ', …' : ''})` : ''}`;
       const svcLabel = SERVICES[resource.service]?.noun || 'resource';
       if (reach === 'public' && g.kind === 'not-principal') {
         f('res.not-principal', 'high', 'Allow with NotPrincipal: everyone except a list',
@@ -212,6 +233,10 @@ export function analyzeResource(resource, estate = {}, policy = DEFAULT_POLICY) 
         f('res.external-account', access === 'read' ? 'medium' : 'high', `Shared outside your estate: ${ext ? g.accountName || ext : g.kind === 'service' ? p.raw : 'outside identity'}`,
           `${g.kind === 'service' ? who : who[0].toUpperCase() + who.slice(1)} is not one of your accounts and can ${what}.${g.kind === 'account' ? ' Every identity there that its own IAM allows gets in.' : ''}`,
           'Confirm the third party still needs it. Name the role, not the whole account, and keep the actions to what it uses.');
+      } else if (reach === 'service' && !g.serviceScoped && g.awsOwned) {
+        f('res.service-no-source', access === 'read' ? 'low' : 'medium', `${g.accountName} account ${g.account} not limited to this account's logs`,
+          `${g.accountName.replace(/ \(AWS\)$/, '')} is an account AWS runs to deliver logs, not a third party. It can ${what}, and nothing limits it to this account: another account's ${/ELB/i.test(g.accountName) ? 'load balancers' : 'resources'} could deliver into this ${svcLabel} too.`,
+          resource.service === 's3' ? `Limit the Resource to this account's prefix, e.g. arn:aws:s3:::${resource.name || '<bucket>'}/<prefix>/AWSLogs/${own}/*${/ELB/i.test(g.accountName) ? ', or use the logdelivery.elasticloadbalancing.amazonaws.com service principal with aws:SourceAccount' : ''}.` : 'Add aws:SourceAccount (or aws:SourceArn) with this account.');
       } else if (reach === 'service' && !g.serviceScoped) {
         f('res.service-no-source', access === 'read' ? 'low' : 'medium', `${p.raw} with no aws:SourceAccount or aws:SourceArn`,
           `Any use of ${p.raw}, from any AWS account, could act on this ${svcLabel}: a confused deputy. It can ${what}.`,

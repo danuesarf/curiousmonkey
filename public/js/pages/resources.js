@@ -69,7 +69,7 @@ function grantsTable(d) {
       return h('tr', null,
         h('td', null, h('div', { class: 'mono small' }, who), g.accountName && h('div', { class: 'tiny muted' }, g.accountName), g.sid && h('div', { class: 'tiny muted' }, `Statement ${g.sid}`)),
         h('td', null, h('span', { class: `badge ${cls}` }, label)),
-        h('td', { class: 'small' }, ACCESS[g.access] || g.access, h('div', { class: 'tiny muted mono' }, g.actions.slice(0, 3).join(', '), g.actions.length > 3 ? ` +${g.actions.length - 3}` : '')),
+        h('td', { class: 'small' }, g.accessText || ACCESS[g.access] || g.access, h('div', { class: 'tiny muted mono' }, g.actions.slice(0, 3).join(', '), g.actions.length > 3 ? ` +${g.actions.length - 3}` : '')),
         h('td', { class: 'tiny' }, [...(g.narrowedBy || []), ...(g.network || []).map((n) => `network: ${n}`)].join(' · ') || (g.conditions.length ? g.conditions.join(' · ') : h('span', { class: 'muted' }, 'nothing'))));
     }))));
 }
