@@ -1097,6 +1097,9 @@ a.home-tile:hover{border-color:var(--edge);background:var(--raise)}
 .net-node:focus{outline:none}.net-node:focus .net-box{stroke:var(--banana)}
 .net-box{fill:var(--surface)}
 .net-box.stub{fill:var(--bg)}
+.net-box.slice{fill:var(--bg)}
+.net-note{border-left:3px solid #b9a3ff;padding:6px 10px;background:var(--surface);display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+.net-note p{margin:0}
 .net-node:hover .net-box{fill:var(--raise)}
 .net-box-title{font-size:13.5px;font-weight:600;fill:var(--ink)}
 .net-box-sub{font-family:var(--mono);font-size:10.5px;fill:var(--muted)}

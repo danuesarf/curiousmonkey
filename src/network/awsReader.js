@@ -4,7 +4,9 @@
 // interfaces (who sits where, with which public IP and groups), flow logs, Network Firewall and load balancers;
 // Direct Connect (connections, virtual interfaces, Direct Connect gateways and what they are associated with),
 // transit gateway route tables, Client VPN endpoints, PrivateLink endpoint services and who connects to them, managed
-// prefix lists and Route 53 Resolver endpoints and forwarding rules.
+// prefix lists and Route 53 Resolver endpoints and forwarding rules; the subnets this account shares through AWS RAM
+// (a central network account sharing a VPC with member accounts) and with whom. A member account needs nothing
+// extra: the VPCs and subnets shared into it come back from DescribeVpcs and DescribeSubnets with the owner's ID.
 // Each call that is denied is skipped and named, so one missing permission does not lose the rest.
 import { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeRouteTablesCommand, DescribeInternetGatewaysCommand, DescribeEgressOnlyInternetGatewaysCommand,
   DescribeNatGatewaysCommand, DescribeSecurityGroupsCommand, DescribeNetworkAclsCommand, DescribeVpcPeeringConnectionsCommand, DescribeTransitGatewaysCommand,
@@ -16,6 +18,7 @@ import { DirectConnectClient, DescribeConnectionsCommand, DescribeVirtualInterfa
 import { Route53ResolverClient, ListResolverEndpointsCommand, ListResolverEndpointIpAddressesCommand, ListResolverRulesCommand, ListResolverRuleAssociationsCommand } from '@aws-sdk/client-route53resolver';
 import { NetworkFirewallClient, ListFirewallsCommand, DescribeFirewallCommand } from '@aws-sdk/client-network-firewall';
 import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
+import { RAMClient, GetResourceSharesCommand, ListResourcesCommand, ListPrincipalsCommand } from '@aws-sdk/client-ram';
 import { bump } from '../telemetry.js';
 
 const DENIED = /AccessDenied|UnauthorizedOperation|not authorized|AuthorizationError|OptInRequired/i;
@@ -80,7 +83,7 @@ export function normalizeAwsRegion(region, r) {
   for (const n of r.enis || []) add('eni', n.NetworkInterfaceId, n.Description || n.NetworkInterfaceId, n.VpcId, { subnet: n.SubnetId, privateIp: n.PrivateIpAddress || null,
     publicIp: n.Association?.PublicIp || null, publicIps: [...new Set((n.PrivateIpAddresses || []).map((p) => p.Association?.PublicIp).filter(Boolean))], ipv6: (n.Ipv6Addresses || []).map((x) => x.Ipv6Address),
     groups: (n.Groups || []).map((g) => g.GroupId), kind: n.InterfaceType || 'interface', instance: n.Attachment?.InstanceId || null, requester: n.RequesterId || null,
-    managed: !!n.RequesterManaged, description: n.Description || null, status: n.Status });
+    managed: !!n.RequesterManaged, description: n.Description || null, status: n.Status, owner: n.OwnerId || null });
   for (const f of r.flowLogs || []) add('flow-log', f.FlowLogId, null, /^vpc-/.test(f.ResourceId) ? f.ResourceId : null, { resource: f.ResourceId, status: f.FlowLogStatus, traffic: f.TrafficType,
     destination: f.LogDestinationType || null, arn: f.LogDestination || null, format: f.LogFormat || null, fileFormat: f.DestinationOptions?.FileFormat || 'plain-text',
     hive: !!f.DestinationOptions?.HiveCompatiblePartitions, perHour: !!f.DestinationOptions?.PerHourPartition });
@@ -116,6 +119,13 @@ export function normalizeAwsRegion(region, r) {
     endpoints: f.endpoints || [] });
   for (const b of r.lbs || []) add('lb', b.LoadBalancerArn, b.LoadBalancerName, b.VpcId, { scheme: b.Scheme, kind: b.Type, dns: b.DNSName, subnets: (b.AvailabilityZones || []).map((z) => z.SubnetId).filter(Boolean),
     groups: b.SecurityGroups || [], listeners: (b.listeners || []).map((l) => ({ port: l.Port, proto: l.Protocol })) });
+  // subnets shared through AWS RAM: which share, which subnets, with whom (accounts, OUs, the organization)
+  for (const x of r.ramShares || []) {
+    const subnets = (x.resources || []).map((a) => String(a.arn || '').split('/').pop()).filter((id) => /^subnet-/.test(id));
+    if (!subnets.length) continue;
+    add('ram-share', x.resourceShareArn, x.name, null, { subnets, allowExternal: !!x.allowExternalPrincipals, status: x.status || null,
+      principals: (x.principals || []).map((p) => ({ id: p.id, external: !!p.external })) });
+  }
   return out;
 }
 
@@ -207,7 +217,15 @@ export function awsNetworkReader(credentials) {
           const assoc = await all('route53resolver:ListResolverRuleAssociations', ListResolverRuleAssociationsCommand, 'ResolverRuleAssociations', {}, r53);
           for (const x of resolverRules) x.vpcs = assoc.filter((a) => a.ResolverRuleId === x.Id).map((a) => a.VPCId);
         }
-        items.push(...normalizeAwsRegion(region, { vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs, firewalls, lbs,
+        // subnets this account shares (AWS RAM): the shares, then their subnets and principals, matched by share
+        const ram = new RAMClient({ region, credentials });
+        const ramShares = (await all('ram:GetResourceShares', GetResourceSharesCommand, 'resourceShares', { resourceOwner: 'SELF', resourceShareStatus: 'ACTIVE' }, ram, 'nextToken', 'nextToken'));
+        if (ramShares.length) {
+          const [res, princ] = await Promise.all([all('ram:ListResources', ListResourcesCommand, 'resources', { resourceOwner: 'SELF', resourceType: 'ec2:Subnet' }, ram, 'nextToken', 'nextToken'),
+            all('ram:ListPrincipals', ListPrincipalsCommand, 'principals', { resourceOwner: 'SELF' }, ram, 'nextToken', 'nextToken')]);
+          for (const x of ramShares) { x.resources = res.filter((r) => r.resourceShareArn === x.resourceShareArn); x.principals = princ.filter((p) => p.resourceShareArn === x.resourceShareArn); }
+        }
+        items.push(...normalizeAwsRegion(region, { ramShares, vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs, firewalls, lbs,
           dxConnections, dxVifs, dxGateways, dxAssociations, tgwRouteTables, clientVpns, endpointServices, prefixLists, resolverEndpoints, resolverRules }));
       }
       return { items, skipped: [...skipped] };
@@ -224,4 +242,5 @@ export const AWS_NETWORK_READS = [
   'ec2:DescribeClientVpnAuthorizationRules', 'ec2:DescribeVpcEndpointServiceConfigurations', 'ec2:DescribeVpcEndpointConnections', 'ec2:DescribeManagedPrefixLists', 'ec2:GetManagedPrefixListEntries',
   'directconnect:DescribeConnections', 'directconnect:DescribeVirtualInterfaces', 'directconnect:DescribeDirectConnectGateways', 'directconnect:DescribeDirectConnectGatewayAssociations',
   'route53resolver:ListResolverEndpoints', 'route53resolver:ListResolverEndpointIpAddresses', 'route53resolver:ListResolverRules', 'route53resolver:ListResolverRuleAssociations',
+  'ram:GetResourceShares', 'ram:ListResources', 'ram:ListPrincipals',
 ];

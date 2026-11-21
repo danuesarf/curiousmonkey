@@ -7,7 +7,8 @@
 // hosts a transit gateway that data-platform-stg is attached to. The transit gateway has two site-to-site VPNs to a
 // Google Cloud HA VPN gateway in acme-shared-ci (the "transit" network), and one to an office whose tunnels are down.
 // In Google Cloud, the transit network peers with acme-data-stg; a CI runner is open on SSH; acme-payments-prod still
-// has the default network and its default firewall rules.
+// has the default network and its default firewall rules. payments-prod also shares a VPC with data-platform-stg
+// (AWS RAM), as a central network account would.
 import { normalizeAwsRegion } from './awsReader.js';
 import { gzipSync } from 'node:zlib';
 import { normalizeGcpProject } from './gcpReader.js';
@@ -21,7 +22,7 @@ const naclAll = (id, vpc, subnets) => ({ NetworkAclId: id, VpcId: vpc, IsDefault
   { RuleNumber: 100, Protocol: '-1', RuleAction: 'allow', Egress: false, CidrBlock: '0.0.0.0/0' }, { RuleNumber: 100, Protocol: '-1', RuleAction: 'allow', Egress: true, CidrBlock: '0.0.0.0/0' },
   { RuleNumber: 32767, Protocol: '-1', RuleAction: 'deny', Egress: false, CidrBlock: '0.0.0.0/0' }, { RuleNumber: 32767, Protocol: '-1', RuleAction: 'deny', Egress: true, CidrBlock: '0.0.0.0/0' }] });
 const sub = (id, vpc, cidr, name, pub = false, az = 'a') => ({ SubnetId: id, VpcId: vpc, CidrBlock: cidr, MapPublicIpOnLaunch: pub, AvailabilityZone: az, Tags: tag(name) });
-const LOCAL = { 'vpc-0a1b2c3d4e5f60010': '10.10.0.0/16', 'vpc-0b2b2c3d4e5f60020': '10.20.0.0/16' };
+const LOCAL = { 'vpc-0a1b2c3d4e5f60010': '10.10.0.0/16', 'vpc-0b2b2c3d4e5f60020': '10.20.0.0/16', 'vpc-0c3c3c3d4e5f60030': '10.30.0.0/16' };
 const rt = (id, vpc, name, subnets, routes, main = false) => ({ RouteTableId: id, VpcId: vpc, Tags: tag(name),
   Associations: [...(main ? [{ Main: true }] : []), ...subnets.map((s) => ({ SubnetId: s }))], Routes: [{ DestinationCidrBlock: LOCAL[vpc] || '172.31.0.0/16', GatewayId: 'local' }, ...routes] });
 const defaultVpc = (acct, region, n) => {
@@ -40,6 +41,42 @@ const merge = (...parts) => { const out = {}; for (const p of parts) for (const 
 const PROD = '111111111111', DATA = '222222222222', VENDOR = '999999999999';
 export const DEMO_TGW = 'tgw-0a1b2c3d4e5f60001';
 export const DEMO_FLOW_LOG = 'fl-0a10000000000001', DEMO_FLOW_BUCKET = 'acme-flow-logs';
+
+// A VPC payments-prod shares through AWS RAM, playing the central network account: data-platform-stg runs an API and
+// its database in it, and a third account it is shared with is not connected. The owner sees the member's network
+// interfaces in its subnets; the member sees the VPC and subnets with the owner's ID, and its own security groups.
+export const DEMO_SHARED_VPC = 'vpc-0c3c3c3d4e5f60030', DEMO_SHARED_WITH = '333333333333';
+const SH = DEMO_SHARED_VPC;
+const [shPub, shApp, shDb] = ['subnet-0c3000000000pub', 'subnet-0c3000000000app', 'subnet-0c30000000000db'];
+const shVpc = () => ({ VpcId: SH, CidrBlock: '10.30.0.0/16', State: 'available', OwnerId: PROD, Tags: tag('shared-apps') });
+const shSubnets = (region) => [sub(shPub, SH, '10.30.0.0/24', 'shared-public', false, `${region}a`), sub(shApp, SH, '10.30.10.0/24', 'shared-app', false, `${region}a`),
+  sub(shDb, SH, '10.30.20.0/24', 'shared-db', false, `${region}b`)].map((s) => ({ ...s, OwnerId: PROD }));
+const shMemberEnis = () => [
+  { NetworkInterfaceId: 'eni-0c300000000orders', VpcId: SH, SubnetId: shPub, PrivateIpAddress: '10.30.0.20', Association: { PublicIp: '203.0.113.31' }, Groups: [{ GroupId: 'sg-0c30000000000orders' }],
+    InterfaceType: 'interface', Attachment: { InstanceId: 'i-0c3000000orders01' }, Description: 'orders-api', OwnerId: DATA, Status: 'in-use' },
+  { NetworkInterfaceId: 'eni-0c30000000ordersdb', VpcId: SH, SubnetId: shDb, PrivateIpAddress: '10.30.20.15', Groups: [{ GroupId: 'sg-0c3000000000ordersdb' }], InterfaceType: 'interface',
+    RequesterId: 'amazon-rds', RequesterManaged: true, Description: 'RDSNetworkInterface', OwnerId: DATA, Status: 'in-use' },
+];
+const sharedOwner = (region) => ({
+  vpcs: [shVpc()], subnets: shSubnets(region),
+  routeTables: [rt('rtb-0c30000000public', SH, 'shared-public', [shPub], [{ DestinationCidrBlock: '0.0.0.0/0', GatewayId: 'igw-0c30000000000001' }]),
+    rt('rtb-0c3000000private', SH, 'shared-private', [shApp, shDb], [{ DestinationCidrBlock: '0.0.0.0/0', NatGatewayId: 'nat-0c30000000000001' }], true)],
+  igws: [{ InternetGatewayId: 'igw-0c30000000000001', Attachments: [{ VpcId: SH, State: 'available' }], Tags: tag('shared-igw') }],
+  nats: [{ NatGatewayId: 'nat-0c30000000000001', VpcId: SH, SubnetId: shPub, State: 'available', ConnectivityType: 'public', NatGatewayAddresses: [{ PublicIp: '203.0.113.30' }] }],
+  nacls: [naclAll('acl-0c30000000000001', SH, [shPub, shApp, shDb])],
+  sgs: [{ GroupId: 'sg-0c3000000000default', GroupName: 'default', VpcId: SH, OwnerId: PROD, IpPermissions: [], IpPermissionsEgress: egressAll }],
+  enis: [{ NetworkInterfaceId: 'eni-0c3000000000nat', VpcId: SH, SubnetId: shPub, PrivateIpAddress: '10.30.0.5', Association: { PublicIp: '203.0.113.30' }, Groups: [], InterfaceType: 'nat_gateway',
+    Description: 'Interface for NAT Gateway nat-0c30000000000001', RequesterManaged: true, OwnerId: PROD, Status: 'in-use' }, ...shMemberEnis()],
+  ramShares: [{ resourceShareArn: `arn:aws:ram:${region}:${PROD}:resource-share/0c30-shared-apps`, name: 'shared-apps-subnets', status: 'ACTIVE', allowExternalPrincipals: false,
+    resources: [shPub, shApp, shDb].map((s) => ({ arn: `arn:aws:ec2:${region}:${PROD}:subnet/${s}`, resourceShareArn: `arn:aws:ram:${region}:${PROD}:resource-share/0c30-shared-apps` })),
+    principals: [{ id: DATA }, { id: DEMO_SHARED_WITH }] }],
+});
+const sharedMember = (region) => ({
+  vpcs: [shVpc()], subnets: shSubnets(region), enis: shMemberEnis(),
+  sgs: [{ GroupId: 'sg-0c30000000000orders', GroupName: 'orders-api', VpcId: SH, OwnerId: DATA, IpPermissions: [tcp(443, all())], IpPermissionsEgress: egressAll },
+    { GroupId: 'sg-0c3000000000ordersdb', GroupName: 'orders-db', VpcId: SH, OwnerId: DATA, IpPermissions: [tcp(5432, fromSg('sg-0c30000000000orders', DATA))], IpPermissionsEgress: egressAll },
+    { GroupId: 'sg-0c30000000dataddflt', GroupName: 'default', VpcId: SH, OwnerId: DATA, IpPermissions: [], IpPermissionsEgress: egressAll }],
+});
 
 function prod(region) {
   const v = 'vpc-0a1b2c3d4e5f60010', [pa, pb, app, db] = ['subnet-0a10000000000pa', 'subnet-0a10000000000pb', 'subnet-0a1000000000app', 'subnet-0a10000000000db'];
@@ -167,7 +204,7 @@ function data(region) {
 /** One AWS account's networking in its first region, normalised. */
 export function demoAwsNetwork(accountId, region) {
   if (process.env.DEMO_NETWORK_DENIED === '1') return { items: [], skipped: ['ec2:DescribeVpcs'] };
-  const raw = accountId === PROD ? prod(region) : accountId === DATA ? data(region) : defaultVpc(accountId, region, 9);
+  const raw = accountId === PROD ? merge(prod(region), sharedOwner(region)) : accountId === DATA ? merge(data(region), sharedMember(region)) : defaultVpc(accountId, region, 9);
   return { items: normalizeAwsRegion(region, raw), skipped: [] };
 }
 

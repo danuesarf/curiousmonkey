@@ -14,7 +14,7 @@ const { demoAwsNetwork, demoGcpNormalized } = await import('../src/network/demo.
 const { scannerPolicy } = await import('../src/onboarding.js');
 const { gcpSnippets } = await import('../src/gcp/onboarding.js');
 const { flowRouter, aggregate, parseFlowText, s3Dest, fileTime, dayPrefix } = await import('../src/network/flows.js');
-const { demoFlowKeys, demoFlowFile } = await import('../src/network/demo.js');
+const { demoFlowKeys, demoFlowFile, DEMO_SHARED_VPC, DEMO_SHARED_WITH } = await import('../src/network/demo.js');
 const zlib = await import('node:zlib');
 const PROD = '111111111111', DATA = '222222222222';
 const PROJECTS = ['acme-shared-ci', 'acme-data-stg', 'acme-payments-prod'];
@@ -56,7 +56,7 @@ test('findings: open ports by who uses them, default networks, flow logs, outsid
   assert.ok(sev(r, 'net.sg-unused').includes('legacy-rdp:low'));
   assert.deepEqual(sev(r, 'net.peering-external'), ['vendor-analytics:medium']);
   assert.match(r.findings.find((f) => f.control === 'net.peering-external').title, /999999999999/);
-  assert.deepEqual(sev(r, 'net.flow-logs-off'), ['data-platform:medium'], 'prod-core has flow logs; empty default VPCs are not counted');
+  assert.deepEqual(sev(r, 'net.flow-logs-off'), ['data-platform:medium', 'shared-apps:medium'], 'prod-core has flow logs; empty default VPCs are not counted');
   assert.deepEqual(sev(r, 'net.vpn-down'), ['gcp-ha-1:low', 'office-hq:medium']);
   // Google Cloud: SSH open on an instance with an external address is high; Redis open to instances with none is medium
   assert.deepEqual(sev(r, 'net.gcp-fw-admin-open'), ['allow-ssh-anywhere:high', 'default-allow-rdp:high', 'default-allow-ssh:high']);
@@ -71,6 +71,36 @@ test('findings: open ports by who uses them, default networks, flow logs, outsid
   // the vendor is yours once its account is in the organisation
   const org = analyzeNetwork(demoItems(), { ...estate, orgAccounts: new Map([['999999999999', 'analytics']]) });
   assert.equal(sev(org, 'net.peering-external').length, 0);
+});
+
+test("a shared VPC (AWS RAM): one VPC under its owner, each member's part of it, and the owner's routes for all", () => {
+  const r = analyzeNetwork(demoItems(), estate);
+  const ids = r.graph.nodes.filter((n) => n.nativeId === DEMO_SHARED_VPC).map((n) => n.id).sort();
+  assert.deepEqual(ids, [`aws:slice:${DATA}:${DEMO_SHARED_VPC}`, `aws:vpc:${PROD}:${DEMO_SHARED_VPC}`], 'drawn once, plus the member slice; not once per account that reads it');
+  const v = r.graph.nodes.find((n) => n.id === `aws:vpc:${PROD}:${DEMO_SHARED_VPC}`);
+  assert.equal(v.shared, true);
+  assert.equal(v.interfaces, 3, "the member's interfaces count once though both accounts read them");
+  assert.deepEqual(v.tenants.map((t) => `${t.account}:${t.owner ? 'owner' : t.via.join('+')}:${t.interfaces}`),
+    [`${PROD}:owner:1`, `${DATA}:interfaces+ram+read:2`, `${DEMO_SHARED_WITH}:ram:0`]);
+  // the member's API has a public address in the owner's public subnet: exposed, in the shared VPC, line to the internet
+  const api = r.exposures.find((e) => e.name.startsWith('orders-api'));
+  assert.deepEqual([api.owner, api.vpcOwner, api.severity], [DATA, PROD, 'low']);
+  assert.equal(v.exposed, 1);
+  assert.ok(r.graph.links.some((l) => l.kind === 'internet' && l.from === v.id && l.ingress === 1));
+  assert.ok(r.graph.links.some((l) => l.kind === 'share' && l.from === `aws:slice:${DATA}:${DEMO_SHARED_VPC}` && l.to === v.id));
+  // shared with an account outside the estate: a finding; inside the organisation: none
+  assert.deepEqual(sev(r, 'net.vpc-shared-external'), ['shared-apps-subnets:medium']);
+  assert.equal(sev(analyzeNetwork(demoItems(), { ...estate, orgAccounts: new Map([[DEMO_SHARED_WITH, 'ops']]) }), 'net.vpc-shared-external').length, 0);
+  // a member read alone (network account not connected): still one VPC, under its real owner, routes unknown
+  const alone = analyzeNetwork(demoItems().filter((i) => i.owner !== PROD), { ...estate, awsAccounts: new Map([[DATA, { name: 'data-platform-stg' }]]) });
+  const lone = alone.graph.nodes.find((n) => n.kind === 'vpc' && n.nativeId === DEMO_SHARED_VPC);
+  assert.deepEqual([lone.owner, lone.ownerNotRead, lone.interfaces], [PROD, true, 2]);
+  // flow logs: the member's interface travels the owner's route table out through the owner's internet gateway
+  const route = flowRouter(demoItems(), r.graph);
+  const x = route({ 'interface-id': 'eni-0c300000000orders', srcaddr: '198.51.100.9', dstaddr: '10.30.0.20', srcport: '51000', dstport: '443', protocol: '6' });
+  assert.equal(x.side, v.id);
+  assert.deepEqual(x.links, [r.graph.links.find((l) => l.kind === 'internet' && l.from === v.id).id]);
+  assert.equal(x.exposure, 'eni-0c300000000orders');
 });
 
 test('exposure: public addresses and what the internet reaches on them', () => {
@@ -256,7 +286,15 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
   const acct = (await db.query(`SELECT id FROM cloud_accounts WHERE account_id = $1`, [DATA])).rows[0].id;
   const scoped = { id: null, scope_accounts: [acct] };
   const so = await api.networkOverview(scoped);
-  assert.ok(so.nodes.filter((n) => !n.stub && n.cloud).every((n) => n.cloud === 'aws' && n.owner === DATA), 'only its own VPCs in full');
+  assert.ok(so.nodes.filter((n) => !n.stub && n.cloud && !n.participantView).every((n) => n.cloud === 'aws' && n.owner === DATA), 'only its own VPCs in full');
+  // the VPC payments-prod shares with it: there, with only its own part
+  const sharedSeen = so.nodes.find((n) => n.nativeId === DEMO_SHARED_VPC && n.kind === 'vpc');
+  assert.equal(sharedSeen.participantView, true);
+  assert.deepEqual(sharedSeen.tenants.filter((t) => !t.hidden).map((t) => t.account), [DATA]);
+  assert.equal(sharedSeen.findings, 0, "the owner's findings stay the owner's");
+  const seenDetail = await api.networkDetail(scoped, sharedSeen.id);
+  assert.ok(seenDetail.interfaces.length && seenDetail.interfaces.every((e) => e.account === DATA));
+  assert.ok(seenDetail.securityGroups.every((g) => g.account === DATA), "the owner's security groups are not shown");
   const far = so.nodes.find((n) => n.id === `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`);
   assert.deepEqual([far.hidden, far.cidrs, far.worst], [true, [], 'none'], 'the other end of its peering: a name, nothing inside');
   assert.ok(!so.nodes.some((n) => n.cloud === 'gcp'));

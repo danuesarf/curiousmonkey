@@ -6,6 +6,8 @@
 //   - exposure: what the internet can reach, address by address and port by port;
 //   - the graph: VPCs and networks, transit gateways, the internet and VPN peers as nodes; peering, transit gateway
 //     attachments, VPNs (AWS to Google Cloud matched by their tunnel addresses), Interconnect and the internet as links.
+//     A VPC a network account shares with member accounts (AWS RAM) is one node under its owner, with each member's
+//     part of it (a "slice") in the member's account and a share line between them.
 // No I/O: src/network/sync.js gives it the items and the estate.
 import { severityOf, DEFAULT_POLICY } from '../controlCatalog.js';
 
@@ -52,12 +54,76 @@ export function classifyPorts(ranges) {
 }
 const named = (ports, dict) => [...new Set(ports.map((p) => `${dict[p]} (${p})`))].join(', ');
 
+// ---------------------------------------------------------------- shared VPCs (AWS RAM)
+const ACCOUNT = /^\d{12}$/;
+/**
+ * One VPC per real owner. A VPC a network account shares with member accounts (AWS RAM) is read several ways: the
+ * owner reads it with its subnets, routes and gateways, and the network interfaces members run in it; each member reads
+ * the VPC and its subnets (with the owner's ID) and its own interfaces and security groups. Here they become one:
+ *   - the VPC and each subnet once, under the owner: the owner's own read, else a member's view (ownerNotRead);
+ *   - each network interface once, under the account it belongs to (the member's own read when there is one);
+ *   - `vpcOwner` on every AWS item that sits in a VPC: the account that owns the VPC (in a shared VPC, not the
+ *     account the item belongs to).
+ * Returns { items, shares: Map('<owner>|<vpc>' -> { owner, vpc, members: Map(account -> { via: Set('read' |
+ * 'interfaces' | 'ram'), share, shareName }), principals: [OU or organization ARNs] }), vpcOwnerOf(owner, vpc) }.
+ */
+export function shareAware(items) {
+  const realVpc = new Map(), ownRead = new Set();
+  for (const i of items) if (i.cloud === 'aws') {
+    if (i.type === 'vpc') realVpc.set(`${i.owner}|${i.id}`, i.data?.owner || i.owner);
+    if (['vpc', 'subnet', 'eni'].includes(i.type) && (!i.data?.owner || i.data.owner === i.owner)) ownRead.add(`${i.type}|${i.owner}|${i.id}`);
+  }
+  const vpcOwnerOf = (owner, vpc) => (vpc ? realVpc.get(`${owner}|${vpc}`) || owner : owner);
+  const shares = new Map();
+  const share = (owner, vpc) => { const k = `${owner}|${vpc}`; if (!shares.has(k)) shares.set(k, { owner, vpc, members: new Map(), principals: [] }); return shares.get(k); };
+  const member = (sh, acct, via, extra = {}) => { if (acct === sh.owner) return; if (!sh.members.has(acct)) sh.members.set(acct, { via: new Set() }); const m = sh.members.get(acct); m.via.add(via); Object.assign(m, extra); };
+  const out = [], kept = new Set();
+  for (const i of items) {
+    if (i.cloud !== 'aws') { out.push(i); continue; }
+    const real = i.data?.owner;
+    if ((i.type === 'vpc' || i.type === 'subnet') && real && ACCOUNT.test(real) && real !== i.owner) {
+      // a member's view of what the owner shares with it
+      member(share(real, i.type === 'vpc' ? i.id : i.vpc), i.owner, 'read');
+      const k = `${i.type}|${real}|${i.id}`;
+      if (ownRead.has(k) || kept.has(k)) continue;
+      kept.add(k);
+      out.push({ ...i, owner: real, account_id: null, vpcOwner: real, data: { ...i.data, ownerNotRead: true } });
+      continue;
+    }
+    if (i.type === 'eni' && real && ACCOUNT.test(real) && real !== i.owner && i.data.kind !== 'transit_gateway' && vpcOwnerOf(i.owner, i.vpc) === i.owner) {
+      // the owner's view of an interface a member runs in its subnets
+      member(share(i.owner, i.vpc), real, 'interfaces');
+      const k = `eni|${real}|${i.id}`;
+      if (ownRead.has(k) || kept.has(k)) continue;
+      kept.add(k);
+      out.push({ ...i, owner: real, account_id: null, vpcOwner: i.owner, data: { ...i.data, seenBy: i.owner } });
+      continue;
+    }
+    out.push(i.vpc ? { ...i, vpcOwner: vpcOwnerOf(i.owner, i.vpc) } : i);
+  }
+  // who the owner shares its subnets with (RAM), including accounts that are not connected, OUs and the organization
+  const subnetVpc = new Map(items.filter((i) => i.cloud === 'aws' && i.type === 'subnet').map((i) => [`${i.data?.owner || i.owner}|${i.id}`, i.vpc]));
+  for (const r of items.filter((i) => i.cloud === 'aws' && i.type === 'ram-share')) {
+    const vpcSet = new Set(r.data.subnets.map((x) => subnetVpc.get(`${r.owner}|${x}`)).filter(Boolean));
+    for (const vpc of vpcSet) {
+      const sh = share(r.owner, vpc);
+      for (const p of r.data.principals) {
+        if (ACCOUNT.test(p.id)) member(sh, p.id, 'ram', { share: r.id, shareName: r.name, external: p.external || r.data.allowExternal });
+        else if (!sh.principals.includes(p.id)) sh.principals.push(p.id);
+      }
+    }
+  }
+  for (const [k, sh] of shares) if (!sh.members.size && !sh.principals.length) shares.delete(k);
+  return { items: out, shares, vpcOwnerOf };
+}
+
 /**
  * Everything the analyzer needs to know about the estate:
  *   awsAccounts: Map(12-digit -> { id, name }) connected; orgAccounts: Map(12-digit -> name); vendor(acct) -> name|null
  *   gcpProjects: Map(projectId -> { name }) read; ownProject(projectId) -> true when it is yours but not read
  */
-export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usage = null) {
+export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, usage = null) {
+  const { items, shares, vpcOwnerOf } = shareAware(rawItems);
   const awsAccounts = estate.awsAccounts || new Map(), orgAccounts = estate.orgAccounts || new Map(), gcpProjects = estate.gcpProjects || new Map();
   const ownAws = (a) => awsAccounts.has(a) || orgAccounts.has(a);
   const awsName = (a) => awsAccounts.get(a)?.name || orgAccounts.get(a) || estate.vendor?.(a) || null;
@@ -66,7 +132,7 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
   const f = (control, builtIn, it, title, detail, suggestion, extra = {}) => {
     const severity = severityOf(policy, control, builtIn); if (!severity) return;
     findings.push({ key: `${control}|${it.cloud}|${it.owner}|${extra.keyPart || it.id}`.slice(0, 500), control, severity, cloud: it.cloud, owner: it.owner, itemType: it.type, nativeId: it.id,
-      itemName: it.name, vpc: it.vpc, region: it.region || null, title, detail, suggestion });
+      itemName: it.name, vpc: it.vpc, vpcOwner: it.vpcOwner || it.owner, region: it.region || null, title, detail, suggestion });
   };
 
   // ---------------------------------------------------------------- AWS
@@ -127,7 +193,7 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
   }
   // VPCs: default VPC, flow logs, public subnets handing out public addresses
   const flowOn = new Set(by('flow-log').filter((x) => x.data.status === 'ACTIVE').map((x) => key(x.owner, x.data.resource)));
-  const enisIn = new Map(); for (const n of enis) enisIn.set(key(n.owner, n.vpc), (enisIn.get(key(n.owner, n.vpc)) || 0) + 1);
+  const enisIn = new Map(); for (const n of enis) { const k = key(n.vpcOwner || n.owner, n.vpc); enisIn.set(k, (enisIn.get(k) || 0) + 1); }
   for (const v of vpcs.values()) {
     const it = { ...v, cloud: 'aws' }, inUse = enisIn.get(key(v.owner, v.id)) || 0;
     const subs = subnets.filter((s) => s.owner === v.owner && s.vpc === v.id);
@@ -190,7 +256,7 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
   }
   // Client VPN: who may reach what, and whether connections are logged
   for (const c of by('client-vpn')) {
-    const it = { ...c, cloud: 'aws' }, v = vpcs.get(key(c.owner, c.vpc));
+    const it = { ...c, cloud: 'aws' }, v = vpcs.get(key(c.vpcOwner || c.owner, c.vpc));
     const wide = c.data.rules.filter((r) => r.everyone && (r.cidr === '0.0.0.0/0' || (v && v.data.cidrs.includes(r.cidr))));
     if (wide.length) f('net.client-vpn-wide', 'low', it, `Client VPN ${c.name} lets every user reach ${wide.map((r) => r.cidr).join(', ')}`, 'An authorization rule for all users covers the whole VPC (or everything): anyone who can connect reaches every subnet.', 'Authorize groups to the subnets they need.');
     if (!c.data.connectionLog) f('net.client-vpn-no-log', 'low', it, `Client VPN ${c.name} does not log connections`, 'Without connection logging nobody can say who was connected when.', 'Turn on connection logging to CloudWatch Logs.');
@@ -213,13 +279,13 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
     const ips = [...new Set([n.data.publicIp, ...(n.data.publicIps || [])].filter(Boolean))];
     if (!ips.length || n.data.kind === 'nat_gateway' || /^ELB /.test(n.data.description || '')) continue;
     const open = worldPorts(n.owner, n.data.groups);
-    exposures.push({ cloud: 'aws', owner: n.owner, vpc: n.vpc, region: n.region, kind: 'interface', id: n.id, name: n.data.instance ? `${n.name !== n.id ? n.name : 'instance'} (${n.data.instance})` : n.name,
+    exposures.push({ cloud: 'aws', owner: n.owner, vpc: n.vpc, vpcOwner: n.vpcOwner || n.owner, region: n.region, kind: 'interface', id: n.id, name: n.data.instance ? `${n.name !== n.id ? n.name : 'instance'} (${n.data.instance})` : n.name,
       addresses: ips, ports: open.map((x) => ({ proto: x.proto, ports: portText(x.ranges), via: `security group ${x.via}` })), severity: open.length ? sevPorts(open) : 'none' });
   }
   for (const b of lbs.filter((x) => x.data.scheme === 'internet-facing')) {
     const open = b.data.groups.length ? worldPorts(b.owner, b.data.groups) : null;
     const ls = b.data.listeners.filter((l) => !open || open.some((x) => covers(x.ranges, l.port)));
-    exposures.push({ cloud: 'aws', owner: b.owner, vpc: b.vpc, region: b.region, kind: 'load-balancer', id: b.id, name: b.name, addresses: [b.data.dns],
+    exposures.push({ cloud: 'aws', owner: b.owner, vpc: b.vpc, vpcOwner: b.vpcOwner || b.owner, region: b.region, kind: 'load-balancer', id: b.id, name: b.name, addresses: [b.data.dns],
       ports: ls.map((l) => ({ proto: /UDP/i.test(l.proto) && !/TCP_UDP/i.test(l.proto) ? 'udp' : 'tcp', ports: String(l.port), via: `${l.proto} listener${b.data.groups.length ? '' : ' (no security group)'}` })),
       severity: worstOf(ls.map((l) => (ADMIN_PORTS[l.port] || DATA_PORTS[l.port] ? 'high' : 'low'))) });
   }
@@ -292,7 +358,16 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
     severity: worstOf(r.data.ports.map((p) => { const [a] = String(p).split('-').map(Number); return ADMIN_PORTS[a] || DATA_PORTS[a] ? 'high' : 'low'; })) });
 
   // ---------------------------------------------------------------- the graph
-  const graph = buildGraph({ items, vpcs, subnets, publicSubnet, tableOf, peerings, atts, tgws, cgws, networks, exposures, ownAws, awsName, ownGcp, awsAccounts, gcpProjects });
+  // subnets shared (AWS RAM) with an account that is neither connected nor in the organization
+  for (const sh of shares.values()) for (const [acct, m] of sh.members) {
+    if (!m.via.has('ram') || ownAws(acct)) continue;
+    const v = vpcs.get(key(sh.owner, sh.vpc)); if (!v) continue;
+    f('net.vpc-shared-external', 'medium', { ...v, cloud: 'aws', type: 'ram-share', id: m.share || v.id, name: m.shareName || v.name }, `VPC ${v.name} is shared with ${awsName(acct) || `account ${acct}`}, outside your estate`,
+      `Subnets of ${v.name} are shared through AWS RAM${m.shareName ? ` (${m.shareName})` : ''} with account ${acct}, which is neither connected here nor in your organization. It can run resources inside the VPC, behind its routes and next to what runs there.`,
+      'Share only with accounts in your organization, and turn off sharing with external principals in RAM.', { keyPart: `${sh.vpc}|${acct}` });
+  }
+
+  const graph = buildGraph({ items, vpcs, subnets, publicSubnet, tableOf, peerings, atts, tgws, cgws, networks, exposures, ownAws, awsName, ownGcp, awsAccounts, gcpProjects, shares });
   if (usage) applyUsage(graph, exposures, usage, f, estate.now || Date.now());
   // connected networks whose address ranges overlap: traffic between them cannot be routed as it should
   const cidrs = new Map(graph.nodes.map((n) => [n.id, n.cidrs || []]));
@@ -305,11 +380,15 @@ export function analyzeNetwork(items, estate = {}, policy = DEFAULT_POLICY, usag
     f('net.cidr-overlap', 'low', { cloud: na.cloud, owner: na.owner, type: na.kind, id: na.nativeId, name: na.label, vpc: na.nativeId }, `${na.label} and ${nb.label} use overlapping addresses`,
       `They are connected (${l.kind}) but both use ${clash.slice(0, 3).join(', ')}: traffic to the shared range stays on one side.`, 'Renumber one side, or connect them only through NAT.', { keyPart: `${l.id}` });
   }
+  // a VPC counts what is open in it whoever runs it; a member's slice counts its own part
+  const about = (n) => findings.filter((x) => x.cloud === n.cloud && (n.kind === 'slice' ? x.owner === n.owner && x.vpc === n.nativeId && x.vpcOwner === n.vpcOwner
+    : (x.vpcOwner === n.owner && x.vpc === n.nativeId) || (x.owner === n.owner && x.nativeId === n.nativeId)));
   for (const n of graph.nodes) {
-    n.findings = findings.filter((x) => (n.kind === 'vpc' || n.kind === 'network') && x.cloud === n.cloud && x.owner === n.owner && (x.vpc === n.nativeId || x.nativeId === n.nativeId)).length;
-    n.worst = worstOf(findings.filter((x) => x.cloud === n.cloud && x.owner === n.owner && (x.vpc === n.nativeId || x.nativeId === n.nativeId)).map((x) => x.severity));
+    const mine = about(n);
+    n.findings = ['vpc', 'network', 'slice'].includes(n.kind) ? mine.length : 0;
+    n.worst = worstOf(mine.map((x) => x.severity));
   }
-  return { findings, exposures, graph };
+  return { findings, exposures, graph, vpcOwnerOf, items, shares };
 }
 
 // ---------------------------------------------------------------- what the flow logs say
@@ -346,13 +425,13 @@ function applyUsage(graph, exposures, usage, f, now) {
   }
   for (const e of exposures) {
     const hits = usage.exposure.get(e.id) || new Map();
-    const covered = e.cloud === 'aws' ? days(`aws:vpc:${e.owner}:${e.vpc}`) : 0;
+    const covered = e.cloud === 'aws' ? days(`aws:vpc:${e.vpcOwner || e.owner}:${e.vpc}`) : 0;
     e.flowDays = Math.round(covered * 10) / 10;
     for (const p of e.ports) {
       const r = portsIn(p.ports); let accepted = 0, rejected = 0, sources = 0;
       for (const [k, v] of hits) { const [proto, port] = k.split('|'); if ((p.proto === 'all' || proto === p.proto) && (r === null || r.some(([a, b]) => +port >= a && +port <= b))) { accepted += v.accepted; rejected += v.rejected; sources = Math.max(sources, v.sources); } }
       p.seen = covered > 0 ? { accepted, rejected, sources } : null;
-      if (covered >= QUIET_DAYS && !accepted) f('net.open-port-unused', 'low', { cloud: e.cloud, owner: e.owner, type: e.kind, id: e.id, name: e.name, vpc: e.vpc },
+      if (covered >= QUIET_DAYS && !accepted) f('net.open-port-unused', 'low', { cloud: e.cloud, owner: e.owner, type: e.kind, id: e.id, name: e.name, vpc: e.vpc, vpcOwner: e.vpcOwner },
         `${p.proto} ${p.ports} on ${e.name} is open to the internet but nobody used it`, `No accepted connection in ${Math.floor(covered)} days of VPC flow logs${rejected ? ` (${rejected} refused)` : ''}, through ${p.via}.`, 'Close it.', { keyPart: `${e.id}|${p.proto}|${p.ports}` });
     }
     e.reached = [...hits].filter(([, v]) => v.accepted).map(([k, v]) => ({ proto: k.split('|')[0], port: Number(k.split('|')[1]), ...v })).sort((a, b) => b.accepted - a.accepted).slice(0, 10);
@@ -365,7 +444,7 @@ function buildGraph(x) {
   const node = (id, n) => { if (!nodes.has(id)) nodes.set(id, { id, ...n }); return nodes.get(id); };
   const link = (from, to, kind, l = {}) => { const [a, b] = from < to ? [from, to] : [to, from]; const id = `${kind}:${a}|${b}${l.sub ? `|${l.sub}` : ''}`; if (!links.has(id)) links.set(id, { id, from, to, kind, ...l }); return links.get(id); };
   const internet = () => node('internet', { kind: 'internet', cloud: null, label: 'Internet', owner: null });
-  const exp = new Map(); for (const e of x.exposures) { const k = `${e.cloud}|${e.owner}|${e.vpc}`; if (!exp.has(k)) exp.set(k, []); exp.get(k).push(e); }
+  const exp = new Map(); for (const e of x.exposures) { const k = `${e.cloud}|${e.vpcOwner || e.owner}|${e.vpc}`; if (!exp.has(k)) exp.set(k, []); exp.get(k).push(e); }
   const items = (cloud, type) => x.items.filter((i) => i.cloud === cloud && i.type === type);
 
   // AWS VPCs
@@ -379,11 +458,36 @@ function buildGraph(x) {
     const e = exp.get(`aws|${v.owner}|${v.id}`) || [];
     const n = Object.assign(vpcNode(v.owner, v.id, v.region), { label: v.name !== v.id ? v.name : v.data.isDefault ? `default VPC (${v.region})` : v.id, stub: false, cidrs: v.data.cidrs, isDefault: v.data.isDefault,
       subnets: { total: subs.length, public: pub.length }, igw: igw?.id || null, nats: nats.length, natIps: nats.flatMap((m) => m.data.publicIps),
-      firewall: items('aws', 'firewall').some((f) => f.owner === v.owner && f.vpc === v.id), endpoints: items('aws', 'endpoint').filter((p) => p.owner === v.owner && p.vpc === v.id).length,
-      exposed: e.filter((z) => z.ports.length).length, interfaces: items('aws', 'eni').filter((m) => m.owner === v.owner && m.vpc === v.id).length });
+      firewall: items('aws', 'firewall').some((f) => f.owner === v.owner && f.vpc === v.id), endpoints: items('aws', 'endpoint').filter((p) => (p.vpcOwner || p.owner) === v.owner && p.vpc === v.id).length,
+      exposed: e.filter((z) => z.ports.length).length, interfaces: items('aws', 'eni').filter((m) => (m.vpcOwner || m.owner) === v.owner && m.vpc === v.id).length,
+      ownerNotRead: !!v.data.ownerNotRead });
     if (igw || nats.length) {
       const l = link(n.id, internet().id, 'internet', { egress: igw ? (nats.length ? 'internet gateway, NAT' : 'internet gateway') : 'NAT', ingress: n.exposed, publicSubnets: pub.length });
       l.from = n.id; l.to = 'internet';
+    }
+  }
+  // shared VPCs: who runs what in them, and each member's slice joined to the VPC by a share line
+  const SLICE_TYPES = ['eni', 'sg', 'lb', 'endpoint', 'client-vpn', 'resolver-endpoint'];
+  for (const sh of x.shares?.values() || []) {
+    const vn = nodes.get(`aws:vpc:${sh.owner}:${sh.vpc}`); if (!vn || vn.stub) continue;
+    const inVpc = x.items.filter((i) => i.cloud === 'aws' && i.vpc === sh.vpc && (i.vpcOwner || i.owner) === sh.owner && SLICE_TYPES.includes(i.type));
+    const exposedBy = (acct) => x.exposures.filter((z) => z.cloud === 'aws' && z.vpc === sh.vpc && (z.vpcOwner || z.owner) === sh.owner && z.owner === acct && z.ports.length).length;
+    const part = (acct) => {
+      const mine = inVpc.filter((i) => i.owner === acct), enis = mine.filter((i) => i.type === 'eni');
+      return { interfaces: enis.length, subnets: [...new Set(enis.map((i) => i.data.subnet).filter(Boolean))], securityGroups: mine.filter((i) => i.type === 'sg').length,
+        loadBalancers: mine.filter((i) => i.type === 'lb').length, exposed: exposedBy(acct) };
+    };
+    vn.shared = true;
+    vn.sharedWithPrincipals = sh.principals;
+    vn.tenants = [{ account: sh.owner, name: x.awsName(sh.owner), owner: true, read: x.awsAccounts.has(sh.owner), ...part(sh.owner) },
+      ...[...sh.members].map(([acct, m]) => ({ account: acct, name: x.awsName(acct), owner: false, read: x.awsAccounts.has(acct), yours: x.ownAws(acct), via: [...m.via].sort(), share: m.shareName || null, ...part(acct) }))
+        .sort((a, b) => b.interfaces - a.interfaces || a.account.localeCompare(b.account))];
+    // a slice for each member whose own read shows it there: it sits in that account's card, joined to the VPC
+    for (const t of vn.tenants.filter((y) => !y.owner && y.read && (y.via.includes('read') || y.interfaces))) {
+      const s = node(`aws:slice:${t.account}:${sh.vpc}`, { kind: 'slice', cloud: 'aws', owner: t.account, nativeId: sh.vpc, vpcOwner: sh.owner, region: vn.region, label: vn.label,
+        ownerName: x.awsName(t.account), yours: x.ownAws(t.account), read: true, cidrs: vn.cidrs, vpcLabel: vn.label, vpcOwnerName: x.awsName(sh.owner),
+        interfaces: t.interfaces, subnets: { total: t.subnets.length, public: t.subnets.filter((id) => x.publicSubnet.get(`${sh.owner}|${id}`)).length }, exposed: t.exposed, securityGroups: t.securityGroups });
+      Object.assign(link(s.id, vn.id, 'share', { name: t.share || 'shared VPC', crossAccount: true, outside: !t.yours, interfaces: t.interfaces }), { from: s.id, to: vn.id });
     }
   }
   // VPC peering
@@ -488,7 +592,7 @@ function buildGraph(x) {
   }
   // Client VPN: people into a VPC
   for (const c of items('aws', 'client-vpn')) {
-    const v = x.vpcs.get(`${c.owner}|${c.vpc}`); if (!v) continue;
+    const v = x.vpcs.get(`${c.vpcOwner || c.owner}|${c.vpc}`); if (!v) continue;
     const users = node(`cvpn:${c.id}`, { kind: 'peer', sub: 'client-vpn', cloud: null, owner: null, nativeId: c.id, label: `Client VPN users · ${c.name}`, ip: c.data.cidr, cidrs: [c.data.cidr] });
     link(users.id, vpcNode(v.owner, v.id, v.region).id, 'client-vpn', { name: c.name, nativeId: c.id, status: c.data.status, rules: c.data.rules });
   }
@@ -496,10 +600,10 @@ function buildGraph(x) {
   const lbs = items('aws', 'lb'), eps = items('aws', 'endpoint');
   for (const sv of items('aws', 'endpoint-service')) {
     const lb = lbs.find((b) => sv.data.nlbs.includes(b.id) || sv.data.glbs.includes(b.id)); if (!lb?.vpc) continue;
-    const prov = vpcNode(lb.owner, lb.vpc, lb.region).id;
+    const prov = vpcNode(lb.vpcOwner || lb.owner, lb.vpc, lb.region).id;
     for (const c of sv.data.connections.filter((y) => y.state === 'available' || y.state === 'pendingAcceptance')) {
       const ep = eps.find((e) => e.id === c.endpoint);
-      const cons = ep ? vpcNode(ep.owner, ep.vpc, ep.region).id : node(`aws:account:${c.account}`, { kind: 'peer', sub: 'account', cloud: 'aws', owner: c.account, nativeId: c.account,
+      const cons = ep ? vpcNode(ep.vpcOwner || ep.owner, ep.vpc, ep.region).id : node(`aws:account:${c.account}`, { kind: 'peer', sub: 'account', cloud: 'aws', owner: c.account, nativeId: c.account,
         label: x.awsName(c.account) ? `${x.awsName(c.account)} (${c.account})` : `Account ${c.account}`, yours: x.ownAws(c.account), read: false, stub: true, cidrs: [] }).id;
       link(cons, prov, 'privatelink', { sub: c.endpoint, name: sv.name.split('.').pop(), nativeId: sv.id, status: c.state, endpoint: c.endpoint, outside: !x.ownAws(c.account), crossAccount: c.account !== sv.owner });
     }

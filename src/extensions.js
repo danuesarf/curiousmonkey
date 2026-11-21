@@ -9,13 +9,13 @@ export const EXTENSIONS = [
     name: 'Networking',
     summary: 'Network analyzer: VPCs, subnets, route tables, gateways, security groups, network ACLs, firewalls, peering, transit gateways, VPNs, Direct Connect and PrivateLink in AWS and Google Cloud, with VPC flow logs to tell used lines from unused ones.',
     adds: [
-      'A Networking page: a Space-like scene and a map of how your VPCs and networks connect (peering, transit gateways, VPNs, Direct Connect, PrivateLink, between AWS and Google Cloud too) and what reaches them from the internet.',
+      'A Networking page: a Space-like scene and a map of how your VPCs and networks connect (peering, transit gateways, VPNs, Direct Connect, PrivateLink, between AWS and Google Cloud too) and what reaches them from the internet. A VPC a network account shares with member accounts is drawn once, with each member account inside it.',
       'VPC flow logs read from S3: which connections are used and which are not, replayed hour by hour, and what the internet actually reached.',
       'Exposure: what the internet can reach, port by port, through security groups, firewall rules and load balancers.',
       'Network findings: admin and database ports open to the internet, default networks, missing flow logs, peering with outsiders, VPN tunnels down.',
     ],
     reads: {
-      aws: 'ec2:Describe* for VPC networking, directconnect:Describe*, route53resolver:List*, network-firewall:List*/Describe*, elasticloadbalancing:DescribeLoadBalancers and DescribeListeners; and VPC flow log files in S3 (only keys under AWSLogs/…/vpcflowlogs/). Read-only; added to the scanner policy shown on Accounts.',
+      aws: 'ec2:Describe* for VPC networking, directconnect:Describe*, route53resolver:List*, network-firewall:List*/Describe*, elasticloadbalancing:DescribeLoadBalancers and DescribeListeners, ram:GetResourceShares, ListResources and ListPrincipals (which subnets a network account shares, and with whom); and VPC flow log files in S3 (only keys under AWSLogs/…/vpcflowlogs/). Read-only; added to the scanner policy shown on Accounts.',
       gcp: 'compute.*.list for networks, subnetworks, firewalls, firewall policies, routers, routes, VPN gateways and tunnels, interconnect attachments, service attachments, addresses, forwarding rules and instances; networkconnectivity hubs and spokes. Read-only.',
     },
   },
