@@ -21,8 +21,8 @@ const RED = 'var(--red)', AMBER = 'var(--amber)';
 const sevColor = (s) => (s === 'high' ? RED : s === 'medium' ? AMBER : 'var(--edge)');
 const LINK = { peering: ['Peering', 'var(--blue)'], tgw: ['Transit gateway', 'var(--green)'], 'tgw-peering': ['Transit gateway peering', 'var(--green)'], vpn: ['VPN', 'var(--banana)'],
   dx: ['Direct Connect', '#ff9f6b'], 'client-vpn': ['Client VPN', '#7fd1ff'], privatelink: ['PrivateLink', '#d6a2ff'], psc: ['Private Service Connect', '#d6a2ff'], ncc: ['Network Connectivity Center', 'var(--green)'],
-  interconnect: ['Interconnect', '#c59bff'], internet: ['Internet', 'var(--faint)'] };
-const KIND = { vpc: 'VPC', network: 'NETWORK', tgw: 'TRANSIT GATEWAY', dxgw: 'DIRECT CONNECT GATEWAY', hub: 'NCC HUB', peer: 'PEER', internet: 'INTERNET' };
+  interconnect: ['Interconnect', '#c59bff'], share: ['Shared VPC (AWS RAM)', '#b9a3ff'], internet: ['Internet', 'var(--faint)'] };
+const KIND = { vpc: 'VPC', slice: 'SHARED VPC', network: 'NETWORK', tgw: 'TRANSIT GATEWAY', dxgw: 'DIRECT CONNECT GATEWAY', hub: 'NCC HUB', peer: 'PEER', internet: 'INTERNET' };
 const PEER = { dx: 'DIRECT CONNECT', 'client-vpn': 'CLIENT VPN', account: 'ACCOUNT', psc: 'PSC SERVICE' };
 const USE = { used: ['used', 'b-green'], unused: ['not used', 'b-neutral'], quiet: ['quiet so far', 'b-neutral'], unknown: ['not known', 'b-neutral'] };
 const human = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} kB` : `${b} B`);
@@ -188,6 +188,7 @@ export async function networkPage(ctx) {
       l.vpns?.length > 0 && sect('AWS VPN connections', h('ul', { class: 'small' }, l.vpns.map((v) => h('li', null, `${v.name} (${v.id}) to ${v.cgw || 'unknown address'} · ${v.state}`)))),
       l.kind === 'dx' && l.vif && kv([['Virtual interface', `${l.vif} · VLAN ${l.vlan}`], ['BGP', `${l.up}/${l.total} sessions up`], l.prefixes?.length && ['Prefixes', l.prefixes.join(', ')]]),
       l.kind === 'dx' && !l.vif && l.prefixes?.length > 0 && kv([['Allowed prefixes', l.prefixes.join(', ')]]),
+      l.kind === 'share' && h('p', { class: 'small muted' }, `${a?.ownerLabel || a?.owner || 'A member account'} runs its resources in ${b?.label || 'a VPC'}, which ${b?.ownerLabel || b?.owner || 'another account'} owns and shares with it through AWS RAM: they sit in the owner's subnets, behind its route tables, gateways and network ACLs.${l.interfaces != null ? ` ${l.interfaces} network interface${l.interfaces === 1 ? '' : 's'} today.` : ''}`),
       l.kind === 'client-vpn' && l.rules?.length > 0 && sect('Who may reach what', h('ul', { class: 'small' }, l.rules.map((r) => h('li', null, `${r.everyone ? 'every user' : `group ${r.group}`} → ${r.cidr}`)))),
       usageSect(l),
       h('div', { class: 'row' }, a && !a.stub && a.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(a.id) }, `Open ${a.label}`), b && !b.stub && b.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(b.id) }, `Open ${b.label}`)));
@@ -205,17 +206,49 @@ export async function networkPage(ctx) {
       u.hourly && h('div', { class: 'net-spark', title: 'Bytes by the hour, the last 24 hours' }, u.hourly.map((b) => h('span', { style: `height:${Math.max(1, Math.round((b.bytes / max) * 26))}px`, class: b.rejected && !b.bytes ? 'rej' : '' }))),
       u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${p.proto} ${p.port} (${human(p.bytes)})`).join(', ')));
   }
+  // an account by the name it goes by here
+  const accountName = (id) => d.owners.find((o) => o.cloud === 'aws' && o.owner === id)?.name || d.nodes.find((n) => n.owner === id && n.ownerLabel)?.ownerLabel || id;
+  // what a shared VPC panel says first: whose it is, and what is not known
+  function sharedNote(n, x) {
+    if (n.kind === 'slice') return h('div', { class: 'net-note' },
+      h('p', { class: 'small' }, `${accountName(n.owner)} runs ${num(n.interfaces || 0)} network interface${n.interfaces === 1 ? '' : 's'} in this VPC, which ${n.vpcOwnerName || n.vpcOwner} owns and shares with it (AWS RAM). Its subnets, route tables, gateways and network ACLs are the owner's; the resources below are ${accountName(n.owner)}'s.`),
+      x.vpcNode && h('button', { class: 'btn sm', onClick: () => select(x.vpcNode) }, 'Open the whole VPC'));
+    const notes = [];
+    if (n.ownerNotRead) notes.push(`The account that owns it (${n.owner}${n.ownerName ? `, ${n.ownerName}` : ''}) is not connected, so its route tables, gateways and network ACLs are not known: which subnets are public, and the way out, are not either. Connect it to see them.`);
+    if (n.participantView) notes.push('Shared with an account you can see: only what that account runs here is shown.');
+    return notes.length ? h('div', { class: 'net-note' }, notes.map((t) => h('p', { class: 'small' }, t))) : null;
+  }
+  // who runs what in a shared VPC: the owner, each member account, and accounts it is shared with that run nothing yet
+  function tenantsSect(list) {
+    const how = (t) => (t.owner ? 'owner' : [t.via?.includes('read') && 'read in its account', t.via?.includes('interfaces') && "seen in the owner's subnets", t.via?.includes('ram') && `RAM share${t.share ? ` ${t.share}` : ''}`].filter(Boolean).join(' · '));
+    return sect(`Who runs what here (${list.length} accounts)`, h('table', { class: 'net-table' },
+      h('thead', null, h('tr', null, ['Account', 'Interfaces', 'Subnets', 'Groups', 'Exposed'].map((y) => h('th', null, y)))),
+      h('tbody', null, list.map((t) => {
+        const slice = d.nodes.find((y) => y.kind === 'slice' && y.owner === t.account && y.vpcOwner === list.find((z) => z.owner)?.account);
+        return h('tr', { class: slice ? 'link' : '', onClick: slice ? () => select(slice.id) : null, title: slice ? `Open ${t.name || t.account}'s part` : null },
+          h('td', { class: 'small', title: t.hidden ? null : `How it is known: ${how(t)}` }, t.hidden ? h('span', { class: 'muted' }, `${t.name || t.account} (not yours to see)`) : t.name || t.account,
+            h('div', { class: 'tiny muted' }, t.hidden ? '' : `${t.account} · ${t.owner ? 'owner' : t.read ? 'member' : 'not connected'}${t.yours === false ? ' · outside your estate' : ''}`)),
+          h('td', { class: 'tiny' }, t.hidden ? '' : num(t.interfaces || 0)), h('td', { class: 'tiny' }, t.hidden ? '' : num((t.subnets || []).length)),
+          h('td', { class: 'tiny' }, t.hidden ? '' : num(t.securityGroups || 0)), h('td', null, t.exposed ? h('span', { class: 'badge b-medium' }, String(t.exposed)) : h('span', { class: 'tiny muted' }, t.hidden ? '' : '0')));
+      }))),
+      h('p', { class: 'tiny muted' }, 'The owner shares its subnets through AWS RAM; each account runs its own instances, databases and security groups in them, behind the owner\'s routes.'));
+  }
   function nodePanel(x) {
     const n = x.node;
-    const headRow = h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'eyebrow' }, `${KIND[n.kind]} · ${CLOUD[n.cloud] || ''} · ${n.ownerLabel || n.owner}${n.region ? ` · ${n.region}` : ''}`), close);
+    const headRow = h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'eyebrow' }, n.kind === 'slice' ? `SHARED VPC · ${accountName(n.owner).toUpperCase()}'S PART${n.region ? ` · ${n.region}` : ''}`
+      : `${KIND[n.kind]} · ${CLOUD[n.cloud] || ''} · ${n.ownerLabel || n.owner}${n.region ? ` · ${n.region}` : ''}`), close);
     const conns = sect(`Connections (${x.links.length})`, x.links.length ? h('div', { class: 'stack', style: 'gap:4px' }, x.links.map(linkLine)) : h('p', { class: 'small muted' }, 'Not connected to anything.'));
     const exp = x.exposures.length ? sect(`Reachable from the internet (${x.exposures.filter((e) => e.ports.length).length})`, exposureTable(x.exposures, true)) : null;
     const finds = sect(`Findings (${x.findings.length})`, findingRows(x.findings));
-    if (n.kind === 'vpc') {
+    if (n.kind === 'vpc' || n.kind === 'slice') {
       const pub = x.subnets.filter((s) => s.public).length;
+      const shared = (x.tenants || []).length > 1, acct = (id) => (shared ? h('span', { class: 'tiny muted' }, ` · ${accountName(id)}`) : null);
       return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow,
-        h('div', { class: 'row' }, h('b', { class: 'name' }, n.label), n.isDefault && h('span', { class: 'badge b-neutral' }, 'default VPC')),
+        h('div', { class: 'row' }, h('b', { class: 'name' }, n.label), n.isDefault && h('span', { class: 'badge b-neutral' }, 'default VPC'),
+          shared && h('span', { class: 'badge b-neutral', title: 'Shared through AWS RAM' }, n.kind === 'slice' ? 'your part of a shared VPC' : `shared with ${x.tenants.length - 1} account${x.tenants.length === 2 ? '' : 's'}`)),
         h('div', { class: 'row tiny muted' }, h('span', { class: 'mono' }, n.nativeId), h('button', { class: 'btn sm', onClick: () => copy(n.nativeId) }, 'Copy ID')),
+        sharedNote(n, x),
+        shared && n.kind !== 'slice' && tenantsSect(x.tenants),
         kv([['Address range', n.cidrs.join(', ')], ['Subnets', `${x.subnets.length}: ${pub} public, ${x.subnets.length - pub} private`], ['Internet gateway', n.igw || 'none'],
           ['NAT', n.nats ? `${n.nats}${n.natIps?.length ? ` (${n.natIps.join(', ')})` : ''}` : 'none'], ['Flow logs', x.flowLogs ? 'on' : h('span', { class: 'badge b-medium' }, 'off')],
           ['Network Firewall', x.firewalls.length ? x.firewalls.map((y) => y.name).join(', ') : 'none'], ['Endpoints', x.endpoints.length ? x.endpoints.map((e) => `${e.service.split('.').pop()} (${e.kind.toLowerCase()})`).join(', ') : 'none']]),
@@ -224,7 +257,7 @@ export async function networkPage(ctx) {
           h('tbody', null, x.subnets.map((s) => h('tr', null, h('td', { class: 'small' }, s.name, h('div', { class: 'mono tiny muted' }, s.id)), h('td', { class: 'mono tiny' }, s.cidr), h('td', { class: 'tiny' }, s.az || ''),
             h('td', null, h('span', { class: `badge ${s.public ? 'b-amber' : 'b-neutral'}` }, s.public ? 'public' : 'private'), s.mapPublicIp && h('div', { class: 'tiny muted' }, 'auto public IP')), h('td', { class: 'tiny' }, num(s.interfaces))))))),
         h('details', null, h('summary', { class: 'small' }, `Security groups (${x.securityGroups.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.securityGroups.map((g) => h('div', { class: 'net-rule-box' },
-          h('div', { class: 'row' }, h('b', { class: 'small' }, g.name), h('span', { class: 'mono tiny muted' }, g.id), h('span', { class: 'tiny muted' }, g.used ? `used by ${g.used}` : 'not used')),
+          h('div', { class: 'row' }, h('b', { class: 'small' }, g.name), h('span', { class: 'mono tiny muted' }, g.id), h('span', { class: 'tiny muted' }, g.used ? `used by ${g.used}` : 'not used'), acct(g.account)),
           g.ingress.length ? h('ul', { class: 'tiny mono' }, g.ingress.map((r) => h('li', { class: world([...r.cidrs, ...r.ipv6]) ? 'net-world' : '' }, `in  ${awsRule(r)}`))) : h('div', { class: 'tiny muted' }, 'no inbound rules'))))),
         h('details', null, h('summary', { class: 'small' }, `Route tables (${x.routeTables.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.routeTables.map((t) => h('div', { class: 'net-rule-box' },
           h('div', { class: 'row' }, h('b', { class: 'small' }, t.name), t.main && h('span', { class: 'badge b-neutral' }, 'main'), h('span', { class: 'tiny muted' }, `${t.subnets.length} subnet${t.subnets.length === 1 ? '' : 's'}`)),
@@ -242,7 +275,7 @@ export async function networkPage(ctx) {
         x.gateways.length > 0 && sect('Gateways', h('ul', { class: 'small' }, x.gateways.map((g) => h('li', null, `${g.type.toUpperCase()} ${g.name !== g.id ? `${g.name} ` : ''}`, h('span', { class: 'mono tiny muted' }, g.id), g.detail ? ` · ${g.detail}` : '')))),
         x.loadBalancers.length > 0 && sect('Load balancers', h('ul', { class: 'small' }, x.loadBalancers.map((b) => h('li', null, `${b.name} · ${b.kind} · ${b.scheme} · ${b.listeners.map((l) => `${l.proto} ${l.port}`).join(', ')}`)))),
         h('details', null, h('summary', { class: 'small' }, `Network interfaces (${x.interfaces.length})`), h('table', { class: 'net-table' }, h('tbody', null, x.interfaces.map((e) => h('tr', null,
-          h('td', { class: 'small' }, e.instance || e.name, h('div', { class: 'mono tiny muted' }, e.id)), h('td', { class: 'mono tiny' }, e.privateIp || ''), h('td', { class: 'mono tiny' }, e.publicIp || ''), h('td', { class: 'tiny' }, e.groups.join(', '))))))));
+          h('td', { class: 'small' }, e.instance || e.name, acct(e.account), h('div', { class: 'mono tiny muted' }, e.id)), h('td', { class: 'mono tiny' }, e.privateIp || ''), h('td', { class: 'mono tiny' }, e.publicIp || ''), h('td', { class: 'tiny' }, e.groups.join(', '))))))));
     }
     if (n.kind === 'network') {
       return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow,
@@ -305,8 +338,9 @@ export async function networkPage(ctx) {
     const placeCloud = (cloud, x0) => {
       let y = 110;
       for (const o of d.owners.filter((o) => o.cloud === cloud && (!f.cloud || f.cloud === cloud))) {
-        const list = d.nodes.filter((n) => n.cloud === cloud && n.owner === o.owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network'))
-          .sort((a, b) => (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || (SEV[a.worst] ?? 3) - (SEV[b.worst] ?? 3) || a.label.localeCompare(b.label));
+        // its own VPCs or networks, then its part of VPCs other accounts share with it
+        const list = d.nodes.filter((n) => n.cloud === cloud && n.owner === o.owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network' || n.kind === 'slice'))
+          .sort((a, b) => (a.kind === 'slice' ? 1 : 0) - (b.kind === 'slice' ? 1 : 0) || (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || (SEV[a.worst] ?? 3) - (SEV[b.worst] ?? 3) || a.label.localeCompare(b.label));
         if (!list.length) continue;
         const rows = Math.ceil(list.length / 2), hgt = HEAD + rows * (NH + 14) + PAD - 14 + PAD;
         cards.push({ x: x0, y, w: COL, h: hgt, owner: o });
@@ -395,14 +429,17 @@ export async function networkPage(ctx) {
     for (const n of d.nodes) {
       const p = pos.get(n.id); if (!p) continue;
       const on = f.sel === n.id, hit = match(n);
-      const chips = n.kind === 'vpc' && !n.stub ? [`${n.subnets.public}/${n.subnets.total} public`, n.igw ? 'IGW' : null, n.nats ? `NAT×${n.nats}` : null, n.firewall ? 'firewall' : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
+      const chips = n.kind === 'vpc' && !n.stub ? [`${n.subnets.public}/${n.subnets.total} public`, n.igw ? 'IGW' : null, n.nats ? `NAT×${n.nats}` : null, n.firewall ? 'firewall' : null,
+        n.shared ? `shared ×${(n.tenants || []).length - 1}` : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
+        : n.kind === 'slice' ? [`${num(n.interfaces || 0)} interface${n.interfaces === 1 ? '' : 's'}`, `${n.subnets?.total || 0} subnet${n.subnets?.total === 1 ? '' : 's'}`, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
         : n.kind === 'network' && !n.stub ? [`${n.subnets.total} subnets`, n.auto ? 'auto' : null, n.nats ? 'Cloud NAT' : null, n.externalIps ? `${n.externalIps} ext. IP` : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
         : n.kind === 'peer' ? [n.ip || 'peer'] : n.stub ? [n.yours ? 'yours, not read' : 'not yours', ...(n.cidrs || []).slice(0, 1)] : [];
-      const sub = n.kind === 'internet' ? '' : n.kind === 'tgw' || n.kind === 'dxgw' || n.kind === 'hub' ? `${n.kind === 'hub' ? 'NCC hub' : n.kind === 'dxgw' ? 'Direct Connect gateway' : 'transit gateway'} · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
+      const sub = n.kind === 'internet' ? '' : n.kind === 'slice' ? `in ${n.vpcOwnerName || n.vpcOwner}'s VPC` : n.kind === 'tgw' || n.kind === 'dxgw' || n.kind === 'hub' ? `${n.kind === 'hub' ? 'NCC hub' : n.kind === 'dxgw' ? 'Direct Connect gateway' : 'transit gateway'} · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
       const stroke = on ? 'var(--banana)' : n.kind === 'internet' ? 'var(--faint)' : sevColor(n.worst);
       g.push(svg('g', { class: 'net-node', opacity: hit ? dim(n.id) : 0.15, onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': `${KIND[n.kind]} ${n.label}`,
         onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.id); } } },
-        svg('rect', { x: p.x, y: p.y, width: p.w, height: p.h, rx: n.kind === 'internet' || n.kind === 'peer' ? 28 : 3, class: `net-box${n.stub ? ' stub' : ''}`, stroke, 'stroke-width': on || (n.worst === 'high') ? 2 : 1.2, 'stroke-dasharray': n.stub ? '4 3' : null }),
+        svg('rect', { x: p.x, y: p.y, width: p.w, height: p.h, rx: n.kind === 'internet' || n.kind === 'peer' ? 28 : 3, class: `net-box${n.stub ? ' stub' : ''}${n.kind === 'slice' ? ' slice' : ''}`,
+          stroke: !on && n.kind === 'slice' && (!n.worst || n.worst === 'none') ? LINK.share[1] : stroke, 'stroke-width': on || (n.worst === 'high') ? 2 : 1.2, 'stroke-dasharray': n.stub || n.kind === 'slice' ? '4 3' : null }),
         svg('text', { x: p.x + 12, y: p.y + 17, class: 'net-box-eyebrow' }, `${n.kind === 'peer' ? PEER[n.sub] || 'PEER' : KIND[n.kind]}${n.kind === 'vpc' && n.region ? ` · ${n.region}` : ''}${n.kind === 'network' && n.regions?.length ? ` · ${n.regions.length} region${n.regions.length === 1 ? '' : 's'}` : ''}`),
         svg('text', { x: p.x + 12, y: p.y + 36, class: 'net-box-title' }, n.label.length > 30 ? `${n.label.slice(0, 29)}…` : n.label),
         sub && svg('text', { x: p.x + 12, y: p.y + 53, class: 'net-box-sub' }, sub.length > 40 ? `${sub.slice(0, 39)}…` : sub),

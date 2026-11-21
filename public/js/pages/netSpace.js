@@ -1,6 +1,7 @@
 // Networking → Space: the networks as a scene, like Space does for identities. AWS is on the left, Google Cloud on
 // the right; each account or project is a zone, each VPC or network a ring on it (subnets around the rim: public ones
-// raised and amber), its way out a beam up to the internet above. Transit gateways, Direct Connect gateways and hubs
+// raised and amber), its way out a beam up to the internet above. A member account's part of a VPC another account
+// shares with it is a smaller dashed ring in the member's zone, its share line arcing to the VPC. Transit gateways, Direct Connect gateways and hubs
 // float in the aisle between the clouds; VPN peers, offices and networks outside your estate sit off the outer edges.
 // Lines are arcs above the planes. With VPC flow logs read, a line carries light while it carries traffic, the hour
 // bar replays the last 24 hours, a line with nothing on it in days is dashed and marked NOT USED.
@@ -10,7 +11,7 @@ import { wheelKind } from './spaceRelated.js';
 
 const W = 1400, H = 820, D = 2600, HOME = { az: 0, el: 56 };
 const f = (v) => Math.round(v * 10) / 10;
-const KIND_COLOR = { peering: '#8ec5ff', tgw: '#6fe3b0', 'tgw-peering': '#6fe3b0', vpn: '#f6e016', dx: '#ff9f6b', 'client-vpn': '#7fd1ff', privatelink: '#d6a2ff', psc: '#d6a2ff', ncc: '#6fe3b0', interconnect: '#c59bff', internet: '#7e978a' };
+const KIND_COLOR = { share: '#b9a3ff', peering: '#8ec5ff', tgw: '#6fe3b0', 'tgw-peering': '#6fe3b0', vpn: '#f6e016', dx: '#ff9f6b', 'client-vpn': '#7fd1ff', privatelink: '#d6a2ff', psc: '#d6a2ff', ncc: '#6fe3b0', interconnect: '#c59bff', internet: '#7e978a' };
 const RED = '#ff6b5e', AMBER = '#f0b45a', IDLE = '#5f6f68';
 const human = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} kB` : `${b} B`);
 
@@ -32,20 +33,21 @@ function arc(a, b, P, lift) {
 function layout(d, envColor) {
   const P = new Map(), zones = [];
   const FW = 640, AISLE = 170;   // a cloud's width, and half the aisle between them
-  const ringsOf = (cloud, owner) => d.nodes.filter((n) => n.cloud === cloud && n.owner === owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network'));
+  // an account's own VPCs or networks, and its part of VPCs shared with it (a smaller, dashed ring)
+  const ringsOf = (cloud, owner) => d.nodes.filter((n) => n.cloud === cloud && n.owner === owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network' || n.kind === 'slice'));
   const field = (cloud, x0) => {
     const owners = d.owners.filter((o) => o.cloud === cloud && ringsOf(cloud, o.owner).length);
     const depths = owners.map((o) => Math.max(280, Math.ceil(ringsOf(cloud, o.owner).length / 2) * 260));
     const total = depths.reduce((a, b) => a + b, 0) + Math.max(0, owners.length - 1) * 40;
     let y = -total / 2;
     owners.forEach((o, i) => {
-      const dep = depths[i], rings = ringsOf(cloud, o.owner).sort((a, b) => (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || a.label.localeCompare(b.label));
+      const dep = depths[i], rings = ringsOf(cloud, o.owner).sort((a, b) => (a.kind === 'slice' ? 1 : 0) - (b.kind === 'slice' ? 1 : 0) || (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || a.label.localeCompare(b.label));
       zones.push({ x0, x1: x0 + FW, y0: y, y1: y + dep, owner: o, color: envColor(o.environment), cloud });
       const rows = Math.ceil(rings.length / 2);
       rings.forEach((n, k) => {
         const row = Math.floor(k / 2), col = k % 2, last = k === rings.length - 1 && rings.length % 2;
         const cx = x0 + FW * (last ? 0.5 : col ? 0.73 : 0.27), cy = y + (dep / rows) * (row + 0.5);
-        P.set(n.id, { x: cx, y: cy, z: 0, r: Math.min(84, 34 + 7 * Math.sqrt(n.subnets?.total || 1)) });
+        P.set(n.id, { x: cx, y: cy, z: 0, r: Math.min(84, 34 + 7 * Math.sqrt(n.subnets?.total || 1)) * (n.kind === 'slice' ? 0.8 : 1), slice: n.kind === 'slice' });
       });
       y += dep + 40;
     });
@@ -168,7 +170,8 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
       } else {
         const ring = (z, rr) => { const pts = []; for (let i = 0; i <= 40; i++) { const a = (i / 40) * Math.PI * 2; const q = P(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr * 0.9, z); pts.push(`${f(q[0])} ${f(q[1])}`); } return `M${pts.join(' L')} Z`; };
         const color = envColor(n.environment);
-        g.push(svg('path', { d: ring(0, p.r), fill: color, 'fill-opacity': 0.12, stroke: on ? '#f6e016' : worst || color, 'stroke-width': on ? 2.6 : worst ? 2 : 1.3 }));
+        g.push(svg('path', { d: ring(0, p.r), fill: p.slice ? KIND_COLOR.share : color, 'fill-opacity': p.slice ? 0.06 : 0.12, stroke: on ? '#f6e016' : worst || (p.slice ? KIND_COLOR.share : color),
+          'stroke-width': on ? 2.6 : worst ? 2 : 1.3, 'stroke-dasharray': p.slice ? '5 4' : null }));
         // subnets around the rim: public ones raised and amber
         const total = Math.min(n.subnets?.total || 0, 24), pub = n.subnets?.public || 0;
         for (let i = 0; i < total; i++) {
@@ -177,14 +180,15 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
           g.push(svg('line', { x1: f(b0[0]), y1: f(b0[1]), x2: f(b1[0]), y2: f(b1[1]), stroke: isPub ? AMBER : '#6fe3b0', 'stroke-width': f(Math.max(1.5, 3 * k)), 'stroke-linecap': 'round' }));
         }
         // the way out: a beam up from the ring (internet gateway, NAT, Cloud NAT, external addresses)
-        if (d.links.some((l) => l.kind === 'internet' && (l.from === n.id || l.to === n.id))) {
+        if (!p.slice && d.links.some((l) => l.kind === 'internet' && (l.from === n.id || l.to === n.id))) {
           const b0 = P(p.x, p.y, 0), b1 = P(p.x, p.y, 90);
           g.push(svg('line', { x1: f(b0[0]), y1: f(b0[1]), x2: f(b1[0]), y2: f(b1[1]), stroke: n.exposed ? RED : '#7e978a', 'stroke-width': f(Math.max(1.2, 2.2 * k)), opacity: 0.8 }));
           if (n.exposed) g.push(svg('circle', { cx: f(b1[0]), cy: f(b1[1]), r: f(4 + 2 * k), fill: RED, class: 'ns-pulse' }));
         }
         const lp = P(p.x, p.y - p.r * 1.02, 0);   // under the ring's front edge
         g.push(svg('text', { x: f(lp[0]), y: f(lp[1] + 14), 'text-anchor': 'middle', class: 'ns-label strong' }, n.label.length > 24 ? `${n.label.slice(0, 23)}…` : n.label),
-          svg('text', { x: f(lp[0]), y: f(lp[1] + 27), 'text-anchor': 'middle', class: 'ns-sub' }, `${(n.cidrs || []).slice(0, 1).join('')}${n.flowDays ? ` · flow logs ${n.flowDays} d` : ''}`));
+          svg('text', { x: f(lp[0]), y: f(lp[1] + 27), 'text-anchor': 'middle', class: 'ns-sub' }, p.slice ? `shared by ${n.vpcOwnerName || n.vpcOwner} · ${n.interfaces || 0} interfaces`
+            : `${(n.cidrs || []).slice(0, 1).join('')}${n.shared ? ` · shared ×${(n.tenants || []).length - 1}` : ''}${n.flowDays ? ` · flow logs ${n.flowDays} d` : ''}`));
       }
       out.push(svg('g', { class: 'ns-node', opacity: fade(n.id), onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': n.label,
         onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.id); } } }, g, svg('title', null, `${n.label}${n.ownerLabel ? ` · ${n.ownerLabel}` : ''}`)));

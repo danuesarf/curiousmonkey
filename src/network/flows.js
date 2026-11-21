@@ -8,7 +8,7 @@
 import zlib from 'node:zlib';
 import { query, tx, pool } from '../db.js';
 import { getGateway } from '../aws/gateway.js';
-import { range4 } from './analyze.js';
+import { range4, shareAware } from './analyze.js';
 import { isEnabled } from '../extensions.js';
 
 export const LOOKBACK_DAYS = Number(process.env.FLOW_LOOKBACK_DAYS || 7);
@@ -56,7 +56,9 @@ const isPrivate = (v) => PRIVATE.some(([a, b]) => v >= a && v <= b);
  * Where a record went: built once per read from the stored networking and the map (src/network/analyze.js graph).
  * route(record) → { side, dir, port, proto, links: [link ids], exposure: target|null } or null when it is not ours to count.
  */
-export function flowRouter(items, graph) {
+export function flowRouter(rawItems, graph) {
+  // a member's interface in a shared VPC travels the owner's subnets and route tables
+  const items = shareAware(rawItems).items;
   const aws = items.filter((i) => i.cloud === 'aws');
   const k = (o, id) => `${o}|${id}`;
   const eniById = new Map(aws.filter((i) => i.type === 'eni').map((e) => [e.id, e]));
@@ -99,7 +101,7 @@ export function flowRouter(items, graph) {
   }
   // which node owns an address: VPC and network ranges (most specific first), and your public addresses
   const owned = [];
-  for (const n of graph.nodes) for (const c of n.cidrs || []) { const r = range4(c); if (r) owned.push({ r, id: n.id }); }
+  for (const n of graph.nodes) if (n.kind !== 'slice') for (const c of n.cidrs || []) { const r = range4(c); if (r) owned.push({ r, id: n.id }); }
   owned.sort((a, b) => (a.r[1] - a.r[0]) - (b.r[1] - b.r[0]));
   const ownerOf = (v) => owned.find((x) => v >= x.r[0] && v <= x.r[1])?.id || null;
   const mine = new Set([...aws.filter((i) => i.type === 'eni').flatMap((e) => [e.data.publicIp, ...(e.data.publicIps || [])]), ...aws.filter((i) => i.type === 'nat').flatMap((n) => n.data.publicIps),
@@ -125,7 +127,7 @@ export function flowRouter(items, graph) {
   const cache = new Map();
   return function route(r) {
     const e = eniById.get(r['interface-id']); if (!e || e.data.kind === 'nat_gateway') return null;
-    const side = `aws:vpc:${e.owner}:${e.vpc}`;
+    const vo = e.vpcOwner || e.owner, side = `aws:vpc:${vo}:${e.vpc}`;
     const mineIps = [e.data.privateIp, e.data.publicIp, ...(e.data.publicIps || [])];
     const localIsSrc = mineIps.includes(r.srcaddr) || (!mineIps.includes(r.dstaddr) && ownerOf(ip4(r.srcaddr)) === side);
     const remote = localIsSrc ? r.dstaddr : r.srcaddr, rv = ip4(remote); if (rv == null) return null;
@@ -135,8 +137,8 @@ export function flowRouter(items, graph) {
     const ck = `${e.id}|${remote}`;
     let hit = cache.get(ck);
     if (!hit) {
-      const s = subnets.get(k(e.owner, e.data.subnet)), t = s ? rtOf.get(k(s.owner, s.id)) || mainRt.get(k(s.owner, s.vpc)) : null;
-      const target = lpm(ranges(t, e.owner, e.vpc), rv) || { type: 'none' };
+      const s = subnets.get(k(vo, e.data.subnet)), t = s ? rtOf.get(k(s.owner, s.id)) || mainRt.get(k(s.owner, s.vpc)) : null;
+      const target = lpm(ranges(t, vo, e.vpc), rv) || { type: 'none' };
       const links = [];
       const dest = isPrivate(rv) || !mine.has(remote) ? ownerOf(rv) : null;
       if (target.type === 'local') {
@@ -220,7 +222,7 @@ async function noteRead(fl, patch) {
   await query(`INSERT INTO net_flow_reads(flow_log, owner, vpc_node, bucket, prefix, last_time, files, bytes, note, error, read_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
     ON CONFLICT (flow_log) DO UPDATE SET owner = EXCLUDED.owner, vpc_node = EXCLUDED.vpc_node, bucket = EXCLUDED.bucket, prefix = EXCLUDED.prefix,
       last_time = GREATEST(net_flow_reads.last_time, EXCLUDED.last_time), files = net_flow_reads.files + EXCLUDED.files, bytes = net_flow_reads.bytes + EXCLUDED.bytes, note = EXCLUDED.note, error = EXCLUDED.error, read_at = now()`,
-  [fl.id, fl.owner, fl.vpc ? `aws:vpc:${fl.owner}:${fl.vpc}` : null, patch.bucket || null, patch.prefix ?? null, patch.lastTime ? new Date(patch.lastTime) : null, patch.files || 0, patch.bytes || 0, patch.note || null, patch.error || null]);
+  [fl.id, fl.owner, fl.vpc ? `aws:vpc:${fl.vpcOwner || fl.owner}:${fl.vpc}` : null, patch.bucket || null, patch.prefix ?? null, patch.lastTime ? new Date(patch.lastTime) : null, patch.files || 0, patch.bytes || 0, patch.note || null, patch.error || null]);
 }
 
 /**
@@ -236,7 +238,7 @@ export async function flowTick({ log = () => {}, gwFor = null, now = Date.now(),
       const { loadItems, networkEstate } = await import('./sync.js');
       const { analyzeNetwork } = await import('./analyze.js');
       const items = await loadItems();
-      const fls = items.filter((i) => i.cloud === 'aws' && i.type === 'flow-log' && i.data.status === 'ACTIVE');
+      const fls = shareAware(items).items.filter((i) => i.cloud === 'aws' && i.type === 'flow-log' && i.data.status === 'ACTIVE');
       if (!fls.length) return null;
       const graph = (analyze || analyzeNetwork)(items, await networkEstate()).graph;
       const route = flowRouter(items, graph);
@@ -274,7 +276,7 @@ export async function flowTick({ log = () => {}, gwFor = null, now = Date.now(),
             let n = 0; const recs = [];
             for (const r of parseFlowText(text)) { recs.push(r); n++; }
             aggregate(recs, route, agg);
-            files.push({ bucket: dest.bucket, key: o.key, flowLog: fl.id, owner: fl.owner, vpcNode: fl.vpc ? `aws:vpc:${fl.owner}:${fl.vpc}` : null, time: o.time, size: buf.length, records: n });
+            files.push({ bucket: dest.bucket, key: o.key, flowLog: fl.id, owner: fl.owner, vpcNode: fl.vpc ? `aws:vpc:${fl.vpcOwner || fl.owner}:${fl.vpc}` : null, time: o.time, size: buf.length, records: n });
             bytes += buf.length; fb += buf.length; nfiles++; out.files++; out.records += n; last = Math.max(last || 0, o.time);
           }
           if (files.length) await saveBatch(agg, files);
