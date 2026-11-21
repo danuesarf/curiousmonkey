@@ -224,12 +224,22 @@ export async function networkPage(ctx) {
     const [label, cls] = USE[u.state];
     const why = u.state === 'used' ? `${human(u.bytes)} in ${num(u.flows)} accepted flows${u.rejected ? `, ${num(u.rejected)} refused` : ''}, last ${ago(u.last)}`
       : u.state === 'unused' ? `Nothing accepted in ${Math.floor(u.coveredDays)} days of VPC flow logs${u.rejected ? ` (${num(u.rejected)} refused)` : ''}. If nothing needs it, remove it.`
-      : u.state === 'quiet' ? `Nothing yet: flow logs read for ${u.coveredDays} days, less than the 3 needed to call it unused.`
-      : l.kind === 'privatelink' ? `Only the consumer side can see PrivateLink traffic, and its VPC has no flow logs read.${notKnown([l.from])}` : `No VPC on either side of it has flow logs read (Google Cloud flow logs are not read).${notKnown([l.from, l.to])}`;
+      : u.state === 'quiet' ? `Nothing yet: ${u.firstSeen ? `it was first seen ${ago(u.firstSeen)}` : `flow logs read for ${u.coveredDays} days`}, less than the 3 days needed to call it unused.`
+      : `${l.kind === 'privatelink' ? 'Only the consumer side can see PrivateLink traffic. ' : ''}${unread(l) || ' No VPC on either side of it has flow logs read (Google Cloud flow logs are not read).'}`.trim();
     const max = Math.max(1, ...(u.hourly || []).map((b) => b.bytes));
     return sect('Use (VPC flow logs)', h('div', { class: 'row' }, h('span', { class: `badge ${cls}` }, label), h('span', { class: 'small' }, why)),
       u.hourly && h('div', { class: 'net-spark', title: 'Bytes by the hour, the last 24 hours' }, u.hourly.map((b) => h('span', { style: `height:${Math.max(1, Math.round((b.bytes / max) * 26))}px`, class: b.rejected && !b.bytes ? 'rej' : '' }))),
       u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${portName(p)} (${human(p.bytes)})`).join(', ')));
+  }
+  // which VPCs' flow logs would tell what a line carries, and why they do not: a line on a transit gateway's VPN or
+  // Direct Connect carries any VPC behind it, so each of those has to be read
+  function unread(l) {
+    const missing = l.usage?.unlogged || []; if (!missing.length) return '';
+    const name = (id) => d.nodes.find((n) => n.id === id)?.label || id.split(':').pop();
+    const list = (ids) => (ids.length <= 3 ? ids.map(name).join(', ') : `${ids.slice(0, 3).map(name).join(', ')} and ${ids.length - 3} more`);
+    const none = missing.filter((id) => !(d.flowLogs || []).some((x) => x.vpcNode === id)), some = missing.filter((id) => !none.includes(id));
+    const hub = [l.from, l.to].find((id) => /^aws:(tgw|dxgw):/.test(id)), behind = hub && l.kind !== 'tgw' ? `Any VPC behind ${name(hub)} can use it. ` : '';
+    return ` ${behind}${none.length ? `${list(none)} ${none.length === 1 ? 'has' : 'have'} no VPC flow logs.` : ''}${notKnown(some)}`;
   }
   // why the flow logs of a line's VPCs say nothing yet: the first of them that has a flow log, in a sentence
   function notKnown(ends) {

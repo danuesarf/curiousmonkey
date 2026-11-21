@@ -315,6 +315,72 @@ test('flow log files are counted as they stream; refused ports and long port tai
   assert.ok(folded.some((x) => x.port === 1049) && !folded.some((x) => x.port === 1000));
 });
 
+test('flow log coverage: a hub line needs every VPC behind it; nothing is unused longer than it has been there; stale evidence holds findings', () => {
+  const items = demoItems(), now = Date.now(), d = 864e5;
+  const prodNode = `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`;
+  const run = (cover, its = items) => analyzeNetwork(its, { ...estate, now }, undefined, { links: new Map(), exposure: new Map(), coverage: new Map(cover) });
+  const week = (node, until = now) => [node, { since: new Date(now - 7 * d), until: new Date(until) }];
+  const a = run([week(prodNode)]);
+  const line = (r, kind, label) => r.graph.links.find((l) => l.kind === kind && [l.from, l.to].some((id) => r.graph.nodes.find((n) => n.id === id)?.label === label));
+  // prod-core's flow logs cannot vouch for data-platform's attachment, nor for the office VPN on the hub that both use
+  const dataAtt = line(a, 'tgw', 'data-platform'), office = line(a, 'vpn', 'office-hq-firewall'), vendor = line(a, 'peering', 'vpc-0c9c9c9c9c9c90099');
+  assert.equal(dataAtt.usage.state, 'unknown'); assert.deepEqual(dataAtt.usage.unlogged, [`aws:vpc:${DATA}:vpc-0b2b2c3d4e5f60020`]);
+  assert.equal(office.usage.state, 'unknown'); assert.ok(office.usage.unlogged.includes(`aws:vpc:${DATA}:vpc-0b2b2c3d4e5f60020`) && !office.usage.unlogged.includes(prodNode));
+  assert.equal(vendor.usage.state, 'unused', "prod-core's own peering it does see whole");
+  const unused = a.findings.filter((f) => f.control === 'net.link-unused');
+  assert.ok(unused.some((f) => f.nativeId === 'pcx-0a100000000vendor'));
+  assert.ok(!unused.some((f) => f.nativeId === 'tgw-attach-0a1000000data' || /office-hq-firewall/.test(f.title)), unused.map((f) => f.title).join(' | '));
+  // with every VPC behind the hub read, the office VPN can be called unused
+  const behindHub = a.graph.links.filter((l) => l.kind === 'tgw').map((l) => (l.from.startsWith('aws:vpc:') ? l.from : l.to));
+  assert.equal(line(run(behindHub.map((n) => week(n))), 'vpn', 'office-hq-firewall').usage.state, 'unused');
+  // a peering first seen two days ago is not unused, whatever was read before it was there
+  const young = items.map((i) => (i.type === 'peering' && i.id === 'pcx-0a100000000vendor' ? { ...i, firstSeen: new Date(now - 2 * d).toISOString() } : i));
+  const y = line(run([week(prodNode)], young), 'peering', 'vpc-0c9c9c9c9c9c90099');
+  assert.deepEqual([y.usage.state, y.usage.coveredDays, !!y.usage.firstSeen], ['quiet', 2, true]);
+  // flow logs not read for 10 hours: not known now, and the finding it had is held, not resolved
+  const stale = run([week(prodNode, now - 10 * 36e5)]);
+  assert.equal(line(stale, 'peering', 'vpc-0c9c9c9c9c9c90099').usage.state, 'unknown');
+  assert.equal(stale.findings.filter((f) => f.control === 'net.link-unused').length, 0);
+  assert.ok(stale.held.includes(`net.link-unused|aws|${PROD}|${vendor.id}`), stale.held.join(' | '));
+  assert.ok(stale.held.every((k) => !k.includes(dataAtt.id)), 'what was never known is not held');
+});
+
+test('flow records: an interface not read yet is placed by its address; transit gateway interfaces and both ends are not counted twice', () => {
+  const tgwEni = { cloud: 'aws', owner: PROD, type: 'eni', id: 'eni-0a10000000tgw0001', vpc: 'vpc-0a1b2c3d4e5f60010', name: 'tgw',
+    data: { subnet: 'subnet-0a1000000000app', privateIp: '10.10.10.200', publicIps: [], groups: [], kind: 'transit_gateway', description: 'Network Interface for Transit Gateway Attachment' } };
+  const items = [...demoItems(), tgwEni], a = analyzeNetwork(items, estate);
+  const prodNode = `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`, dataNode = `aws:vpc:${DATA}:vpc-0b2b2c3d4e5f60020`;
+  const toData = a.graph.links.find((l) => l.kind === 'peering' && [l.from, l.to].includes(dataNode) && [l.from, l.to].includes(prodNode)).id;
+  const rec = (eni, src, dst, sp, dp, action = 'ACCEPT', start = '1763700000') => ({ 'interface-id': eni, srcaddr: src, dstaddr: dst, srcport: String(sp), dstport: String(dp), protocol: '6', bytes: '1000', packets: '5', start, action });
+  const route = flowRouter(items, a.graph);
+  // an ECS task started after the last networking read: its record counts on the peering it went over
+  assert.equal(route(rec('eni-0a1000000task0009', '10.10.10.99', '10.20.0.15', 44321, 5432)), null, 'without the flow log it came from, it cannot be placed');
+  assert.deepEqual(route(rec('eni-0a1000000task0009', '10.10.10.99', '10.20.0.15', 44321, 5432), prodNode).links, [toData]);
+  assert.equal(route(rec('eni-0a1000000task0009', '198.51.100.7', '10.10.10.99', 51000, 443), prodNode).exposure, null, 'not on the map, so not an exposure');
+  // the transit gateway's interface: what this VPC sends is counted at the sender, what passes through is kept
+  assert.equal(route(rec(tgwEni.id, '10.10.10.15', '10.20.0.15', 44321, 5432)), null);
+  assert.ok(route(rec(tgwEni.id, '10.20.0.15', '10.128.0.9', 44321, 443)));
+  // both ends read: accepted traffic counted where it leaves, refusals where they happen, and only from when the other end was read
+  const both = flowRouter(items, a.graph, { logged: new Map([[dataNode, 1763600000e3]]) });
+  const count = (records) => [...aggregate(records, both).links.values()].filter((x) => x.link === toData).map((x) => `${x.action}:${x.bytes}`).sort();
+  assert.deepEqual(count([rec('eni-0a1000000000app01', '10.10.10.15', '10.20.0.15', 44321, 5432), rec('eni-0a1000000000app01', '10.20.0.15', '10.10.10.15', 5432, 44321)]), ['ACCEPT:1000']);
+  assert.deepEqual(count([rec('eni-0a1000000000app01', '10.20.0.15', '10.10.10.15', 5432, 44321, 'REJECT')]), ['REJECT:1000']);
+  assert.deepEqual(count([rec('eni-0a1000000000app01', '10.20.0.15', '10.10.10.15', 5432, 44321, 'ACCEPT', '1763500000')]), ['ACCEPT:1000'], 'before the other end had a flow log');
+});
+
+test('a transit gateway route out of the estate is looked up in the route table of the VPC\'s own attachment', () => {
+  const items = demoItems().map((i) => (i.type === 'tgw-route-table' ? { ...i, data: { ...i.data, associations: i.data.associations.filter((x) => x.attachment !== 'tgw-attach-0a1000000prod') } } : i));
+  const main = items.find((i) => i.type === 'tgw-route-table');
+  // prod-core's attachment sits in a segment of its own, whose route to the office goes over the Google Cloud VPN instead
+  items.push({ ...main, id: 'tgw-rtb-0a1000000prodseg', name: 'prod segment', data: { ...main.data, default: false, associations: [{ attachment: 'tgw-attach-0a1000000prod', resourceType: 'vpc' }],
+    routes: [{ dest: '192.168.0.0/16', type: 'static', state: 'active', attachments: [{ attachment: 'tgw-attach-0a1000000vpn0', resourceType: 'vpn', resourceId: 'vpn-0a1000000000gcp0' }] }] } });
+  const a = analyzeNetwork(items, estate), route = flowRouter(items, a.graph);
+  const r = route({ 'interface-id': 'eni-0a1000000000app01', srcaddr: '10.10.10.15', dstaddr: '192.168.1.10', srcport: '44321', dstport: '443', protocol: '6', bytes: '1', packets: '1', start: '1763700000', action: 'ACCEPT' });
+  const vpn = (id) => a.graph.links.find((l) => l.id === id);
+  assert.ok(r.links.some((id) => vpn(id)?.kind === 'vpn' && vpn(id).vpns.some((v) => v.id === 'vpn-0a1000000000gcp0')), JSON.stringify(r.links));
+  assert.ok(!r.links.some((id) => vpn(id)?.vpns?.some((v) => v.id === 'vpn-0a10000000office')), "not the office VPN of another segment's table");
+});
+
 test("a flow log's reading state, as the page says it", () => {
   const now = Date.UTC(2026, 4, 10, 12), fl = { data: {} }, h = 36e5;
   assert.equal(flowState(fl, null, now).state, 'waiting');
@@ -472,7 +538,10 @@ test('flow logs from S3: read once, a budget at a time; lines used, not used, no
   assert.equal(L('peering', 'vpc-0b2b2c3d4e5f60020').usage.state, 'used');
   assert.equal(L('peering', 'vpc-0c9c9c9c9c9c90099').usage.state, 'unused');
   assert.equal(L('vpn', 'transit').usage.state, 'used');
-  assert.equal(L('vpn', '198.51.100.200').usage.state, 'unused', 'covered through the transit gateway');
+  // the office VPN hangs off the transit gateway every VPC behind it can use, and data-platform has no flow logs
+  assert.equal(L('vpn', '198.51.100.200').usage.state, 'unknown', 'one read VPC cannot vouch for the others behind the hub');
+  assert.ok(L('vpn', '198.51.100.200').usage.unlogged.includes(`aws:vpc:${DATA}:vpc-0b2b2c3d4e5f60020`));
+  assert.equal(L('tgw', 'vpc-0b2b2c3d4e5f60020').usage.state, 'unknown', "nor for data-platform's own attachment");
   assert.equal(L('dx', 'dxcon').usage.state, 'used');
   assert.equal(L('peering', 'acme-data-stg').usage.state, 'unknown', 'only Google Cloud sees it');
   assert.equal(L('privatelink', 'vpc-0b2b2c3d4e5f60020').usage.state, 'unknown', 'only the consumer side can see PrivateLink, and data-platform has no flow logs');
@@ -480,7 +549,7 @@ test('flow logs from S3: read once, a budget at a time; lines used, not used, no
   assert.equal(L('vpn', 'transit').usage.hourly.length, 24);
   const f = (await db.query(`SELECT control, item_name, title FROM net_findings WHERE status = 'open' AND control IN ('net.link-unused', 'net.open-port-unused') ORDER BY control, title`)).rows;
   assert.ok(f.some((x) => x.control === 'net.link-unused' && /prod-core ↔ vpc-0c9c9c9c9c9c90099/.test(x.title)), JSON.stringify(f));
-  assert.ok(f.some((x) => x.control === 'net.link-unused' && /office-hq/.test(x.title)));
+  assert.ok(!f.some((x) => x.control === 'net.link-unused' && /office-hq|data-platform ↔ hub/.test(x.title)), 'not filed on what prod-core alone cannot see');
   assert.ok(f.some((x) => x.control === 'net.open-port-unused' && /tcp 80 on payments-web/.test(x.title)));
   assert.ok(!f.some((x) => /tcp 22 on bastion/.test(x.title)), 'SSH on the bastion is used');
   const bastion = o.exposures.find((e) => e.id === 'eni-0a100000000bastion');
@@ -504,6 +573,19 @@ test('flow logs from S3: read once, a budget at a time; lines used, not used, no
   assert.equal((await api.networkHours(owner, { day: 99 })).day, LOOKBACK_DAYS - 1, 'no further back than the days kept');
   const dataOnly = { id: null, scope_accounts: [(await db.query(`SELECT id FROM cloud_accounts WHERE account_id = $1`, [DATA])).rows[0].id] };
   assert.ok(!(out.id in (await api.networkHours(dataOnly, { day: 1 })).hours), "a member limited to another account does not see prod-core's way out");
+  // a listing that found nothing new vouches for an idle VPC: covered past its newest file, while the reader is well
+  const flowsMod = await import('../src/network/flows.js'), prodNode = `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`;
+  assert.equal((await db.query('SELECT covers FROM net_flow_reads WHERE flow_log = $1', [DEMO_FLOW_LOG])).rows[0].covers, true);
+  await db.query(`UPDATE net_flow_reads SET front = now() WHERE flow_log = $1`, [DEMO_FLOW_LOG]);
+  const cov = (await flowsMod.loadUsage()).coverage.get(prodNode);
+  assert.ok(new Date(cov.until) > new Date(cov.newest) && Date.now() - new Date(cov.until) < 6e4, JSON.stringify(cov));
+  // the reader stops for a night: the vendor peering's finding (and the decision on it) stays, not resolved and reopened
+  const vendorFinding = async () => (await db.query(`SELECT id, key, status, decision FROM net_findings WHERE control = 'net.link-unused' AND native_id = 'pcx-0a100000000vendor'`)).rows[0];
+  await api.decideNetFinding({ ...owner, id: null }, (await vendorFinding()).id, { decision: 'expected', note: 'disaster recovery standby, idle by design' });
+  await db.query(`UPDATE net_flow_files SET file_time = file_time - interval '10 hours'`); await db.query(`UPDATE net_flow_reads SET front = front - interval '10 hours'`);
+  const stale = await sync.analyzeAndFile();
+  assert.ok(stale.held.includes((await vendorFinding()).key), stale.held.join(' | '));
+  assert.deepEqual([(await vendorFinding()).status, (await vendorFinding()).decision], ['open', 'expected']);
   // a bucket the scanner may not read
   await db.query('DELETE FROM net_flow_files'); await db.query('DELETE FROM net_flow_reads');
   process.env.DEMO_FLOW_DENIED = '1';
@@ -511,6 +593,23 @@ test('flow logs from S3: read once, a budget at a time; lines used, not used, no
   assert.match((await db.query('SELECT error FROM net_flow_reads WHERE flow_log = $1', [DEMO_FLOW_LOG])).rows[0].error, /not allowed to read s3:\/\/acme-flow-logs/);
   const advice = (await workerStatus()).advice.find((a) => /VPC flow log cannot be read/.test(a.title));
   assert.ok(advice?.level === 'warning' && /prod-core/.test(advice.detail), 'Operations says which one, and how to let it be read');
+});
+
+test('networking objects keep when they were first seen, read after read', async () => {
+  const items = demoAwsNetwork(PROD, 'us-east-1').items;
+  const firstSeen = async (type, id) => (await sync.loadItems()).find((i) => i.cloud === 'aws' && i.owner === PROD && i.type === type && i.id === id)?.firstSeen;
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items });
+  const old = await firstSeen('peering', 'pcx-0a100000000vendor');
+  // a peering made since the last read is new now; what was there keeps its date (none, when there before the first read)
+  const added = { ...items.find((i) => i.type === 'peering' && i.id === 'pcx-0a100000000vendor'), id: 'pcx-0a1000000000newer', name: 'newer' };
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items: [...items, added] });
+  assert.ok(Date.now() - new Date(await firstSeen('peering', 'pcx-0a1000000000newer')).getTime() < 60e3);
+  assert.equal(String(await firstSeen('peering', 'pcx-0a100000000vendor')), String(old));
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items: [...items, added] });
+  const again = await firstSeen('peering', 'pcx-0a1000000000newer');
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items: [...items, added] });
+  assert.equal(String(await firstSeen('peering', 'pcx-0a1000000000newer')), String(again), 'kept, not renewed');
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items });
 });
 
 const pad2 = (n) => String(n).padStart(2, '0');

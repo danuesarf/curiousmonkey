@@ -101,6 +101,15 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
   };
   const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, day: 0, playing: false, internet: internet() };
   const hasFlows = d.links.some((l) => l.usage && l.usage.state !== 'unknown');
+  // a line's use in a few words, for its tooltip: which VPCs' flow logs it waits for when it is not known
+  const nodeLabel = (id) => d.nodes.find((n) => n.id === id)?.label || id.split(':').pop();
+  const useTitle = (u) => {
+    const days = Math.floor(u.coveredDays || 0), n = u.unlogged || [];
+    if (u.state === 'used') return `used, ${human(u.bytes)}${days >= 1 ? ` in ${days} day${days > 1 ? 's' : ''} of flow logs` : ' seen in flow logs'}`;
+    if (u.state === 'unused') return `not used in ${days} days of flow logs`;
+    if (u.state === 'quiet') return u.firstSeen ? 'nothing yet (there for less than 3 days)' : 'nothing yet (flow logs read for less than 3 days)';
+    return n.length ? `use not known (${n.slice(0, 2).map(nodeLabel).join(', ')}${n.length > 2 ? ` and ${n.length - 2} more` : ''} ${n.length === 1 ? 'has' : 'have'} no flow logs read)` : 'use not known (no flow logs on either side)';
+  };
   // the lines' traffic by the hour on the day shown: the last 24 hours, or an earlier day, fetched when it is picked
   const days = new Map([[0, { start: new Date(d.hourStart).getTime(), hours: new Map(d.links.map((l) => [l.id, l.usage?.hourly || null])) }]]);
   let byLine = days.get(0).hours;
@@ -166,7 +175,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
         svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(on ? w + 1.8 : w), 'stroke-dasharray': dash, opacity: op, 'stroke-linecap': 'round' }),
         hourBytes > 0 && svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(w + 3), opacity: 0.35, filter: 'url(#ns-glow)' }),
         svg('path', { d: g.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 14, class: 'ns-hit', onClick: () => pick(l.id) },
-          svg('title', null, `${l.kind}${l.name ? ` · ${l.name}` : ''} · ${u.state === 'used' ? `used, ${human(u.bytes)} in ${Math.max(1, Math.floor(u.coveredDays || 0))} day${Math.floor(u.coveredDays || 0) > 1 ? 's' : ''} of flow logs` : u.state === 'unused' ? `not used in ${Math.floor(u.coveredDays)} days of flow logs` : u.state === 'quiet' ? 'nothing yet (flow logs read for less than 3 days)' : 'use not known (no flow logs on either side)'}`))));
+          svg('title', null, `${l.kind}${l.name ? ` · ${l.name}` : ''} · ${useTitle(u)}`))));
       if (u.state === 'unused' && (on || !cur)) { const m = g.pts[12]; out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 32), y: f(m[1] - 9), width: 64, height: 16, rx: 2, fill: '#030d08', stroke: IDLE }), svg('text', { x: f(m[0]), y: f(m[1] + 3), 'text-anchor': 'middle', class: 'ns-tag-t', fill: '#a9bfb2' }, 'NOT USED'))); }
       if (l.kind === 'vpn' && l.tunnels?.length && (l.up ?? 0) < l.tunnels.length) { const m = g.pts[12]; const dy = u.state === 'unused' && (on || !cur) ? 18 : 0;
         // on the line it is about (above or below it, it lands on a ring or a zone's name), under NOT USED when both
