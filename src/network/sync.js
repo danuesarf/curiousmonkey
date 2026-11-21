@@ -106,6 +106,8 @@ export async function readAwsNetwork(account, { gw } = {}) {
 /** Read a Google Cloud connection's projects' networking, one project at a time. */
 export async function readGcpNetwork(conn, { gw = gcpGateway(conn) } = {}) {
   const projects = (await query('SELECT project_id FROM gcp_projects WHERE connection_id = $1 ORDER BY project_id', [conn.id])).rows.map((r) => r.project_id);
+  // a project no longer in this connection (taken out, or deleted in Google Cloud): its networking goes with it
+  await query(`DELETE FROM net_items WHERE cloud = 'gcp' AND gcp_connection_id = $1 AND NOT (owner = ANY($2))`, [conn.id, projects]);
   const out = { projects: 0, items: 0, errors: 0 };
   for (const p of projects) {
     try {
@@ -119,6 +121,18 @@ export async function readGcpNetwork(conn, { gw = gcpGateway(conn) } = {}) {
     }
   }
   return out;
+}
+
+/**
+ * Forget owners that are gone: the networking of Google Cloud projects no longer in any connection, and when each AWS
+ * account or project no longer connected was read (an AWS account's networking is deleted with the account; a project
+ * that moved to another connection leaves this one's when it is read). → how many owners were forgotten.
+ */
+export async function forgetGone() {
+  const items = (await query(`DELETE FROM net_items i WHERE i.cloud = 'gcp' AND NOT EXISTS (SELECT 1 FROM gcp_projects p WHERE p.project_id = i.owner) RETURNING owner`).catch(() => ({ rows: [] }))).rows;
+  const reads = (await query(`DELETE FROM net_reads r WHERE (r.cloud = 'aws' AND NOT EXISTS (SELECT 1 FROM cloud_accounts a WHERE a.account_id = r.owner))
+    OR (r.cloud = 'gcp' AND NOT EXISTS (SELECT 1 FROM gcp_projects p WHERE p.project_id = r.owner)) RETURNING owner`).catch(() => ({ rows: [] }))).rows;
+  return new Set([...items, ...reads].map((r) => r.owner)).size;
 }
 
 /** Ask for a fresh read of everything (after the extension is turned on, or "Read now"). */
@@ -149,6 +163,8 @@ export async function networkTick({ log = () => {}, awsGw = null, gcpGw = null }
     if (!(await client.query('SELECT pg_try_advisory_lock($1) AS ok', [LOCK])).rows[0].ok) return null;
     try {
       const now = (await query(`SELECT settings->>'readNow' AS now FROM extensions WHERE key = 'networking'`)).rows[0]?.now || null;
+      // an account or project that is gone: its networking was deleted with it, and so is when it was read
+      const gone = await forgetGone();
       const stale = `(SELECT read_at FROM net_reads r WHERE r.cloud = $1 AND r.owner = $2) IS NULL OR (SELECT read_at FROM net_reads r WHERE r.cloud = $1 AND r.owner = $2) < now() - make_interval(hours => ${EVERY_HOURS})`;
       const accounts = (await query(`SELECT * FROM cloud_accounts WHERE status <> 'planned' ORDER BY name`)).rows;
       const out = { aws: 0, gcp: 0, errors: 0 };
@@ -172,7 +188,7 @@ export async function networkTick({ log = () => {}, awsGw = null, gcpGw = null }
       const sig = [...(policy.over || new Map())].filter(([id]) => id.startsWith('net.')).map(([id, o]) => `${id}:${o.severity}:${o.enabled}`).sort().join('|');
       const was = (await query(`SELECT settings->>'policySig' AS s FROM extensions WHERE key = 'networking'`)).rows[0]?.s ?? '';
       if (sig !== was) await query(`UPDATE extensions SET settings = settings || jsonb_build_object('policySig', $1::text) WHERE key = 'networking'`, [sig]);
-      if (!out.aws && !out.gcp && !now && sig === was) return null;
+      if (!out.aws && !out.gcp && !now && sig === was && !gone) return null;
       const r = await analyzeAndFile();
       const res = { ...out, findings: r.findings.length, exposures: r.exposures.filter((e) => e.ports.length).length };
       log('info', 'networking read', res);

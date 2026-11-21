@@ -104,11 +104,13 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
   // a line's use in a few words, for its tooltip: which VPCs' flow logs it waits for when it is not known
   const nodeLabel = (id) => d.nodes.find((n) => n.id === id)?.label || id.split(':').pop();
   const useTitle = (u) => {
-    const days = Math.floor(u.coveredDays || 0), n = u.unlogged || [];
+    const days = Math.floor(u.coveredDays || 0), n = [...(u.unlogged || []), ...Array(u.unloggedHidden || 0).fill(null)];
     if (u.state === 'used') return `used, ${human(u.bytes)}${days >= 1 ? ` in ${days} day${days > 1 ? 's' : ''} of flow logs` : ' seen in flow logs'}`;
     if (u.state === 'unused') return `not used in ${days} days of flow logs`;
     if (u.state === 'quiet') return u.firstSeen ? 'nothing yet (there for less than 3 days)' : 'nothing yet (flow logs read for less than 3 days)';
-    return n.length ? `use not known (${n.slice(0, 2).map(nodeLabel).join(', ')}${n.length > 2 ? ` and ${n.length - 2} more` : ''} ${n.length === 1 ? 'has' : 'have'} no flow logs read)` : 'use not known (no flow logs on either side)';
+    // VPCs in accounts this person cannot see are counted, not named (they come last)
+    const named = n.filter(Boolean);
+    return n.length ? `use not known (${named.length ? named.slice(0, 2).map(nodeLabel).join(', ') : `${n.length} VPC${n.length > 1 ? 's' : ''} you cannot see`}${named.length && n.length > Math.min(2, named.length) ? ` and ${n.length - Math.min(2, named.length)} more` : ''} ${n.length === 1 ? 'has' : 'have'} no flow logs read)` : 'use not known (no flow logs on either side)';
   };
   // the lines' traffic by the hour on the day shown: the last 24 hours, or an earlier day, fetched when it is picked
   const days = new Map([[0, { start: new Date(d.hourStart).getTime(), hours: new Map(d.links.map((l) => [l.id, l.usage?.hourly || null])) }]]);

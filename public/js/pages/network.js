@@ -234,12 +234,16 @@ export async function networkPage(ctx) {
   // which VPCs' flow logs would tell what a line carries, and why they do not: a line on a transit gateway's VPN or
   // Direct Connect carries any VPC behind it, so each of those has to be read
   function unread(l) {
-    const missing = l.usage?.unlogged || []; if (!missing.length) return '';
-    const name = (id) => d.nodes.find((n) => n.id === id)?.label || id.split(':').pop();
+    const missing = l.usage?.unlogged || [], hidden = l.usage?.unloggedHidden || 0; if (!missing.length && !hidden) return '';
+    const node = (id) => d.nodes.find((n) => n.id === id), name = (id) => node(id)?.label || id.split(':').pop();
     const list = (ids) => (ids.length <= 3 ? ids.map(name).join(', ') : `${ids.slice(0, 3).map(name).join(', ')} and ${ids.length - 3} more`);
-    const none = missing.filter((id) => !(d.flowLogs || []).some((x) => x.vpcNode === id)), some = missing.filter((id) => !none.includes(id));
+    // a VPC in an account that is not connected: whether it has flow logs is not known
+    const away = missing.filter((id) => node(id)?.stub && !node(id)?.read), here = missing.filter((id) => !away.includes(id));
+    const none = here.filter((id) => !(d.flowLogs || []).some((x) => x.vpcNode === id)), some = here.filter((id) => !none.includes(id));
     const hub = [l.from, l.to].find((id) => /^aws:(tgw|dxgw):/.test(id)), behind = hub && l.kind !== 'tgw' ? `Any VPC behind ${name(hub)} can use it. ` : '';
-    return ` ${behind}${none.length ? `${list(none)} ${none.length === 1 ? 'has' : 'have'} no VPC flow logs.` : ''}${notKnown(some)}`;
+    return ` ${behind}${none.length ? `${list(none)} ${none.length === 1 ? 'has' : 'have'} no VPC flow logs.` : ''}`
+      + `${away.length ? ` ${list(away)} ${away.length === 1 ? 'is' : 'are'} in an account that is not connected, so ${away.length === 1 ? 'its' : 'their'} flow logs are not read.` : ''}`
+      + `${hidden ? ` ${hidden === 1 ? '1 VPC it depends on is in an account' : `${hidden} VPCs it depends on are in accounts`} you cannot see.` : ''}${notKnown(some)}`;
   }
   // why the flow logs of a line's VPCs say nothing yet: the first of them that has a flow log, in a sentence
   function notKnown(ends) {
