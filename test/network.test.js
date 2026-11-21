@@ -13,8 +13,8 @@ const { normalizeGcpProject } = await import('../src/network/gcpReader.js');
 const { demoAwsNetwork, demoGcpNormalized } = await import('../src/network/demo.js');
 const { scannerPolicy } = await import('../src/onboarding.js');
 const { gcpSnippets } = await import('../src/gcp/onboarding.js');
-const { flowRouter, aggregate, parseFlowText, s3Dest, fileTime, dayPrefix } = await import('../src/network/flows.js');
-const { demoFlowKeys, demoFlowFile, DEMO_SHARED_VPC, DEMO_SHARED_WITH, DEMO_GCP_SERVICE_IDLE } = await import('../src/network/demo.js');
+const { flowRouter, aggregate, parseFlowText, s3Dest, fileTime, dayPrefix, folderOf, fileStem, planFlowLogs, countFlowFile, foldPorts, openPorts, flowState, LOOKBACK_DAYS } = await import('../src/network/flows.js');
+const { demoFlowKeys, demoFlowFile, DEMO_SHARED_VPC, DEMO_SHARED_WITH, DEMO_GCP_SERVICE_IDLE, DEMO_FLOW_LOG, DEMO_FLOW_LOG_REJECTS } = await import('../src/network/demo.js');
 const zlib = await import('node:zlib');
 const PROD = '111111111111', DATA = '222222222222';
 const PROJECTS = ['acme-shared-ci', 'acme-data-stg', 'acme-payments-prod'];
@@ -232,6 +232,104 @@ test('the scanner policy reads flow log files and nothing else', () => {
   assert.ok(!scannerPolicy({}).Statement.some((x) => x.Sid === 'ReadFlowLogFiles'));
 });
 
+test('flow log folders: a day or an hour, plain or Hive-style; a flow log lists only its own files', () => {
+  const t = Date.UTC(2026, 2, 4, 7, 30), base = { prefix: 'vpc', account: PROD, region: 'ap-southeast-3' };
+  assert.deepEqual(folderOf(base, t), { prefix: `vpc/AWSLogs/${PROD}/vpcflowlogs/ap-southeast-3/2026/03/04/`, start: Date.UTC(2026, 2, 4), end: Date.UTC(2026, 2, 5) });
+  assert.equal(folderOf({ ...base, perHour: true }, t).prefix, `vpc/AWSLogs/${PROD}/vpcflowlogs/ap-southeast-3/2026/03/04/07/`);
+  assert.equal(folderOf({ ...base, perHour: true }, t).end - folderOf({ ...base, perHour: true }, t).start, 36e5);
+  assert.equal(folderOf({ ...base, hive: true, perHour: true }, t).prefix, `vpc/AWSLogs/aws-account-id=${PROD}/aws-service=vpcflowlogs/aws-region=ap-southeast-3/year=2026/month=03/day=04/hour=07/`);
+  assert.equal(fileStem(base, 'fl-0123'), `${PROD}_vpcflowlogs_ap-southeast-3_fl-0123_`);
+  // the demo bucket answers a folder and the start of a file name, after a key, as S3 does
+  const day = dayPrefix({ prefix: '', account: PROD, region: 'us-east-1' }, Date.now() - 2 * 864e5), all = demoFlowKeys({ bucket: 'acme-flow-logs', prefix: day });
+  const mine = demoFlowKeys({ bucket: 'acme-flow-logs', prefix: day + fileStem({ account: PROD, region: 'us-east-1' }, DEMO_FLOW_LOG) });
+  assert.equal(mine.length, 24); assert.deepEqual(mine, all);
+  assert.deepEqual(demoFlowKeys({ bucket: 'acme-flow-logs', prefix: day + fileStem({ account: PROD, region: 'us-east-1' }, 'fl-other') }), []);
+  assert.deepEqual(demoFlowKeys({ bucket: 'acme-flow-logs', prefix: day, startAfter: all[20].key }).map((k) => k.key), all.slice(21).map((k) => k.key));
+});
+
+test('which flow logs are read: one per VPC and kind of traffic, a VPC\'s own first; what cannot show a line unused says so', () => {
+  const fl = (id, resource, data = {}, extra = {}) => ({ cloud: 'aws', type: 'flow-log', id, owner: PROD, region: 'us-east-1', vpc: /^vpc-/.test(resource) ? resource : null, ...extra,
+    data: { resource, status: 'ACTIVE', traffic: 'ALL', destination: 's3', arn: 'arn:aws:s3:::acme-flow-logs', fileFormat: 'plain-text', ...data } });
+  const items = [{ cloud: 'aws', type: 'subnet', id: 'subnet-1', owner: PROD, vpc: 'vpc-a', data: {} }, { cloud: 'aws', type: 'subnet', id: 'subnet-2', owner: PROD, vpc: 'vpc-c', data: {} }];
+  const fls = [
+    fl('fl-1', 'vpc-a', {}, {}), fl('fl-2', 'vpc-a', { traffic: 'ACCEPT' }), fl('fl-3', 'vpc-a', { traffic: 'REJECT', arn: 'arn:aws:s3:::acme-security/vpc' }),
+    fl('fl-4', 'vpc-b', { traffic: 'ACCEPT' }), fl('fl-5', 'vpc-b', { traffic: 'REJECT' }),
+    fl('fl-6', 'subnet-1'), fl('fl-7', 'subnet-2'), fl('fl-8', 'tgw-0a1'),
+    fl('fl-9', 'vpc-d', { destination: 'cloud-watch-logs', arn: 'arn:aws:logs:us-east-1:111111111111:log-group:vpc' }), fl('fl-10', 'vpc-d', { fileFormat: 'parquet' }),
+    fl('fl-11', 'vpc-e', { format: '${version} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${bytes} ${start} ${action}' }),
+    fl('fl-13', 'vpc-f', { created: '2025-05-01T00:00:00Z' }), fl('fl-12', 'vpc-f', { created: '2025-01-01T00:00:00Z', deliverStatus: 'FAILED', deliverError: 'Access error' }),
+  ];
+  const plan = planFlowLogs(fls, items);
+  const read = Object.fromEntries(plan.read.map((x) => [x.fl.id, x])), skip = Object.fromEntries(plan.skip.map((x) => [x.fl.id, x.note]));
+  assert.deepEqual(Object.keys(read).sort(), ['fl-1', 'fl-12', 'fl-4', 'fl-5', 'fl-7']);
+  assert.match(skip['fl-2'], /fl-1 already logs this VPC's traffic/); assert.match(skip['fl-3'], /count it twice/);
+  assert.match(skip['fl-6'], /fl-1 already logs this subnet's traffic/, "the VPC's flow log has the subnet's records");
+  assert.deepEqual([read['fl-1'].covers, read['fl-4'].covers, read['fl-5'].covers, read['fl-7'].covers], [true, true, false, false]);
+  assert.match(read['fl-5'].info, /rejected traffic only/); assert.match(read['fl-7'].info, /subnet flow log/);
+  assert.equal(read['fl-7'].vpcNode, `aws:vpc:${PROD}:vpc-c`);
+  assert.match(skip['fl-8'], /transit gateway flow log/); assert.match(skip['fl-9'], /CloudWatch Logs/); assert.match(skip['fl-10'], /Parquet/);
+  assert.match(skip['fl-11'], /leaves out interface-id/);
+  assert.match(read['fl-12'].info, /AWS says delivery fails: Access error/, 'the oldest of two alike is read');
+  // one being read stays read; one that fails gives way to one that does not
+  const working = new Map([['fl-13', { front: new Date(), status: 'read' }]]);
+  assert.ok(planFlowLogs(fls, items, working).read.some((x) => x.fl.id === 'fl-13'));
+  const failing = new Map([['fl-1', { error: 'AccessDenied', status: 'read' }]]);
+  const p2 = planFlowLogs(fls, items, failing);
+  assert.deepEqual(p2.read.filter((x) => x.vpcNode === `aws:vpc:${PROD}:vpc-a`).map((x) => x.fl.id).sort(), ['fl-2', 'fl-3'], 'accepted and rejected apart, while fl-1 cannot be read');
+});
+
+test('flow log files are counted as they stream; refused ports and long port tails fold together', async () => {
+  const items = demoItems(), a = analyzeNetwork(items, estate), route = flowRouter(items, a.graph);
+  const key = demoFlowKeys({ bucket: 'acme-flow-logs', prefix: dayPrefix({ prefix: '', account: PROD, region: 'us-east-1' }, Date.now() - 864e5) })[5].key, buf = demoFlowFile(key);
+  const streamed = { links: new Map(), exposure: new Map() };
+  const r = await countFlowFile(buf, route, streamed);
+  const whole = aggregate([...parseFlowText(zlib.gunzipSync(buf).toString())], route);
+  assert.equal(r.records, [...parseFlowText(zlib.gunzipSync(buf).toString())].length);
+  assert.deepEqual([...streamed.links.keys()].sort(), [...whole.links.keys()].sort());
+  assert.deepEqual([...streamed.links.values()].map((x) => x.bytes).sort(), [...whole.links.values()].map((x) => x.bytes).sort());
+  // refused traffic is one row per line, not per port
+  assert.ok([...streamed.links.values()].filter((x) => x.action === 'REJECT').every((x) => x.port === 0));
+  // a file in a format that leaves out what puts a record on a line counts nothing
+  const odd = zlib.gzipSync('version srcaddr dstaddr srcport dstport protocol packets start end action log-status\n2 10.0.0.1 10.0.0.2 1 22 6 1 0 60 ACCEPT OK\n');
+  assert.deepEqual(await countFlowFile(odd, route, { links: new Map(), exposure: new Map() }), { records: 0, missing: ['interface-id', 'bytes'] });
+  await assert.rejects(countFlowFile(buf.subarray(0, Math.floor(buf.length / 2)), route, { links: new Map(), exposure: new Map() }), 'a cut-off file says so (the reader passes it over, its part dropped)');
+  // a big file streams through in chunks: 60,000 records, the same totals as reading it whole
+  const head = 'version account-id interface-id srcaddr dstaddr srcport dstport protocol packets bytes start end action log-status';
+  const lines = Array.from({ length: 60000 }, (_, i) => `2 ${PROD} eni-0a100000000bastion 192.0.2.${i % 200} 10.10.0.20 ${40000 + (i % 999)} 22 6 3 ${100 + (i % 7)} ${1700000000 + i} ${1700000060 + i} ACCEPT OK`);
+  const bigBuf = zlib.gzipSync(`${head}\n${lines.join('\n')}\n`), big = { links: new Map(), exposure: new Map() };
+  assert.equal((await countFlowFile(bigBuf, route, big)).records, 60000);
+  assert.equal([...big.exposure.values()].reduce((n, x) => n + x.records, 0), 60000);
+  assert.equal([...big.exposure.values()].reduce((n, x) => n + x.bytes, 0), lines.reduce((n, l) => n + Number(l.split(' ')[9]), 0));
+
+  // the internet on a public target: ports open to it and admin or database ports apart, the rest are "other ports"
+  const open = openPorts(a.exposures), bastion = 'eni-0a100000000bastion';
+  assert.deepEqual(open.get(bastion), [{ proto: 'tcp', ranges: [[22, 22]] }]);
+  const rec = (port, action) => ({ 'interface-id': bastion, srcaddr: '203.0.113.9', dstaddr: '10.10.0.20', srcport: '51000', dstport: String(port), protocol: '6', bytes: '60', packets: '1', start: '1700000000', action });
+  const ex = aggregate([rec(22, 'ACCEPT'), rec(8443, 'REJECT'), rec(8444, 'REJECT'), rec(3389, 'REJECT'), rec(9443, 'ACCEPT')], route, undefined, { open });
+  assert.deepEqual([...ex.exposure.values()].map((x) => `${x.port}:${x.action}:${x.records}`).sort(), ['0:ACCEPT:1', '0:REJECT:2', '22:ACCEPT:1', '3389:REJECT:1']);
+  // past 40 ports on one line in an hour, the quietest fold into port 0
+  const rows = new Map(Array.from({ length: 50 }, (_, i) => [`k${i}`, { hour: 0, link: 'l', side: 's', dir: 'out', port: 1000 + i, proto: 'udp', action: 'ACCEPT', bytes: 100 + i, packets: 1, records: 1 }]));
+  const folded = [...foldPorts(rows).values()];
+  assert.equal(folded.length, 41);
+  assert.deepEqual(folded.find((x) => x.port === 0), { hour: 0, link: 'l', side: 's', dir: 'out', port: 0, proto: 'udp', action: 'ACCEPT', bytes: 100 * 10 + 45, packets: 10, records: 10 });
+  assert.ok(folded.some((x) => x.port === 1049) && !folded.some((x) => x.port === 1000));
+});
+
+test("a flow log's reading state, as the page says it", () => {
+  const now = Date.UTC(2026, 4, 10, 12), fl = { data: {} }, h = 36e5;
+  assert.equal(flowState(fl, null, now).state, 'waiting');
+  assert.equal(flowState(fl, { status: 'skipped', note: 'not read: fl-1 already logs it', error: 'old' }, now).error, null);
+  assert.equal(flowState(fl, { status: 'read', error: 'AccessDenied' }, now).state, 'error');
+  const reading = flowState(fl, { status: 'read', front: new Date(now), back: new Date(now - 2 * 864e5), pending: 0, last_time: new Date(now - 5 * 6e4) }, now);
+  assert.deepEqual([reading.state, reading.historyDays], ['catching-up', 2]);
+  const done = flowState(fl, { status: 'read', front: new Date(now), back: new Date(now - LOOKBACK_DAYS * 864e5 - h), pending: 0 }, now);
+  assert.deepEqual([done.state, done.historyDays], ['current', LOOKBACK_DAYS]);
+  assert.equal(flowState(fl, { status: 'read', front: new Date(now), back: new Date(now - 9 * 864e5), pending: 3 }, now).state, 'catching-up', 'new files still to read');
+  // a flow log turned on two days ago has two days of history to read, no more
+  const young = flowState({ data: { created: new Date(now - 2 * 864e5).toISOString() } }, { status: 'read', front: new Date(now), back: new Date(now - 2 * 864e5 - h), pending: 0 }, now);
+  assert.deepEqual([young.state, young.historyDays], ['current', 2]);
+});
+
 // ---------------------------------------------------------------- with the database
 let pg, db, ext, sync, api, gscan;
 const owner = { id: null, scope_accounts: null };
@@ -353,11 +451,20 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
 
 test('flow logs from S3: read once, a budget at a time; lines used, not used, not known; ports nobody uses', async () => {
   const flows = await import('../src/network/flows.js');
-  const r = await flows.flowTick();
+  const r = await flows.flowTick({ worker: 'wk-test-1' });
   assert.ok(r.files >= 7 * 24 && r.errors === 0, JSON.stringify(r));
-  assert.equal((await flows.flowTick())?.files || 0, 0, 'every file is read once');
+  assert.ok(r.lists <= LOOKBACK_DAYS + 2, `a folder a day, its own files only: ${r.lists} listings`);
+  assert.equal(await flows.flowTick({ worker: 'wk-test-2' }), null, 'every file is read once, and nothing is listed again within 5 minutes');
+  // each step is noted with the worker that ran it; the last one that read something is kept apart
+  const step = await flows.flowStep();
+  assert.deepEqual([step.last.worker.id, step.last.result.files, step.last.work.files, step.last.runs], ['wk-test-2', 0, r.files, 2]);
   const reads = (await db.query('SELECT * FROM net_flow_reads')).rows;
-  assert.equal(reads.find((x) => x.flow_log === 'fl-0a10000000000001').bucket, 'acme-flow-logs');
+  const main = reads.find((x) => x.flow_log === DEMO_FLOW_LOG), rejects = reads.find((x) => x.flow_log === DEMO_FLOW_LOG_REJECTS);
+  assert.equal(main.bucket, 'acme-flow-logs');
+  assert.ok(new Date(main.back).getTime() <= Date.now() - LOOKBACK_DAYS * 864e5 + 6e4 && main.status === 'read' && !main.pending, 'the whole lookback is read');
+  assert.equal(rejects.status, 'skipped', 'the refusals-only flow log on the same VPC: its records are in the other');
+  assert.match(rejects.note, new RegExp(`${DEMO_FLOW_LOG} already logs this VPC's traffic`));
+  assert.equal((await db.query(`SELECT count(*)::int AS n FROM net_flow_hourly WHERE action = 'REJECT' AND port <> 0`)).rows[0].n, 0, 'refusals by line, not by port');
   await sync.analyzeAndFile();
   (await import('../src/cache.js')).clearCache();
   const o = await api.networkOverview(owner);
@@ -378,11 +485,83 @@ test('flow logs from S3: read once, a budget at a time; lines used, not used, no
   assert.ok(!f.some((x) => /tcp 22 on bastion/.test(x.title)), 'SSH on the bastion is used');
   const bastion = o.exposures.find((e) => e.id === 'eni-0a100000000bastion');
   assert.ok(bastion.ports[0].seen.accepted > 0 && bastion.reached[0].port === 22);
+  // the page: every flow log and how far it is read, what is kept, an earlier day to replay
+  assert.deepEqual(o.flowLogs.map((x) => `${x.flowLog}:${x.state}`), [`${DEMO_FLOW_LOG}:current`, `${DEMO_FLOW_LOG_REJECTS}:skipped`]);
+  assert.equal(o.flowLogs[0].historyDays, LOOKBACK_DAYS);
+  assert.ok(o.flow.storedBytes > 0 && o.flow.lookbackDays === LOOKBACK_DAYS && o.flow.keepDays === LOOKBACK_DAYS + 1);
+  assert.equal(o.flow.step.last.worker.id, 'wk-test-2', 'the page says which worker reads them');
+  // Operations → Workers: the reader, its last step, each flow log by state
+  const { workerStatus } = await import('../src/workerStatus.js');
+  const ops = (await workerStatus()).flow;
+  assert.deepEqual([ops.last.worker.id, ops.counts.current, ops.counts.skipped, ops.flowLogs.find((x) => x.flowLog === DEMO_FLOW_LOG).vpc], ['wk-test-2', 1, 1, 'prod-core']);
+  assert.ok(ops.settings.stepFiles > 0 && ops.settings.lookbackDays === LOOKBACK_DAYS);
+  const vpcPanel = await api.networkDetail(owner, `aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`);
+  assert.deepEqual(vpcPanel.flowLogList.map((x) => x.state), ['current', 'skipped']);
+  const out = o.links.find((l) => l.kind === 'internet' && [l.from, l.to].includes(`aws:vpc:${PROD}:vpc-0a1b2c3d4e5f60010`));
+  const today = await api.networkHours(owner, { day: 0 }), yesterday = await api.networkHours(owner, { day: 1 });
+  assert.equal(new Date(yesterday.hourStart).getTime(), new Date(o.hourStart).getTime() - 864e5);
+  assert.ok(today.hours[out.id].some((b) => b.bytes > 0) && yesterday.hours[out.id].length === 24 && yesterday.hours[out.id].some((b) => b.bytes > 0));
+  assert.equal((await api.networkHours(owner, { day: 99 })).day, LOOKBACK_DAYS - 1, 'no further back than the days kept');
+  const dataOnly = { id: null, scope_accounts: [(await db.query(`SELECT id FROM cloud_accounts WHERE account_id = $1`, [DATA])).rows[0].id] };
+  assert.ok(!(out.id in (await api.networkHours(dataOnly, { day: 1 })).hours), "a member limited to another account does not see prod-core's way out");
   // a bucket the scanner may not read
   await db.query('DELETE FROM net_flow_files'); await db.query('DELETE FROM net_flow_reads');
   process.env.DEMO_FLOW_DENIED = '1';
   try { const x = await flows.flowTick(); assert.equal(x.errors, 1); } finally { delete process.env.DEMO_FLOW_DENIED; }
-  assert.match((await db.query('SELECT error FROM net_flow_reads')).rows[0].error, /not allowed to read s3:\/\/acme-flow-logs/);
+  assert.match((await db.query('SELECT error FROM net_flow_reads WHERE flow_log = $1', [DEMO_FLOW_LOG])).rows[0].error, /not allowed to read s3:\/\/acme-flow-logs/);
+  const advice = (await workerStatus()).advice.find((a) => /VPC flow log cannot be read/.test(a.title));
+  assert.ok(advice?.level === 'warning' && /prod-core/.test(advice.detail), 'Operations says which one, and how to let it be read');
+});
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const stampOf = (t) => { const d = new Date(t); return `${d.getUTCFullYear()}${pad2(d.getUTCMonth() + 1)}${pad2(d.getUTCDate())}T${pad2(d.getUTCHours())}${pad2(d.getUTCMinutes())}Z`; };
+const emptyFlows = async () => { for (const t of ['net_flow_files', 'net_flow_reads', 'net_flow_hourly', 'net_flow_exposure']) await db.query(`DELETE FROM ${t}`); };
+
+test('flow logs are listed as AWS delivers them: history a folder at a time, then only what is new', async () => {
+  const flows = await import('../src/network/flows.js');
+  await emptyFlows();
+  const calls = [];
+  let now = Math.floor(Date.now() / 864e5) * 864e5 - 864e5 + 12.5 * 36e5;   // yesterday, 12:30 UTC
+  const gw = { async listFlowLogObjects(q) { calls.push(q); return demoFlowKeys({ ...q, now }); }, async getFlowLogObject({ key }) { return demoFlowFile(key); } };
+  const tick = (at) => { now = at; calls.length = 0; return flows.flowTick({ gwFor: () => gw, now: at }); };
+  const t0 = now, stem = `${PROD}_vpcflowlogs_us-east-1_${DEMO_FLOW_LOG}_`;
+  const r = await tick(t0);
+  assert.equal(r.files, 7 * 24, 'every file of the lookback');
+  assert.equal(calls.length, LOOKBACK_DAYS + 1, "the newest day's folder, then one listing a day of history");
+  assert.ok(calls.every((q) => q.prefix.endsWith(`/${stem}`) && !q.startAfter), 'its own files only');
+  assert.equal(await tick(t0 + 6e4), null); assert.equal(calls.length, 0, 'not listed again within 5 minutes');
+  const r3 = await tick(t0 + 66 * 6e4);
+  assert.deepEqual([r3.files, calls.length], [1, 1], 'the one file delivered since, in one listing');
+  assert.equal(calls[0].startAfter, `${calls[0].prefix}${stampOf(t0 - 2 * 36e5).slice(0, -1)}`, 'from two hours before where it got to');
+});
+
+test('per-hour Hive folders: listed an hour at a time; a short budget goes on where it stopped', async () => {
+  const flows = await import('../src/network/flows.js');
+  await emptyFlows();
+  const items = demoAwsNetwork(PROD, 'us-east-1').items.map((i) => (i.type === 'flow-log' && i.id === DEMO_FLOW_LOG ? { ...i, data: { ...i.data, hive: true, perHour: true } } : i));
+  await sync.saveNetwork({ cloud: 'aws', owner: PROD, items });
+  const calls = [], now = Math.floor(Date.now() / 36e5) * 36e5 - 864e5 + 30 * 6e4;   // yesterday, half past an hour
+  // two files an hour, at 5 and 35 minutes past
+  const keys = (q) => {
+    const m = q.prefix.match(/year=(\d{4})\/month=(\d{2})\/day=(\d{2})\/hour=(\d{2})\/[^/]*$/); if (!m) return [];
+    return [5, 35].map((min) => Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], min)).filter((t) => t <= now).map((t) => ({ key: `${q.prefix}${stampOf(t)}_0abc.log.gz`, size: 1024 }));
+  };
+  const gw = { async listFlowLogObjects(q) { calls.push(q); return keys(q).filter((k) => !q.startAfter || k.key > q.startAfter); }, async getFlowLogObject({ key }) { return demoFlowFile(key); } };
+  try {
+    const r1 = await flows.flowTick({ gwFor: () => gw, now });
+    const hourly = new RegExp(`^AWSLogs/aws-account-id=${PROD}/aws-service=vpcflowlogs/aws-region=us-east-1/year=\\d{4}/month=\\d{2}/day=\\d{2}/hour=\\d{2}/${PROD}_vpcflowlogs_us-east-1_${DEMO_FLOW_LOG}_$`);
+    assert.ok(calls.every((q) => hourly.test(q.prefix)), calls[0]?.prefix);
+    assert.equal(r1.files, 300, 'two files an hour for the lookback is more than one step reads');
+    const back = new Date((await db.query('SELECT back FROM net_flow_reads WHERE flow_log = $1', [DEMO_FLOW_LOG])).rows[0].back).getTime();
+    assert.ok(back > now - LOOKBACK_DAYS * 864e5, 'history part read');
+    calls.length = 0;
+    const r2 = await flows.flowTick({ gwFor: () => gw, now: now + 6e4 });
+    assert.equal(r1.files + r2.files, 2 * 24 * LOOKBACK_DAYS, 'the rest, and nothing twice');
+    assert.ok(calls.length <= 20 && calls.every((q) => !q.startAfter), `on from where it stopped: ${calls.length} listings`);
+  } finally {
+    await sync.saveNetwork({ cloud: 'aws', owner: PROD, items: demoAwsNetwork(PROD, 'us-east-1').items });
+    await emptyFlows();
+  }
 });
 
 test('a read that is refused is kept apart; a finding that goes away is resolved; turning it off stops reads', async () => {

@@ -11,7 +11,7 @@
 //   Findings:  open ports, default networks, flow logs, outsiders, tunnels down, lines not used; reviewers mark them.
 //   Inventory: everything read, searchable.
 // Each tab keeps its own search, so a search on one never hides things on another.
-import { h, svg, get, post, api, ago, num, toast, busy, syncUrl, tile, searchBox, loadEnvironments, envs, copy, poll } from '../lib.js';
+import { h, svg, get, post, api, ago, num, toast, busy, syncUrl, tile, searchBox, loadEnvironments, envs, copy, poll, fmtDay } from '../lib.js';
 import { session } from '../main.js';
 import { networkScene } from './netSpace.js';
 
@@ -26,6 +26,14 @@ const KIND = { vpc: 'VPC', slice: 'SHARED VPC', network: 'NETWORK', tgw: 'TRANSI
 const PEER = { dx: 'DIRECT CONNECT', 'client-vpn': 'CLIENT VPN', account: 'ACCOUNT', psc: 'PSC SERVICE' };
 const USE = { used: ['used', 'b-green'], unused: ['not used', 'b-neutral'], quiet: ['quiet so far', 'b-neutral'], unknown: ['not known', 'b-neutral'] };
 const human = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1e3 ? `${Math.round(b / 1e3)} kB` : `${b} B`);
+// a port a line carried; 0 for TCP or UDP is the rest, folded together as they were read
+const portName = (p) => (p.port ? `${p.proto} ${p.port}` : ['tcp', 'udp'].includes(p.proto) ? `${p.proto} other ports` : p.proto);
+// a flow log's reading state (src/network/flows.js flowState)
+const FLOW = { current: ['read', 'b-green'], 'catching-up': ['reading history', 'b-medium'], waiting: ['not read yet', 'b-neutral'], error: ['cannot be read', 'b-high'], skipped: ['not read', 'b-neutral'] };
+const flowSays = (x) => (x.state === 'error' ? x.error : x.state === 'skipped' ? x.note : x.state === 'waiting' ? 'waiting for its first read, within a few minutes'
+  : `${x.lastTime ? `newest file ${ago(x.lastTime)}` : 'no files yet'} · ${x.state === 'catching-up' ? `reading history: back to ${fmtDay(x.back)} (${x.historyDays} days)${x.pending ? ` · ${num(x.pending)} new files to read` : ''}` : `${x.historyDays} days read`}${x.note ? ` · ${x.note}` : ''}`);
+const flowDest = (x) => `${x.destination === 's3' && x.arn ? x.arn.replace(/^arn:aws[a-z-]*:s3:::/, 's3://') : { 'cloud-watch-logs': 'CloudWatch Logs', 'kinesis-data-firehose': 'Firehose' }[x.destination] || x.destination || ''}${{ ACCEPT: ' · accepted traffic only', REJECT: ' · rejected traffic only' }[x.traffic] || ''}`;
+const flowWhere = (x) => `${x.flowLog} → ${flowDest(x)}`;
 const CLOUD = { aws: 'AWS', gcp: 'Google Cloud' };
 const TYPE_LABEL = { vpc: 'VPCs', subnet: 'Subnets', 'route-table': 'Route tables', igw: 'Internet gateways', eigw: 'Egress-only gateways', nat: 'NAT gateways', sg: 'Security groups', nacl: 'Network ACLs',
   peering: 'VPC peering', tgw: 'Transit gateways', 'tgw-attachment': 'Transit gateway attachments', vpn: 'Site-to-site VPNs', cgw: 'Customer gateways', vgw: 'Virtual private gateways', endpoint: 'VPC endpoints',
@@ -60,16 +68,30 @@ export async function networkPage(ctx) {
   // ---------------------------------------------------------------- header
   const reads = () => {
     const ok = d.reads.filter((r) => !r.error), bad = d.reads.filter((r) => r.error), skip = d.reads.filter((r) => r.skipped?.length);
-    const fl = d.flowLogs || [], flOk = fl.filter((x) => x.files && !x.error), flBad = fl.filter((x) => x.error || (!x.files && x.note));
+    const fl = d.flowLogs || [], live = fl.filter((x) => x.state === 'current' || x.state === 'catching-up'), behind = fl.filter((x) => x.state === 'catching-up');
+    const flCount = (st) => fl.filter((x) => x.state === st).length;
+    const newest = live.map((x) => x.lastTime).filter(Boolean).sort().pop();
+    const flSum = [flCount('error') && `${flCount('error')} cannot be read`, flCount('skipped') && `${flCount('skipped')} not read`, flCount('waiting') && `${flCount('waiting')} not read yet`,
+      behind.length && `${behind.length} reading history`].filter(Boolean).join(' · ') || `each flow log (${fl.length})`;
+    const vpcOf = (x) => d.nodes.find((n) => n.id === x.vpcNode)?.label || x.resource;
+    // only the worker reads flow logs: say so when none is, or it has not finished a step in 10 minutes
+    const step = d.flow?.step, lastStep = step?.last ? Date.now() - new Date(step.last.at).getTime() : null;
+    const stopped = !step ? null : !step.workersAlive ? 'No worker is running: new flow log files are not read until one starts.'
+      : lastStep == null ? 'Not read yet: a worker reads them within a minute or two.' : lastStep > 10 * 6e4 ? `The worker has not read flow logs for ${ago(step.last.at).replace(' ago', '')}.` : null;
     const last = d.reads.map((r) => r.readAt).sort().pop();
     return h('div', { class: 'small muted net-reads' },
       d.pending && h('div', { class: 'net-pending' }, h('span', { class: 'net-spin', 'aria-hidden': 'true' }), `Reading again, asked ${ago(d.pending)}: this page updates when it is done`),
       d.reads.length ? `Read ${ago(last)} · ${ok.filter((r) => r.cloud === 'aws').length} AWS account${ok.filter((r) => r.cloud === 'aws').length === 1 ? '' : 's'} · ${ok.filter((r) => r.cloud === 'gcp').length} Google Cloud project${ok.filter((r) => r.cloud === 'gcp').length === 1 ? '' : 's'}` : 'Not read yet',
       (bad.length || skip.length) ? h('details', { class: 'net-skips' }, h('summary', null, `${bad.length ? `${bad.length} not read` : ''}${bad.length && skip.length ? ' · ' : ''}${skip.length ? `${skip.length} with reads skipped` : ''}`),
         h('ul', { class: 'tiny' }, [...bad.map((r) => h('li', null, h('b', null, `${r.name}: `), r.error)), ...skip.map((r) => h('li', null, h('b', null, `${r.name}: `), `not allowed to call ${r.skipped.join(', ')}. Add ${r.cloud === 'aws' ? 'them to the scanner role (Accounts → Edit shows the policy)' : 'them to the reader role (Google Cloud setup)'}.`))])) : null,
-      h('div', null, fl.length ? `VPC flow logs: ${flOk.length} of ${fl.length} read${flOk.length ? `, up to ${ago(flOk.map((x) => x.lastTime).sort().pop())}` : ''}` : 'No VPC flow logs to read'),
-      flBad.length ? h('details', { class: 'net-skips' }, h('summary', null, `${flBad.length} flow log${flBad.length === 1 ? '' : 's'} not read`),
-        h('ul', { class: 'tiny' }, flBad.map((x) => h('li', null, h('b', null, `${x.flowLog} (${x.owner}): `), x.error || x.note)))) : null);
+      h('div', null, fl.length ? `VPC flow logs: ${live.length} read${newest ? `, newest file ${ago(newest)}` : ''}` : 'No VPC flow logs to read',
+        fl.length && d.flow ? h('span', { class: 'tiny' }, ` · ${d.flow.lookbackDays} days kept${d.flow.storedBytes != null ? `, ${human(d.flow.storedBytes)}` : ''}`) : null),
+      fl.length && stopped ? h('div', { class: 'tiny warn-text' }, stopped) : null,
+      fl.length ? h('details', { class: `net-skips net-fl${flCount('error') ? ' bad' : ''}` }, h('summary', null, flSum),
+        h('ul', { class: 'tiny' }, fl.map((x) => h('li', null, h('span', { class: `badge ${FLOW[x.state][1]}` }, FLOW[x.state][0]), ' ', h('b', null, vpcOf(x)), h('span', { class: 'muted' }, ` · ${accountName(x.owner)}`),
+          h('div', { class: x.state === 'error' ? '' : 'muted' }, flowSays(x)), h('div', { class: 'mono muted' }, flowWhere(x))))),
+        step?.last && h('div', { class: 'tiny muted net-fl-by' }, `Read by the worker ${step.last.worker?.hostname || ''}: last step ${ago(step.last.at)}, a step a minute. `,
+          session.user?.permissions.includes('ops') ? h('a', { href: '#/operations/workers' }, 'Operations') : null)) : null);
   };
   const readBtn = h('button', { class: 'btn sm' }, 'Read now');
   if (!session.user?.permissions.includes('scan')) readBtn.hidden = true;
@@ -203,11 +225,23 @@ export async function networkPage(ctx) {
     const why = u.state === 'used' ? `${human(u.bytes)} in ${num(u.flows)} accepted flows${u.rejected ? `, ${num(u.rejected)} refused` : ''}, last ${ago(u.last)}`
       : u.state === 'unused' ? `Nothing accepted in ${Math.floor(u.coveredDays)} days of VPC flow logs${u.rejected ? ` (${num(u.rejected)} refused)` : ''}. If nothing needs it, remove it.`
       : u.state === 'quiet' ? `Nothing yet: flow logs read for ${u.coveredDays} days, less than the 3 needed to call it unused.`
-      : l.kind === 'privatelink' ? 'Only the consumer side can see PrivateLink traffic, and its VPC has no flow logs read.' : 'No VPC on either side of it has flow logs read (Google Cloud flow logs are not read).';
+      : l.kind === 'privatelink' ? `Only the consumer side can see PrivateLink traffic, and its VPC has no flow logs read.${notKnown([l.from])}` : `No VPC on either side of it has flow logs read (Google Cloud flow logs are not read).${notKnown([l.from, l.to])}`;
     const max = Math.max(1, ...(u.hourly || []).map((b) => b.bytes));
     return sect('Use (VPC flow logs)', h('div', { class: 'row' }, h('span', { class: `badge ${cls}` }, label), h('span', { class: 'small' }, why)),
       u.hourly && h('div', { class: 'net-spark', title: 'Bytes by the hour, the last 24 hours' }, u.hourly.map((b) => h('span', { style: `height:${Math.max(1, Math.round((b.bytes / max) * 26))}px`, class: b.rejected && !b.bytes ? 'rej' : '' }))),
-      u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${p.proto} ${p.port} (${human(p.bytes)})`).join(', ')));
+      u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${portName(p)} (${human(p.bytes)})`).join(', ')));
+  }
+  // why the flow logs of a line's VPCs say nothing yet: the first of them that has a flow log, in a sentence
+  function notKnown(ends) {
+    for (const id of ends) {
+      const mine = (d.flowLogs || []).filter((x) => x.vpcNode === id); if (!mine.length) continue;
+      const name = d.nodes.find((n) => n.id === id)?.label || id;
+      const best = ['current', 'catching-up', 'waiting', 'error', 'skipped'].map((st) => mine.find((x) => x.state === st)).find(Boolean);
+      const stale = best.lastTime && Date.now() - new Date(best.lastTime).getTime() > 6 * 36e5;
+      return ` ${name} has a flow log: ${best.state === 'error' ? `it cannot be read (${best.error})` : best.state === 'skipped' ? best.note : best.state === 'waiting' ? 'it has not been read yet'
+        : best.note ? best.note : !best.lastTime ? 'no files were found in its bucket yet' : stale ? `its newest file is from ${ago(best.lastTime)}, older than the 6 hours that count` : 'its first files are still being read'}.`;
+    }
+    return '';
   }
   // an account or project by the name it goes by here
   const accountName = (id) => d.owners.find((o) => o.owner === id)?.name || d.nodes.find((n) => n.owner === id && n.ownerLabel)?.ownerLabel || id;
@@ -282,8 +316,9 @@ export async function networkPage(ctx) {
         h('details', null, h('summary', { class: 'small' }, `Network ACLs (${x.nacls.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.nacls.map((a) => h('div', { class: 'net-rule-box' },
           h('div', { class: 'row' }, h('b', { class: 'small' }, a.name), a.isDefault && h('span', { class: 'badge b-neutral' }, 'default')),
           h('ul', { class: 'tiny mono' }, a.entries.filter((e) => !e.egress).map((e) => h('li', { class: e.action === 'allow' && world([e.cidr]) ? 'net-world' : '' }, `in #${e.n} ${e.action} ${e.proto}${e.from != null ? ` ${e.from}-${e.to}` : ''} ← ${e.cidr}`))))))),
-        x.flowLogList?.length > 0 && sect('VPC flow logs', h('ul', { class: 'small' }, x.flowLogList.map((fl) => h('li', null, `${fl.id} → ${fl.destination === 's3' ? (fl.arn || 'S3').replace('arn:aws:s3:::', 's3://') : fl.destination} · ${fl.traffic}`,
-          h('div', { class: 'tiny muted' }, fl.read ? (fl.read.error || (fl.read.files ? `${num(fl.read.files)} files read, up to ${ago(fl.read.lastTime)}${fl.read.note ? ` · ${fl.read.note}` : ''}` : fl.read.note || 'not read yet')) : 'not read yet'))))),
+        x.flowLogList?.length > 0 && sect('VPC flow logs', h('ul', { class: 'small net-fl-list' }, x.flowLogList.map((fl) => h('li', null, h('span', { class: `badge ${FLOW[fl.state][1]}` }, FLOW[fl.state][0]), ' ',
+          h('span', { class: 'mono tiny' }, fl.flowLog), h('div', { class: 'mono tiny muted' }, `→ ${flowDest(fl)}`),
+          h('div', { class: `tiny${fl.state === 'error' ? '' : ' muted'}` }, flowSays(fl), fl.files ? ` · ${num(fl.files)} files read in all` : ''))))),
         x.clientVpns?.length > 0 && sect('Client VPN', h('ul', { class: 'small' }, x.clientVpns.map((c) => h('li', null, `${c.name} · users from ${c.cidr} · ${c.auth.join(', ')}${c.split ? ' · split tunnel' : ' · all traffic'}${c.connectionLog ? '' : ' · connections not logged'}`)))),
         x.endpointServices?.length > 0 && sect('PrivateLink services it offers', h('ul', { class: 'small' }, x.endpointServices.map((v) => h('li', null, `${v.name.split('.').pop()} · ${v.connections.length} connected${v.acceptance ? '' : ' · accepted without approval'}`,
           h('div', { class: 'tiny muted' }, v.connections.map((c) => `${c.account} (${c.state})`).join(', ')))))),

@@ -412,7 +412,7 @@ export function analyzeNetwork(rawItems, estate = {}, policy = DEFAULT_POLICY, u
 
 // ---------------------------------------------------------------- what the flow logs say
 const QUIET_DAYS = 3;
-const portsIn = (text) => (text === 'every port' ? null : String(text).split(',').map((x) => x.trim()).filter(Boolean).map((x) => { const [a, b] = x.split('-').map(Number); return [a, Number.isFinite(b) ? b : a]; }));
+export const portsIn = (text) => (text === 'every port' ? null : String(text).split(',').map((x) => x.trim()).filter(Boolean).map((x) => { const [a, b] = x.split('-').map(Number); return [a, Number.isFinite(b) ? b : a]; }));
 /**
  * Used, not used or not known, for every line: flow logs read for one of its VPCs (or a VPC behind its transit
  * gateway) for at least 3 days with no accepted traffic is "not used"; read for less is "quiet so far". Lines only
@@ -453,7 +453,8 @@ function applyUsage(graph, exposures, usage, f, now) {
       if (covered >= QUIET_DAYS && !accepted) f('net.open-port-unused', 'low', { cloud: e.cloud, owner: e.owner, type: e.kind, id: e.id, name: e.name, vpc: e.vpc, vpcOwner: e.vpcOwner },
         `${p.proto} ${p.ports} on ${e.name} is open to the internet but nobody used it`, `No accepted connection in ${Math.floor(covered)} days of VPC flow logs${rejected ? ` (${rejected} refused)` : ''}, through ${p.via}.`, 'Close it.', { keyPart: `${e.id}|${p.proto}|${p.ports}` });
     }
-    e.reached = [...hits].filter(([, v]) => v.accepted).map(([k, v]) => ({ proto: k.split('|')[0], port: Number(k.split('|')[1]), ...v })).sort((a, b) => b.accepted - a.accepted).slice(0, 10);
+    // the busiest ports the internet reached (port 0: the rest, folded together as they were read)
+    e.reached = [...hits].filter(([k, v]) => v.accepted && k.split('|')[1] !== '0').map(([k, v]) => ({ proto: k.split('|')[0], port: Number(k.split('|')[1]), ...v })).sort((a, b) => b.accepted - a.accepted).slice(0, 10);
   }
 }
 

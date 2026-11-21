@@ -86,7 +86,8 @@ export function normalizeAwsRegion(region, r) {
     managed: !!n.RequesterManaged, description: n.Description || null, status: n.Status, owner: n.OwnerId || null });
   for (const f of r.flowLogs || []) add('flow-log', f.FlowLogId, null, /^vpc-/.test(f.ResourceId) ? f.ResourceId : null, { resource: f.ResourceId, status: f.FlowLogStatus, traffic: f.TrafficType,
     destination: f.LogDestinationType || null, arn: f.LogDestination || null, format: f.LogFormat || null, fileFormat: f.DestinationOptions?.FileFormat || 'plain-text',
-    hive: !!f.DestinationOptions?.HiveCompatiblePartitions, perHour: !!f.DestinationOptions?.PerHourPartition });
+    hive: !!f.DestinationOptions?.HiveCompatiblePartitions, perHour: !!f.DestinationOptions?.PerHourPartition, created: f.CreationTime || null,
+    deliverStatus: f.DeliverLogsStatus || null, deliverError: f.DeliverLogsErrorMessage || null });
   // Direct Connect
   for (const c of r.dxConnections || []) add('dx-connection', c.connectionId, c.connectionName, null, { location: c.location, bandwidth: c.bandwidth, state: c.connectionState, partner: c.partnerName || c.providerName || null,
     owner: c.ownerAccount || null, lag: c.lagId || null, macsec: !!c.macSecCapable });

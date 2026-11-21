@@ -244,10 +244,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const networkRun = () => { if (networking || stop.stopped) return; networking = true;
     networkTick({ log }).catch((e) => log('error', 'networking read failed', { error: e.message })).finally(() => { networking = false; }); };
   timers.push(setInterval(networkRun, 30_000), setTimeout(networkRun, 12_000));
-  // its VPC flow logs: new files in S3, a budget at a time, then the findings that depend on them
+  // its VPC flow logs: new files in S3, a budget at a time, then the findings that depend on them. Only the worker
+  // reads them (one worker at a time); each step is noted with this worker's id for Operations → Workers.
   let flowing = false;
   const flowRun = () => { if (flowing || stop.stopped) return; flowing = true;
-    flowTick({ log }).then((r) => (r?.files ? analyzeAndFile() : null)).catch((e) => log('error', 'flow logs failed', { error: e.message })).finally(() => { flowing = false; }); };
+    flowTick({ log, worker: workerId }).then((r) => (r?.files ? analyzeAndFile() : null)).catch((e) => log('error', 'flow logs failed', { error: e.message })).finally(() => { flowing = false; }); };
   timers.push(setInterval(flowRun, 60_000), setTimeout(flowRun, 40_000));
   timers.push(setInterval(() => pruneCallers(config.scanner.callerKeepDays, { log }).catch((e) => log('error', 'caller pruning failed', { error: e.message })), 6 * 3600_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));

@@ -35,6 +35,7 @@ export async function workersPage(ctx) {
       ...alive.map((w) => workerCard(w, range)),
       !alive.length && h('div', { class: 'alert bad' }, 'No worker has checked in in the last minute.'),
       readingCard(d.reading, d.settings),
+      d.flow && flowCard(d.flow),
       gone.length > 0 && restartsCard(gone, draw),
       d.failures.length > 0 && h('section', { class: 'card' }, h('div', { class: 'card-h' }, h('h2', null, 'Failures in the last 24 hours')),
         h('table', { class: 'small' }, h('thead', null, h('tr', null, ['Error', 'Jobs', 'Last'].map((x) => h('th', null, x)))),
@@ -190,6 +191,39 @@ function readingCard(rows, settings) {
         h('td', null, j.sinceProgressS != null ? `${dur(j.sinceProgressS)} ago` : '—'),
         h('td', { class: 'small' }, note(j))))))) : h('div', { class: 'empty' }, 'Nothing is being read right now.'),
     other.length > 0 && h('p', { class: 'small muted card-b' }, `Also ${other.length} other job${other.length > 1 ? 's' : ''} (inventory, advisor, analyze) running or waiting.`));
+}
+
+// The VPC flow log reader (Networking): the worker's step a minute, which worker ran the last one, each flow log's state.
+const FSTATE = { current: ['read', 'b-green'], 'catching-up': ['reading history', 'b-medium'], waiting: ['not read yet', 'b-neutral'], error: ['cannot be read', 'b-high'], skipped: ['not read', 'b-neutral'] };
+function flowCard(f) {
+  const s = f.settings, last = f.last, w = last?.worker, r = last?.result || {}, work = last?.work;
+  const since = last ? Math.round((Date.now() - new Date(last.at).getTime()) / 1000) : null;
+  const took = (ms) => (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`);
+  const c = f.counts, states = [c.current && `${c.current} read`, c.catchingUp && `${c.catchingUp} reading history`, c.waiting && `${c.waiting} not read yet`, c.error && `${c.error} cannot be read`, c.skipped && `${c.skipped} not read (another has their records, or not in S3)`].filter(Boolean);
+  return h('section', { class: 'card' },
+    h('div', { class: 'card-h' }, h('div', null, h('h2', null, 'VPC flow logs'),
+      h('p', { class: 'muted small' }, `Read by the worker, never by the portal: a step every ${s.everySeconds} seconds, one worker at a time. A step reads new files first (each flow log listed at most every ${s.listEveryMin} minutes), then history back ${s.lookbackDays} days: at most ${num(s.stepFiles)} files or ${s.stepMb} MB, ${s.parallel} at a time.`)),
+      h('a', { class: 'btn sm', href: '#/network' }, 'Networking')),
+    h('div', { class: 'card-b stack' },
+      !f.workersAlive ? h('div', { class: 'alert bad' }, 'No worker is running: no flow log is read until one starts.')
+        : since == null ? h('div', { class: 'alert warn' }, 'No step has run yet: the first starts within a minute of a worker starting.')
+          : since > 600 ? h('div', { class: 'alert warn' }, `No step has finished for ${dur(since)}.`) : null,
+      h('dl', { class: 'kv small' },
+        h('dt', null, 'Last step'), h('dd', null, last ? [`${ago(last.at)} on `, h('b', null, w?.hostname || 'a worker'), h('span', { class: 'mono tiny muted' }, ` ${w?.id || ''}`), w?.id && !w.alive ? h('span', { class: 'tiny muted' }, ' (no longer running)') : null,
+          ` · took ${took(last.ms)} · ${r.files ? `${num(r.files)} files, ${bytes(r.bytes)}` : 'nothing new'}${r.lists ? ` · ${num(r.lists)} S3 listings` : ''}`, last.error ? h('div', { class: 'err' }, last.error) : null] : '—'),
+        h('dt', null, 'Last read'), h('dd', null, work && last.workedAt ? `${ago(last.workedAt)}: ${num(work.files)} files, ${bytes(work.bytes)}, ${num(work.records)} records${work.errors ? ` · ${work.errors} flow log${work.errors > 1 ? 's' : ''} failed` : ''}` : 'nothing yet'),
+        h('dt', null, 'Flow logs'), h('dd', null, states.join(' · ') || 'none seen yet'),
+        (f.pending || f.historyBack) && h('dt', null, 'Still to read'),
+        (f.pending || f.historyBack) && h('dd', null, [f.pending && `${num(f.pending)} new files`, f.historyBack && `history back from ${fmtDate(f.historyBack)}`].filter(Boolean).join(' · ')),
+        h('dt', null, 'Kept'), h('dd', null, `${s.keepDays} days of hours${f.storedBytes != null ? ` · ${bytes(f.storedBytes)} in the database` : ''}`)),
+      f.flowLogs.length ? h('div', { class: 'scroll' }, h('table', { class: 'small' },
+        h('thead', null, h('tr', null, ['VPC', 'Account', 'Flow log', 'State', 'Newest file', 'History', 'Note'].map((x) => h('th', null, x)))),
+        h('tbody', null, f.flowLogs.map((x) => h('tr', { class: x.state === 'error' ? 'row-bad' : '' },
+          h('td', null, x.vpc || '—'), h('td', null, x.accountName), h('td', null, h('div', { class: 'mono tiny' }, x.flowLog), x.bucket && h('div', { class: 'mono tiny muted' }, `s3://${x.bucket}${x.prefix ? `/${x.prefix}` : ''}`)),
+          h('td', null, h('span', { class: `badge ${FSTATE[x.state][1]}` }, FSTATE[x.state][0])),
+          h('td', null, x.lastTime ? ago(x.lastTime) : '—'),
+          h('td', null, x.state === 'current' || x.state === 'catching-up' ? `${x.historyDays} of ${s.lookbackDays} days${x.pending ? ` · ${num(x.pending)} new to read` : ''}` : '—'),
+          h('td', { class: `small${x.state === 'error' ? ' err' : ' muted'}` }, x.error || x.note || '')))))) : h('div', { class: 'empty' }, 'No VPC flow log seen yet: the networking read lists them, then the next step reads them.')));
 }
 
 // Unexpected ends (lost, likely out of memory) by default; clean stops from deploys only on request, 20 at a time.

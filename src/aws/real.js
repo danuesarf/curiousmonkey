@@ -134,12 +134,13 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
     /** Networking (the Networking extension), every region of the account: { items, skipped }. */
     async listNetwork() { return awsNetworkReader(credentials).read(account.regions?.length ? account.regions : ['us-east-1']); },
     /** VPC flow log files under one day's prefix (Networking extension). Only keys under AWSLogs/<account>/vpcflowlogs/. */
-    async listFlowLogObjects({ bucket, prefix }) {
+    // one folder of flow log files (a day's or an hour's), from just after `startAfter` when given (names sort by time)
+    async listFlowLogObjects({ bucket, prefix, startAfter }) {
       if (!FLOW_KEY.test(prefix)) throw new Error('not a VPC flow log prefix');
       const c = flowS3(bucket), out = []; let ContinuationToken;
       do {
         bump('apiCalls');
-        const r = await c.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken }));
+        const r = await c.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken, ...(startAfter && !ContinuationToken ? { StartAfter: startAfter } : {}) }));
         for (const o of r.Contents || []) if (o.Key.endsWith('.log.gz')) out.push({ key: o.Key, size: o.Size || 0 });
         ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
       } while (ContinuationToken);
@@ -149,7 +150,9 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
       if (!FLOW_KEY.test(key)) throw new Error('not a VPC flow log file');
       bump('apiCalls');
       const r = await flowS3(bucket).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-      return Buffer.from(await r.Body.transformToByteArray());
+      const buf = Buffer.from(await r.Body.transformToByteArray());
+      bump('s3Files'); bump('s3Bytes', buf.length);   // the worker's "Reading now" counts flow log files too
+      return buf;
     },
     async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
       const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];

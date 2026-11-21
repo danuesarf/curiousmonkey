@@ -40,7 +40,7 @@ const merge = (...parts) => { const out = {}; for (const p of parts) for (const 
 
 const PROD = '111111111111', DATA = '222222222222', VENDOR = '999999999999';
 export const DEMO_TGW = 'tgw-0a1b2c3d4e5f60001';
-export const DEMO_FLOW_LOG = 'fl-0a10000000000001', DEMO_FLOW_BUCKET = 'acme-flow-logs';
+export const DEMO_FLOW_LOG = 'fl-0a10000000000001', DEMO_FLOW_LOG_REJECTS = 'fl-0a10000000000002', DEMO_FLOW_BUCKET = 'acme-flow-logs';
 
 // A VPC payments-prod shares through AWS RAM, playing the central network account: data-platform-stg runs an API and
 // its database in it, and a third account it is shared with is not connected. The owner sees the member's network
@@ -138,7 +138,11 @@ function prod(region) {
       { NetworkInterfaceId: 'eni-0a1000000cvpn001', VpcId: v, SubnetId: app, PrivateIpAddress: '10.10.10.60', Groups: [{ GroupId: 'sg-0a1000000000000app' }], InterfaceType: 'interface', RequesterManaged: true, Description: 'ClientVPN-cvpn-endpoint-0a10000000001-associated', Status: 'in-use' },
       { NetworkInterfaceId: 'eni-0a100000000natgw', VpcId: v, SubnetId: pa, PrivateIpAddress: '10.10.0.5', Association: { PublicIp: '203.0.113.10' }, Groups: [], InterfaceType: 'nat_gateway', RequesterManaged: true, Description: 'Interface for NAT Gateway nat-0a10000000000001', Status: 'in-use' },
     ],
-    flowLogs: [{ FlowLogId: DEMO_FLOW_LOG, ResourceId: v, FlowLogStatus: 'ACTIVE', TrafficType: 'ALL', LogDestinationType: 's3', LogDestination: `arn:aws:s3:::${DEMO_FLOW_BUCKET}`, DestinationOptions: { FileFormat: 'plain-text' } }],
+    flowLogs: [{ FlowLogId: DEMO_FLOW_LOG, ResourceId: v, FlowLogStatus: 'ACTIVE', TrafficType: 'ALL', LogDestinationType: 's3', LogDestination: `arn:aws:s3:::${DEMO_FLOW_BUCKET}`, DestinationOptions: { FileFormat: 'plain-text' },
+      CreationTime: '2025-02-03T04:05:06.000Z', DeliverLogsStatus: 'SUCCESS' },
+    // a second one the security team keeps, of refusals only: its records are in the first, so it is not read
+    { FlowLogId: DEMO_FLOW_LOG_REJECTS, ResourceId: v, FlowLogStatus: 'ACTIVE', TrafficType: 'REJECT', LogDestinationType: 's3', LogDestination: `arn:aws:s3:::${DEMO_FLOW_BUCKET}/security`,
+      DestinationOptions: { FileFormat: 'plain-text' }, CreationTime: '2025-06-07T08:09:10.000Z', DeliverLogsStatus: 'SUCCESS' }],
     lbs: [{ LoadBalancerArn: `arn:aws:elasticloadbalancing:${region}:${PROD}:loadbalancer/app/payments-web/0a1b2c3d4e5f6000`, LoadBalancerName: 'payments-web', VpcId: v, Scheme: 'internet-facing', Type: 'application',
       DNSName: 'payments-web-123456.elb.example', AvailabilityZones: [{ SubnetId: pa }, { SubnetId: pb }], SecurityGroups: ['sg-0a1000000000000alb'], listeners: [{ Port: 443, Protocol: 'HTTPS' }, { Port: 80, Protocol: 'HTTP' }] },
     { LoadBalancerArn: `arn:aws:elasticloadbalancing:${region}:${PROD}:loadbalancer/net/payments-api-pl/0a1b2c3d4e5f6001`, LoadBalancerName: 'payments-api-pl', VpcId: v, Scheme: 'internal', Type: 'network',
@@ -294,14 +298,17 @@ export const demoGcpNormalized = (projectId) => normalizeGcpProject(projectId, G
 // peering, the office VPN or the open RDP group.
 const fnv = (str) => { let h = 2166136261; for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 16777619); return h >>> 0; };
 const pad = (n, w = 2) => String(n).padStart(w, '0');
-export function demoFlowKeys({ bucket, prefix, now = Date.now() }) {
+// a day folder of the demo flow log's files (one an hour), as S3 lists them: under `prefix` (a folder, or a folder and
+// the start of a file name), after `startAfter`
+export function demoFlowKeys({ bucket, prefix, startAfter, now = Date.now() }) {
   if (bucket !== DEMO_FLOW_BUCKET) return [];
-  const m = prefix.match(/AWSLogs\/(\d{12})\/vpcflowlogs\/([a-z0-9-]+)\/(\d{4})\/(\d{2})\/(\d{2})\/$/); if (!m || m[1] !== PROD) return [];
-  const day = Date.UTC(+m[3], +m[4] - 1, +m[5]), out = [];
+  const m = prefix.match(/AWSLogs\/(\d{12})\/vpcflowlogs\/([a-z0-9-]+)\/(\d{4})\/(\d{2})\/(\d{2})\/([^/]*)$/); if (!m || m[1] !== PROD) return [];
+  const folder = prefix.slice(0, prefix.length - m[6].length), day = Date.UTC(+m[3], +m[4] - 1, +m[5]), out = [];
   for (let h = 0; h < 24; h++) {
     const end = day + (h + 1) * 36e5 + 5 * 6e4; if (end > now) break;
     const d = new Date(end), stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}Z`;
-    out.push({ key: `${prefix}${PROD}_vpcflowlogs_${m[2]}_${DEMO_FLOW_LOG}_${stamp}_${(fnv(stamp) % 1e8).toString(16)}.log.gz`, size: 2048 });
+    const key = `${folder}${PROD}_vpcflowlogs_${m[2]}_${DEMO_FLOW_LOG}_${stamp}_${(fnv(stamp) % 1e8).toString(16)}.log.gz`;
+    if (key.startsWith(prefix) && (!startAfter || key > startAfter)) out.push({ key, size: 2048 });
   }
   return out;
 }

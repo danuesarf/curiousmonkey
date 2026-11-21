@@ -542,6 +542,14 @@ test('advice flags a heap too small for the container and a stalled read', async
   const out = advise({ workers: [w], reading: [{ kind: 'events', status: 'running', stalled: true, sinceProgressS: 1800, account_name: 'NonProduction', region: 'ap-southeast-1' }], fails: [], queue: { ready: 0, oldest_wait_s: 0 }, accounts: [] });
   assert.ok(out.some((a) => /max-old-space-size=3072/.test(a.fix || '')));
   assert.ok(out.some((a) => a.area === 'reading' && /no progress/.test(a.title)));
+  // VPC flow logs: only a worker reads them, so a reader that stopped is said, and so is one that cannot read its bucket
+  const flow = (at, extra = {}) => ({ last: at ? { at: new Date(Date.now() - at * 1000).toISOString(), error: null } : null, flowLogs: [{ flowLog: 'fl-1', vpc: 'vpc-made-up', accountName: 'Sandbox', state: 'current' }], counts: { error: 0 }, ...extra });
+  const base = { workers: [w], reading: [], fails: [], queue: { ready: 0, oldest_wait_s: 0 }, accounts: [] };
+  assert.ok(advise({ ...base, flow: flow(1800) }).some((a) => a.level === 'warning' && /VPC flow logs: no step for 30 min/.test(a.title)));
+  assert.ok(advise({ ...base, flow: flow(null) }).some((a) => /have not been read yet/.test(a.title)));
+  assert.ok(!advise({ ...base, flow: flow(30) }).some((a) => /VPC flow/.test(a.title)), 'a step half a minute ago is fine');
+  const denied = flow(30, { flowLogs: [{ flowLog: 'fl-2', vpc: 'vpc-made-up', accountName: 'Sandbox', state: 'error', error: 'not allowed to read s3://made-up-logs/AWSLogs/…' }], counts: { error: 1 } });
+  assert.ok(advise({ ...base, flow: denied }).some((a) => a.title === '1 VPC flow log cannot be read' && /made-up-logs/.test(a.detail)));
 });
 
 test('planned accounts: placeholders with no access, never scanned, onboarded later', async () => {

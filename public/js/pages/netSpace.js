@@ -4,9 +4,10 @@
 // shares with it is a smaller dashed ring in the member's zone, its share line arcing to the VPC. Transit gateways, Direct Connect gateways and hubs
 // float in the aisle between the clouds; VPN peers, offices and networks outside your estate sit off the outer edges.
 // Lines are arcs above the planes. With VPC flow logs read, a line carries light while it carries traffic, the hour
-// bar replays the last 24 hours, a line with nothing on it in days is dashed and marked NOT USED.
+// bar replays the last 24 hours (◀ ▶ step back through the days kept), a line with nothing on it in days is dashed
+// and marked NOT USED.
 // Drag to turn, Shift+drag or two fingers to move, wheel or pinch to zoom.
-import { h, svg, fmtClock } from '../lib.js';
+import { h, svg, get, fmtClock, fmtStamp } from '../lib.js';
 import { wheelKind } from './spaceRelated.js';
 
 const W = 1400, H = 820, D = 2600, HOME = { az: 0, el: 56 };
@@ -98,9 +99,13 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
     const side = Math.sign(a[0]);
     return side * Math.max(0, 2 * (L.span + 40 - side * (a[0] + b[0]) / 2));
   };
-  const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, playing: false, internet: internet() };
+  const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, day: 0, playing: false, internet: internet() };
   const hasFlows = d.links.some((l) => l.usage && l.usage.state !== 'unknown');
-  const hourly = Array.from({ length: 24 }, (_, i) => d.links.reduce((n, l) => n + (l.kind === 'internet' ? 0 : l.usage?.hourly?.[i]?.bytes || 0), 0));
+  // the lines' traffic by the hour on the day shown: the last 24 hours, or an earlier day, fetched when it is picked
+  const days = new Map([[0, { start: new Date(d.hourStart).getTime(), hours: new Map(d.links.map((l) => [l.id, l.usage?.hourly || null])) }]]);
+  let byLine = days.get(0).hours;
+  const totals = () => Array.from({ length: 24 }, (_, i) => d.links.reduce((n, l) => n + (l.kind === 'internet' ? 0 : byLine.get(l.id)?.[i]?.bytes || 0), 0));
+  let hourly = totals();
   const stage = svg('svg', { class: 'ns-stage', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Network scene' });
   const defs = svg('defs', null, svg('filter', { id: 'ns-glow', x: '-50%', y: '-50%', width: '200%', height: '200%' }, svg('feGaussianBlur', { stdDeviation: 2.4 })),
     svg('radialGradient', { id: 'ns-sky' }, svg('stop', { offset: '0%', 'stop-color': '#8ec5ff', 'stop-opacity': 0.5 }), svg('stop', { offset: '100%', 'stop-color': '#8ec5ff', 'stop-opacity': 0 })));
@@ -148,7 +153,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
       if (l.kind === 'internet' && !st.internet) continue;
       const a = ent(l.from), b = ent(l.to); if (!a || !b) continue;
       const u = l.usage || { state: 'unknown' };
-      const hourBytes = u.hourly ? u.hourly[st.hour].bytes : 0;
+      const hrs = byLine.get(l.id), hourBytes = hrs ? hrs[st.hour].bytes : 0;
       const color = l.kind === 'internet' && (d.nodes.find((n) => n.id === (l.from === 'internet' ? l.to : l.from))?.worst === 'high') ? RED : KIND_COLOR[l.kind] || '#a9bfb2';
       const top = l.kind === 'internet' ? [a[0], a[1], 90] : a;
       const g = arc(top, b, P, l.kind === 'internet' ? 30 : null, l.kind === 'internet' ? 0 : bowOf(a, b));
@@ -156,7 +161,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
       let stroke = color, dash = null, op = 0.85, w = usageWidth(l, u.bytes);
       if (u.state === 'unused') { stroke = IDLE; dash = '7 6'; op = 0.75; w = 1.4; }
       else if (u.state === 'unknown') { op = l.kind === 'internet' ? 0.35 : 0.6; }
-      if (hasFlows && u.hourly && !hourBytes && u.state === 'used') op *= 0.55;
+      if (hasFlows && hrs && !hourBytes && u.state === 'used') op *= 0.55;
       out.push(svg('g', { opacity: lfade(l) },
         svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(on ? w + 1.8 : w), 'stroke-dasharray': dash, opacity: op, 'stroke-linecap': 'round' }),
         hourBytes > 0 && svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(w + 3), opacity: 0.35, filter: 'url(#ns-glow)' }),
@@ -219,18 +224,35 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
   }
 
   // ---------------------------------------------------------------- the hour bar
-  const max = Math.max(1, ...hourly);
+  let max = Math.max(1, ...hourly);
   const bars = h('div', { class: 'ns-bars' });
   const hourText = h('span', { class: 'mono small' });
-  const start = new Date(d.hourStart).getTime();
+  let start = days.get(0).start;
   const label = (i) => fmtClock(start + i * 36e5);   // in the workspace's time zone, as everywhere else
+  // ◀ ▶: a day further back, or nearer, through the days the flow logs are kept
+  const LAST = Math.max(0, (d.flow?.lookbackDays || 7) - 1);
+  const dayText = h('span', { class: 'mono tiny muted ns-day-t' });
+  const dayBtn = (t, delta, aria) => { const b = h('button', { type: 'button', class: 'btn sm', 'aria-label': aria, title: aria }, t); b.addEventListener('click', () => showDay(st.day + delta)); return b; };
+  const earlier = dayBtn('‹', 1, 'The 24 hours before'), later = dayBtn('›', -1, 'The 24 hours after');
+  async function showDay(n) {
+    if (n < 0 || n > LAST || n === st.day) return;
+    if (!days.has(n)) {
+      earlier.disabled = later.disabled = true;
+      try { const r = await get(`/network/hours?day=${n}`); days.set(n, { start: new Date(r.hourStart).getTime(), hours: new Map(Object.entries(r.hours)) }); }
+      catch { drawBars(); return; }
+    }
+    st.day = n; ({ start, hours: byLine } = days.get(n)); hourly = totals(); max = Math.max(1, ...hourly);
+    tick();
+  }
   const drawBars = () => {
+    earlier.disabled = !hasFlows || st.day >= LAST; later.disabled = st.day === 0;
+    dayText.textContent = st.day ? `${fmtStamp(start)} – ${fmtStamp(start + 864e5)}` : 'the last 24 hours';
     bars.replaceChildren(...hourly.map((v, i) => h('button', { type: 'button', class: `ns-bar${i === st.hour ? ' on' : ''}`, title: `${label(i)} · ${human(v)}`, onClick: () => { st.hour = i; st.playing = false; playBtn.textContent = '▶'; tick(); } },
       h('span', { style: `height:${Math.max(2, Math.round((v / max) * 34))}px` }))));
-    hourText.textContent = hasFlows ? `${label(st.hour)}–${label(st.hour + 1)} · ${human(hourly[st.hour])} on the lines` : 'no flow logs read: lines show what is allowed, not what is used';
+    hourText.textContent = hasFlows ? `${st.day ? fmtStamp(start + st.hour * 36e5) : label(st.hour)}–${label(st.hour + 1)} · ${human(hourly[st.hour])} on the lines` : 'no flow logs read: lines show what is allowed, not what is used';
   };
   const tick = () => { drawBars(); draw(); onHour?.(st.hour); };
-  const playBtn = h('button', { class: 'btn sm', 'aria-label': 'Replay the last 24 hours' }, '▶');
+  const playBtn = h('button', { class: 'btn sm', 'aria-label': 'Replay these 24 hours' }, '▶');
   let timer = null;
   playBtn.addEventListener('click', () => {
     st.playing = !st.playing; playBtn.textContent = st.playing ? '❚❚' : '▶';
@@ -266,7 +288,7 @@ export function networkScene(d, { pick, sel, envColor, onHour, match = () => tru
       h('label', { class: 'small row', style: 'gap:6px' }, internetBox, 'Beams to the internet'), h('span', { style: 'flex:1' }),
       btn('⟲', () => { st.az -= 15; draw(); }, 'Turn left'), btn('⟳', () => { st.az += 15; draw(); }, 'Turn right'), btn('+', () => { st.zoom = Math.min(4, st.zoom * 1.2); draw(); }, 'Zoom in'), btn('−', () => { st.zoom = Math.max(0.35, st.zoom / 1.2); draw(); }, 'Zoom out'), btn('Reset', reset)),
     wrap,
-    h('div', { class: 'ns-time' }, playBtn, bars, hourText));
+    h('div', { class: 'ns-time' }, h('div', { class: 'ns-day' }, playBtn, h('div', { class: 'ns-day-nav' }, earlier, dayText, later)), bars, hourText));
   tick();
   return { el, redraw: draw, destroy: () => clearInterval(timer) };
 }
