@@ -35,19 +35,33 @@ export const SCANNER_DENY = ['s3:GetObject', 's3:GetObjectVersion', 'kms:Decrypt
 const clean = (p) => (p ? `${p.replace(/^\/+|\/+$/g, '')}/` : '');
 export const trailObjectsArn = ({ bucket, prefix }) => `arn:aws:s3:::${bucket}/${clean(prefix)}AWSLogs/*`;
 
+// VPC flow log files (Networking extension): only keys under AWSLogs/<account>/vpcflowlogs/, in any bucket
+export const FLOW_OBJECTS = ['arn:aws:s3:::*/AWSLogs/*/vpcflowlogs/*', 'arn:aws:s3:::*/AWSLogs/aws-account-id=*/aws-service=vpcflowlogs/*'];
+const FLOW_PREFIXES = ['*AWSLogs/*/vpcflowlogs/*', '*aws-service=vpcflowlogs/*'];
+
 export function scannerPolicy({ s3, network = false } = {}) {
   const st = [{ Sid: 'ReadIamAndTrailMetadata', Effect: 'Allow', Action: SCANNER_ALLOW, Resource: '*' }];
-  // the Networking extension: VPC networking, Network Firewall and load balancer metadata, read-only
-  if (network) st.push({ Sid: 'ReadNetworking', Effect: 'Allow', Action: AWS_NETWORK_READS, Resource: '*' });
+  // the Networking extension: VPC networking, Direct Connect, Resolver, Network Firewall and load balancer metadata
+  // (read-only), and VPC flow log files and nothing else in the buckets they are delivered to
+  if (network) st.push({ Sid: 'ReadNetworking', Effect: 'Allow', Action: AWS_NETWORK_READS, Resource: '*' },
+    { Sid: 'ListFlowLogFiles', Effect: 'Allow', Action: 's3:ListBucket', Resource: 'arn:aws:s3:::*', Condition: { StringLike: { 's3:prefix': FLOW_PREFIXES } } },
+    { Sid: 'ReadFlowLogFiles', Effect: 'Allow', Action: 's3:GetObject', Resource: FLOW_OBJECTS },
+    { Sid: 'DecryptFlowLogFiles', Effect: 'Allow', Action: 'kms:Decrypt', Resource: '*', Condition: { StringLike: { 'kms:EncryptionContext:aws:s3:arn': FLOW_OBJECTS } } });
+  const objects = [...(s3?.bucket ? [trailObjectsArn(s3)] : []), ...(network ? FLOW_OBJECTS : [])];
   if (s3?.bucket) {
     st.push(
       { Sid: 'ListTrailBucket', Effect: 'Allow', Action: ['s3:ListBucket', 's3:GetBucketLocation'], Resource: `arn:aws:s3:::${s3.bucket}` },
       { Sid: 'ReadTrailLogFiles', Effect: 'Allow', Action: 's3:GetObject', Resource: trailObjectsArn(s3) },
       { Sid: 'DecryptTrailLogFiles', Effect: 'Allow', Action: 'kms:Decrypt', Resource: '*',
-        Condition: { StringLike: { 'kms:EncryptionContext:aws:cloudtrail:arn': 'arn:aws:cloudtrail:*' } } },
-      { Sid: 'NeverReadOtherObjects', Effect: 'Deny', Action: ['s3:GetObject', 's3:GetObjectVersion'], NotResource: trailObjectsArn(s3) },
-      { Sid: 'NeverDecryptOutsideCloudTrail', Effect: 'Deny', Action: 'kms:Decrypt', Resource: '*',
-        Condition: { Null: { 'kms:EncryptionContext:aws:cloudtrail:arn': 'true' } } },
+        Condition: { StringLike: { 'kms:EncryptionContext:aws:cloudtrail:arn': 'arn:aws:cloudtrail:*' } } });
+  }
+  if (objects.length) {
+    // conditions in one statement are ANDed: decrypting is refused unless it is for CloudTrail or for a flow log file
+    const notTrail = s3?.bucket ? { Null: { 'kms:EncryptionContext:aws:cloudtrail:arn': 'true' } } : {};
+    const notFlow = network ? { StringNotLike: { 'kms:EncryptionContext:aws:s3:arn': FLOW_OBJECTS } } : {};
+    st.push(
+      { Sid: 'NeverReadOtherObjects', Effect: 'Deny', Action: ['s3:GetObject', 's3:GetObjectVersion'], NotResource: objects.length === 1 ? objects[0] : objects },
+      { Sid: network ? 'NeverDecryptOtherData' : 'NeverDecryptOutsideCloudTrail', Effect: 'Deny', Action: 'kms:Decrypt', Resource: '*', Condition: { ...notTrail, ...notFlow } },
     );
   } else {
     st.push({ Sid: 'NeverReadObjectsOrDecrypt', Effect: 'Deny', Action: ['s3:GetObject', 's3:GetObjectVersion', 'kms:Decrypt'], Resource: '*' });

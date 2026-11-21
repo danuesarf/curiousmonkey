@@ -6,7 +6,7 @@ import { gzipSync } from 'node:zlib';
 import { buildEstate, buildUsers, MANAGED, samlProvidersOf } from './estate.js';
 import { trailDayPrefix } from '../aws/trailKeys.js';
 import { demoResources, DEMO_ORG } from './resources.js';
-import { demoAwsNetwork } from '../network/demo.js';
+import { demoAwsNetwork, demoFlowKeys, demoFlowFile } from '../network/demo.js';
 
 const h32 = (s) => parseInt(crypto.createHash('sha1').update(s).digest('hex').slice(0, 8), 16);
 const uuid = (s) => { const x = crypto.createHash('sha1').update(s).digest('hex'); return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`; };
@@ -113,6 +113,9 @@ export function demoGateway(account) {
       return demoResources(acct, region0)[service] || [];
     },
     async listNetwork() { calls++; return demoAwsNetwork(acct, region0); },
+    // VPC flow log files in S3 (DEMO_FLOW_DENIED=1: the bucket refuses the scanner)
+    async listFlowLogObjects({ bucket, prefix }) { calls++; if (process.env.DEMO_FLOW_DENIED === '1') throw Object.assign(new Error('Access Denied'), { name: 'AccessDenied' }); return demoFlowKeys({ bucket, prefix, now: demoNow().getTime() }); },
+    async getFlowLogObject({ key }) { calls++; return demoFlowFile(key); },
     async listSamlProviders() {
       calls++;
       // DEMO_SAML_DENIED=1: answer as AWS does for a scanner role created before it could read SAML providers

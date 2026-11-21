@@ -30,7 +30,7 @@ extensions.put('/extensions/:key', requirePerm('settings'), wrap(async (req, res
   res.json({ ok: true, changed, items: await listExtensions() });
 }));
 
-extensions.get('/network', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkOverview(req.user)); }));
+extensions.get('/network', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkOverview(req.user, { day: req.query.day })); }));
 extensions.get('/network/findings', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkFindings(req.user, req.query)); }));
 extensions.get('/network/node', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkDetail(req.user, String(req.query.id || ''))); }));
 extensions.get('/network/inventory', requirePerm('view'), on('networking'), wrap(async (req, res) => { res.json(await networkInventory(req.user, req.query)); }));

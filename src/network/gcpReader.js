@@ -9,7 +9,7 @@ export const netPath = (url) => { const m = String(url || '').match(/projects\/(
 const region = (url) => String(url || '').match(/(?:regions|zones)\/([^/]+)/)?.[1] || null;
 
 export const GCP_NETWORK_KINDS = ['networks', 'subnetworks', 'firewalls', 'firewallPolicies', 'routers', 'routes', 'vpnGateways', 'targetVpnGateways', 'externalVpnGateways',
-  'vpnTunnels', 'interconnectAttachments', 'addresses', 'forwardingRules', 'instances'];
+  'vpnTunnels', 'interconnectAttachments', 'addresses', 'forwardingRules', 'instances', 'serviceAttachments', 'nccHubs', 'nccSpokes', 'xpnResources'];
 
 /** One project's raw lists → [{ type, id, name, vpc, region, data }]. `vpc` is the network path. */
 export function normalizeGcpProject(projectId, r) {
@@ -61,6 +61,22 @@ export function normalizeGcpProject(projectId, r) {
     partner: a.partnerMetadata?.partnerName || null, edge: a.edgeAvailabilityDomain || null });
   for (const a of (r.addresses || []).filter((x) => x.addressType === 'EXTERNAL')) add('address', `projects/${projectId}/${a.region ? `regions/${region(a.region)}` : 'global'}/addresses/${a.name}`, a.name, null, region(a.region), {
     ip: a.address, status: a.status, users: (a.users || []).map(last), tier: a.networkTier || null });
+  // internal load balancers (they front Private Service Connect services) and Private Service Connect endpoints
+  for (const f of r.forwardingRules || []) {
+    const id = `projects/${projectId}/${f.region ? `regions/${region(f.region)}` : 'global'}/forwardingRules/${f.name}`;
+    if (/serviceAttachments\/|all-apis|vpc-sc/.test(f.target || '')) add('psc-endpoint', id, f.name, netPath(f.network), region(f.region), { ip: f.IPAddress, target: /serviceAttachments\//.test(f.target) ? String(f.target).replace(/^.*?(projects\/)/, '$1') : f.target, status: f.pscConnectionStatus || null });
+    else if (/^INTERNAL/.test(f.loadBalancingScheme || '')) add('ilb', id, f.name, netPath(f.network), region(f.region), { ip: f.IPAddress, ports: f.ports || (f.portRange ? [f.portRange] : f.allPorts ? ['all'] : []) });
+  }
+  for (const a of r.serviceAttachments || []) add('service-attachment', `projects/${projectId}/regions/${region(a.region)}/serviceAttachments/${a.name}`, a.name, null, region(a.region), {
+    producer: String(a.targetService || a.producerForwardingRule || '').replace(/^.*?(projects\/)/, '$1'), preference: a.connectionPreference || null,
+    accept: (a.consumerAcceptLists || []).map((x) => x.projectIdOrNum || x.networkUrl).filter(Boolean), reject: a.consumerRejectLists || [],
+    connected: (a.connectedEndpoints || []).map((e) => ({ endpoint: String(e.endpoint || '').replace(/^.*?(projects\/)/, '$1'), status: e.status, network: netPath(e.consumerNetwork) })) });
+  for (const h of r.nccHubs || []) add('ncc-hub', h.name, last(h.name), null, null, { state: h.state || null, routingVpcs: (h.routingVpcs || []).map((v) => netPath(v.uri)).filter(Boolean) });
+  for (const x of r.nccSpokes || []) add('ncc-spoke', x.name, last(x.name), netPath(x.linkedVpcNetwork?.uri) || null, region(x.name), { hub: x.hub, state: x.state || null,
+    kind: x.linkedVpcNetwork ? 'vpc' : x.linkedVpnTunnels ? 'vpn' : x.linkedInterconnectAttachments ? 'interconnect' : x.linkedRouterApplianceInstances ? 'router-appliance' : x.linkedProducerVpcNetwork ? 'producer-vpc' : 'other',
+    uris: [...(x.linkedVpnTunnels?.uris || []), ...(x.linkedInterconnectAttachments?.uris || [])].map((u) => String(u).replace(/^.*?(projects\/)/, '$1')) });
+  const services = (r.xpnResources || []).filter((x) => x.type === 'PROJECT').map((x) => x.id);
+  if (services.length) add('shared-vpc', `projects/${projectId}/xpn`, `Shared VPC host ${projectId}`, null, null, { host: projectId, services });
   for (const f of (r.forwardingRules || []).filter((x) => /^EXTERNAL/.test(x.loadBalancingScheme || ''))) add('forwarding-rule', `projects/${projectId}/${f.region ? `regions/${region(f.region)}` : 'global'}/forwardingRules/${f.name}`, f.name, netPath(f.network), region(f.region), {
     ip: f.IPAddress, proto: f.IPProtocol, ports: f.ports || (f.portRange ? [f.portRange] : f.allPorts ? ['all'] : []), scheme: f.loadBalancingScheme, target: last(f.target || f.backendService) });
   for (const i of r.instances || []) add('instance', `projects/${projectId}/zones/${region(i.zone)}/instances/${i.name}`, i.name, netPath(i.networkInterfaces?.[0]?.network), region(i.zone), {
@@ -71,5 +87,6 @@ export function normalizeGcpProject(projectId, r) {
 
 export const GCP_NETWORK_PERMISSIONS = ['compute.networks.list', 'compute.subnetworks.list', 'compute.firewalls.list', 'compute.networkFirewallPolicies.list', 'compute.routers.list', 'compute.routes.list',
   'compute.vpnGateways.list', 'compute.targetVpnGateways.list', 'compute.externalVpnGateways.list', 'compute.vpnTunnels.list', 'compute.interconnectAttachments.list',
-  'compute.addresses.list', 'compute.forwardingRules.list', 'compute.globalForwardingRules.list', 'compute.instances.list'];
-export const GCP_NETWORK_PREDEFINED = ['roles/compute.networkViewer'];
+  'compute.addresses.list', 'compute.forwardingRules.list', 'compute.globalForwardingRules.list', 'compute.instances.list', 'compute.serviceAttachments.list',
+  'compute.projects.get', 'networkconnectivity.hubs.list', 'networkconnectivity.spokes.list'];
+export const GCP_NETWORK_PREDEFINED = ['roles/compute.networkViewer', 'roles/networkconnectivity.hubViewer'];

@@ -1,12 +1,19 @@
 // Reading AWS networking through the read-only scanner role: everything that decides what can reach what. VPCs,
 // subnets, route tables, internet, egress-only and NAT gateways, security groups, network ACLs, VPC peering, transit
 // gateways and their attachments, site-to-site VPNs (customer and virtual private gateways), VPC endpoints, network
-// interfaces (who sits where, with which public IP and groups), flow logs, Network Firewall and load balancers.
+// interfaces (who sits where, with which public IP and groups), flow logs, Network Firewall and load balancers;
+// Direct Connect (connections, virtual interfaces, Direct Connect gateways and what they are associated with),
+// transit gateway route tables, Client VPN endpoints, PrivateLink endpoint services and who connects to them, managed
+// prefix lists and Route 53 Resolver endpoints and forwarding rules.
 // Each call that is denied is skipped and named, so one missing permission does not lose the rest.
 import { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeRouteTablesCommand, DescribeInternetGatewaysCommand, DescribeEgressOnlyInternetGatewaysCommand,
   DescribeNatGatewaysCommand, DescribeSecurityGroupsCommand, DescribeNetworkAclsCommand, DescribeVpcPeeringConnectionsCommand, DescribeTransitGatewaysCommand,
   DescribeTransitGatewayAttachmentsCommand, DescribeVpnConnectionsCommand, DescribeCustomerGatewaysCommand, DescribeVpnGatewaysCommand, DescribeVpcEndpointsCommand,
-  DescribeNetworkInterfacesCommand, DescribeFlowLogsCommand } from '@aws-sdk/client-ec2';
+  DescribeNetworkInterfacesCommand, DescribeFlowLogsCommand, DescribeClientVpnEndpointsCommand, DescribeClientVpnTargetNetworksCommand, DescribeClientVpnAuthorizationRulesCommand,
+  DescribeTransitGatewayRouteTablesCommand, SearchTransitGatewayRoutesCommand, GetTransitGatewayRouteTableAssociationsCommand, DescribeVpcEndpointServiceConfigurationsCommand,
+  DescribeVpcEndpointConnectionsCommand, DescribeManagedPrefixListsCommand, GetManagedPrefixListEntriesCommand } from '@aws-sdk/client-ec2';
+import { DirectConnectClient, DescribeConnectionsCommand, DescribeVirtualInterfacesCommand, DescribeDirectConnectGatewaysCommand, DescribeDirectConnectGatewayAssociationsCommand } from '@aws-sdk/client-direct-connect';
+import { Route53ResolverClient, ListResolverEndpointsCommand, ListResolverEndpointIpAddressesCommand, ListResolverRulesCommand, ListResolverRuleAssociationsCommand } from '@aws-sdk/client-route53resolver';
 import { NetworkFirewallClient, ListFirewallsCommand, DescribeFirewallCommand } from '@aws-sdk/client-network-firewall';
 import { ElasticLoadBalancingV2Client, DescribeLoadBalancersCommand, DescribeListenersCommand } from '@aws-sdk/client-elastic-load-balancing-v2';
 import { bump } from '../telemetry.js';
@@ -75,7 +82,36 @@ export function normalizeAwsRegion(region, r) {
     groups: (n.Groups || []).map((g) => g.GroupId), kind: n.InterfaceType || 'interface', instance: n.Attachment?.InstanceId || null, requester: n.RequesterId || null,
     managed: !!n.RequesterManaged, description: n.Description || null, status: n.Status });
   for (const f of r.flowLogs || []) add('flow-log', f.FlowLogId, null, /^vpc-/.test(f.ResourceId) ? f.ResourceId : null, { resource: f.ResourceId, status: f.FlowLogStatus, traffic: f.TrafficType,
-    destination: f.LogDestinationType || null });
+    destination: f.LogDestinationType || null, arn: f.LogDestination || null, format: f.LogFormat || null, fileFormat: f.DestinationOptions?.FileFormat || 'plain-text',
+    hive: !!f.DestinationOptions?.HiveCompatiblePartitions, perHour: !!f.DestinationOptions?.PerHourPartition });
+  // Direct Connect
+  for (const c of r.dxConnections || []) add('dx-connection', c.connectionId, c.connectionName, null, { location: c.location, bandwidth: c.bandwidth, state: c.connectionState, partner: c.partnerName || c.providerName || null,
+    owner: c.ownerAccount || null, lag: c.lagId || null, macsec: !!c.macSecCapable });
+  for (const v of r.dxVifs || []) add('dx-vif', v.virtualInterfaceId, v.virtualInterfaceName, null, { kind: v.virtualInterfaceType, connection: v.connectionId, vgw: v.virtualGatewayId || null,
+    dxgw: v.directConnectGatewayId || null, vlan: v.vlan, asn: v.asn, amazonAsn: v.amazonSideAsn || null, state: v.virtualInterfaceState, owner: v.ownerAccount || null,
+    bgp: (v.bgpPeers || []).map((b) => ({ status: b.bgpStatus, state: b.bgpPeerState, family: b.addressFamily, customer: b.customerAddress || null })),
+    prefixes: (v.routeFilterPrefixes || []).map((p) => p.cidr) });
+  for (const g of r.dxGateways || []) add('dx-gateway', g.directConnectGatewayId, g.directConnectGatewayName, null, { asn: g.amazonSideAsn, state: g.directConnectGatewayState, owner: g.ownerAccount || null });
+  for (const a of r.dxAssociations || []) add('dx-association', a.associationId, null, null, { dxgw: a.directConnectGatewayId, dxgwOwner: a.directConnectGatewayOwnerAccount || null,
+    gateway: a.associatedGateway?.id || a.virtualGatewayId || null, gatewayType: a.associatedGateway?.type || (a.virtualGatewayId ? 'virtualPrivateGateway' : null), gatewayOwner: a.associatedGateway?.ownerAccount || a.virtualGatewayOwnerAccount || null,
+    gatewayRegion: a.associatedGateway?.region || a.virtualGatewayRegion || null, prefixes: (a.allowedPrefixesToDirectConnectGateway || []).map((p) => p.cidr), state: a.associationState });
+  // transit gateway route tables: which attachments are associated, and the routes (static and propagated) they see
+  for (const t of r.tgwRouteTables || []) add('tgw-route-table', t.TransitGatewayRouteTableId, nameTag(t.Tags), null, { tgw: t.TransitGatewayId, default: !!t.DefaultAssociationRouteTable,
+    associations: (t.associations || []).map((a) => ({ attachment: a.TransitGatewayAttachmentId, resourceType: a.ResourceType, resourceId: a.ResourceId })),
+    routes: (t.routes || []).map((x) => ({ dest: x.DestinationCidrBlock || x.PrefixListId, type: x.Type, state: x.State,
+      attachments: (x.TransitGatewayAttachments || []).map((a) => ({ attachment: a.TransitGatewayAttachmentId, resourceType: a.ResourceType, resourceId: a.ResourceId })) })) });
+  // Client VPN: people connecting into a VPC
+  for (const c of r.clientVpns || []) add('client-vpn', c.ClientVpnEndpointId, nameTag(c.Tags) || c.Description, c.VpcId, { cidr: c.ClientCidrBlock, split: !!c.SplitTunnel, status: c.Status?.Code || null,
+    auth: (c.AuthenticationOptions || []).map((a) => a.Type), targets: (c.targets || []).map((t) => ({ subnet: t.TargetNetworkId, status: t.Status?.Code })), groups: c.SecurityGroupIds || [],
+    rules: (c.rules || []).map((x) => ({ cidr: x.DestinationCidr, group: x.GroupId || null, everyone: !!x.AccessAll, status: x.Status?.Code })), dns: c.DnsName || null, connectionLog: !!c.ConnectionLogOptions?.Enabled });
+  // PrivateLink: services this account offers, and who connects to them
+  for (const v of r.endpointServices || []) add('endpoint-service', v.ServiceId, v.ServiceName, null, { name: v.ServiceName, acceptance: !!v.AcceptanceRequired, nlbs: v.NetworkLoadBalancerArns || [], glbs: v.GatewayLoadBalancerArns || [],
+    state: v.ServiceState, connections: (v.connections || []).map((c) => ({ account: c.VpcEndpointOwner, endpoint: c.VpcEndpointId, state: c.VpcEndpointState })) });
+  for (const p of r.prefixLists || []) add('prefix-list', p.PrefixListId, p.PrefixListName, null, { owner: p.OwnerId, managedByAws: p.OwnerId === 'AWS', entries: (p.entries || []).map((e) => e.Cidr), max: p.MaxEntries || null });
+  // Route 53 Resolver: DNS in and out of VPCs (forwarding rules show where names are resolved, often on-premises)
+  for (const e of r.resolverEndpoints || []) add('resolver-endpoint', e.Id, e.Name, e.HostVPCId, { direction: e.Direction, ips: (e.ips || []).map((x) => ({ ip: x.Ip, subnet: x.SubnetId })), groups: e.SecurityGroupIds || [], status: e.Status });
+  for (const x of r.resolverRules || []) add('resolver-rule', x.Id, x.Name, null, { domain: x.DomainName, type: x.RuleType, endpoint: x.ResolverEndpointId || null, targets: (x.TargetIps || []).map((t) => `${t.Ip || t.Ipv6}:${t.Port}`),
+    vpcs: (x.vpcs || []), owner: x.OwnerId || null, shared: x.ShareStatus || null });
   for (const f of r.firewalls || []) add('firewall', f.FirewallArn, f.FirewallName, f.VpcId, { subnets: (f.SubnetMappings || []).map((m) => m.SubnetId), policy: f.FirewallPolicyArn?.split('/').pop() || null,
     endpoints: f.endpoints || [] });
   for (const b of r.lbs || []) add('lb', b.LoadBalancerArn, b.LoadBalancerName, b.VpcId, { scheme: b.Scheme, kind: b.Type, dns: b.DNSName, subnets: (b.AvailabilityZones || []).map((z) => z.SubnetId).filter(Boolean),
@@ -122,7 +158,57 @@ export function awsNetworkReader(credentials) {
           try { bump('apiCalls'); b.listeners = (await elb.send(new DescribeListenersCommand({ LoadBalancerArn: b.LoadBalancerArn }))).Listeners || []; }
           catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add('elasticloadbalancing:DescribeListeners'); b.listeners = []; } else throw e; }
         }
-        items.push(...normalizeAwsRegion(region, { vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs, firewalls, lbs }));
+        // Direct Connect: connections and virtual interfaces per region; gateways are global (read once)
+        const dx = new DirectConnectClient({ region, credentials });
+        const once = async (label, Cmd, key, input = {}, client = dx) => { try { bump('apiCalls'); return (await client.send(new Cmd(input)))[key] || []; } catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add(label); return []; } throw e; } };
+        const [dxConnections, dxVifs] = await Promise.all([once('directconnect:DescribeConnections', DescribeConnectionsCommand, 'connections'), once('directconnect:DescribeVirtualInterfaces', DescribeVirtualInterfacesCommand, 'virtualInterfaces')]);
+        let dxGateways = [], dxAssociations = [];
+        if (region === regions[0]) {
+          dxGateways = await all('directconnect:DescribeDirectConnectGateways', DescribeDirectConnectGatewaysCommand, 'directConnectGateways', {}, dx, 'nextToken', 'nextToken');
+          const seen = new Set();
+          const ask = async (input) => { for (const a of await all('directconnect:DescribeDirectConnectGatewayAssociations', DescribeDirectConnectGatewayAssociationsCommand, 'directConnectGatewayAssociations', input, dx, 'nextToken', 'nextToken')) if (!seen.has(a.associationId)) { seen.add(a.associationId); dxAssociations.push(a); } };
+          for (const g of dxGateways) await ask({ directConnectGatewayId: g.directConnectGatewayId });
+        }
+        // a Direct Connect gateway in another account can still be associated with this account's gateways
+        {
+          const seen = new Set(dxAssociations.map((a) => a.associationId));
+          for (const id of [...vgws.map((g) => g.VpnGatewayId), ...tgws.map((t) => t.TransitGatewayId)]) {
+            for (const a of await all('directconnect:DescribeDirectConnectGatewayAssociations', DescribeDirectConnectGatewayAssociationsCommand, 'directConnectGatewayAssociations', { associatedGatewayId: id }, dx, 'nextToken', 'nextToken')) if (!seen.has(a.associationId)) { seen.add(a.associationId); dxAssociations.push(a); }
+          }
+        }
+        // transit gateway route tables (for the gateways this account owns)
+        const tgwRouteTables = await all('ec2:DescribeTransitGatewayRouteTables', DescribeTransitGatewayRouteTablesCommand, 'TransitGatewayRouteTables');
+        for (const t of tgwRouteTables) {
+          t.associations = await all('ec2:GetTransitGatewayRouteTableAssociations', GetTransitGatewayRouteTableAssociationsCommand, 'Associations', { TransitGatewayRouteTableId: t.TransitGatewayRouteTableId });
+          try { bump('apiCalls'); t.routes = (await ec2.send(new SearchTransitGatewayRoutesCommand({ TransitGatewayRouteTableId: t.TransitGatewayRouteTableId, Filters: [{ Name: 'type', Values: ['static', 'propagated'] }], MaxResults: 1000 }))).Routes || []; }
+          catch (e) { if (DENIED.test(`${e.name} ${e.message}`)) { skipped.add('ec2:SearchTransitGatewayRoutes'); t.routes = []; } else throw e; }
+        }
+        // Client VPN endpoints, their subnets and who may reach what
+        const clientVpns = await all('ec2:DescribeClientVpnEndpoints', DescribeClientVpnEndpointsCommand, 'ClientVpnEndpoints');
+        for (const c of clientVpns) {
+          c.targets = await all('ec2:DescribeClientVpnTargetNetworks', DescribeClientVpnTargetNetworksCommand, 'ClientVpnTargetNetworks', { ClientVpnEndpointId: c.ClientVpnEndpointId });
+          c.rules = await all('ec2:DescribeClientVpnAuthorizationRules', DescribeClientVpnAuthorizationRulesCommand, 'AuthorizationRules', { ClientVpnEndpointId: c.ClientVpnEndpointId });
+        }
+        // PrivateLink services offered, and the endpoints connected to them
+        const endpointServices = await all('ec2:DescribeVpcEndpointServiceConfigurations', DescribeVpcEndpointServiceConfigurationsCommand, 'ServiceConfigurations');
+        if (endpointServices.length) {
+          const conns = await all('ec2:DescribeVpcEndpointConnections', DescribeVpcEndpointConnectionsCommand, 'VpcEndpointConnections');
+          for (const v of endpointServices) v.connections = conns.filter((c) => c.ServiceId === v.ServiceId);
+        }
+        // prefix lists: your own, and AWS's for S3 and DynamoDB (gateway endpoints route to them)
+        const prefixLists = (await all('ec2:DescribeManagedPrefixLists', DescribeManagedPrefixListsCommand, 'PrefixLists')).filter((p) => p.OwnerId !== 'AWS' || /\.(s3|dynamodb)$/.test(p.PrefixListName || ''));
+        for (const p of prefixLists) p.entries = await all('ec2:GetManagedPrefixListEntries', GetManagedPrefixListEntriesCommand, 'Entries', { PrefixListId: p.PrefixListId });
+        // Route 53 Resolver
+        const r53 = new Route53ResolverClient({ region, credentials });
+        const resolverEndpoints = await all('route53resolver:ListResolverEndpoints', ListResolverEndpointsCommand, 'ResolverEndpoints', {}, r53);
+        for (const e of resolverEndpoints) e.ips = await all('route53resolver:ListResolverEndpointIpAddresses', ListResolverEndpointIpAddressesCommand, 'IpAddresses', { ResolverEndpointId: e.Id }, r53);
+        const resolverRules = (await all('route53resolver:ListResolverRules', ListResolverRulesCommand, 'ResolverRules', {}, r53)).filter((x) => x.RuleType !== 'RECURSIVE');
+        if (resolverRules.length) {
+          const assoc = await all('route53resolver:ListResolverRuleAssociations', ListResolverRuleAssociationsCommand, 'ResolverRuleAssociations', {}, r53);
+          for (const x of resolverRules) x.vpcs = assoc.filter((a) => a.ResolverRuleId === x.Id).map((a) => a.VPCId);
+        }
+        items.push(...normalizeAwsRegion(region, { vpcs, subnets, routeTables, igws, eigws, nats, sgs, nacls, peerings, tgws, tgwAttachments, vpns, cgws, vgws, endpoints, enis, flowLogs, firewalls, lbs,
+          dxConnections, dxVifs, dxGateways, dxAssociations, tgwRouteTables, clientVpns, endpointServices, prefixLists, resolverEndpoints, resolverRules }));
       }
       return { items, skipped: [...skipped] };
     },
@@ -134,4 +220,8 @@ export const AWS_NETWORK_READS = [
   'ec2:DescribeSecurityGroups', 'ec2:DescribeNetworkAcls', 'ec2:DescribeVpcPeeringConnections', 'ec2:DescribeTransitGateways', 'ec2:DescribeTransitGatewayAttachments',
   'ec2:DescribeVpnConnections', 'ec2:DescribeCustomerGateways', 'ec2:DescribeVpnGateways', 'ec2:DescribeVpcEndpoints', 'ec2:DescribeNetworkInterfaces', 'ec2:DescribeFlowLogs',
   'network-firewall:ListFirewalls', 'network-firewall:DescribeFirewall', 'elasticloadbalancing:DescribeLoadBalancers', 'elasticloadbalancing:DescribeListeners',
+  'ec2:DescribeTransitGatewayRouteTables', 'ec2:SearchTransitGatewayRoutes', 'ec2:GetTransitGatewayRouteTableAssociations', 'ec2:DescribeClientVpnEndpoints', 'ec2:DescribeClientVpnTargetNetworks',
+  'ec2:DescribeClientVpnAuthorizationRules', 'ec2:DescribeVpcEndpointServiceConfigurations', 'ec2:DescribeVpcEndpointConnections', 'ec2:DescribeManagedPrefixLists', 'ec2:GetManagedPrefixListEntries',
+  'directconnect:DescribeConnections', 'directconnect:DescribeVirtualInterfaces', 'directconnect:DescribeDirectConnectGateways', 'directconnect:DescribeDirectConnectGatewayAssociations',
+  'route53resolver:ListResolverEndpoints', 'route53resolver:ListResolverEndpointIpAddresses', 'route53resolver:ListResolverRules', 'route53resolver:ListResolverRuleAssociations',
 ];

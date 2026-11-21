@@ -13,6 +13,9 @@ const { normalizeGcpProject } = await import('../src/network/gcpReader.js');
 const { demoAwsNetwork, demoGcpNormalized } = await import('../src/network/demo.js');
 const { scannerPolicy } = await import('../src/onboarding.js');
 const { gcpSnippets } = await import('../src/gcp/onboarding.js');
+const { flowRouter, aggregate, parseFlowText, s3Dest, fileTime, dayPrefix } = await import('../src/network/flows.js');
+const { demoFlowKeys, demoFlowFile } = await import('../src/network/demo.js');
+const zlib = await import('node:zlib');
 const PROD = '111111111111', DATA = '222222222222';
 const PROJECTS = ['acme-shared-ci', 'acme-data-stg', 'acme-payments-prod'];
 const demoItems = () => [
@@ -113,6 +116,52 @@ test('onboarding: the scanner policy and the Google Cloud role get the networkin
   assert.ok(g.steps.some((s) => /add-permissions=compute\.networks\.list/.test(s.code)));
 });
 
+test('Direct Connect, Client VPN, PrivateLink, Network Connectivity Center and Private Service Connect on the map, with their findings', () => {
+  const r = analyzeNetwork(demoItems(), estate), L = (kind) => r.graph.links.filter((l) => l.kind === kind);
+  assert.deepEqual(L('dx').map((l) => [l.from, l.to].sort().join(' ↔ ')).sort(), ['aws:dxgw:dxgw-0a10main ↔ aws:tgw:tgw-0a1b2c3d4e5f60001', 'aws:dxgw:dxgw-0a10main ↔ dx:dxcon-0a10jk1']);
+  assert.equal(L('dx').find((l) => l.vif === 'transit').up, 2);
+  assert.equal(L('client-vpn').length, 1);
+  assert.deepEqual(L('privatelink').map((l) => l.outside).sort(), [false, true], 'data-platform is yours, the vendor is not');
+  assert.equal(L('ncc').length, 2);
+  assert.ok(L('psc').some((l) => l.to.includes('acme-payments-prod') || l.from.includes('acme-payments-prod')));
+  assert.deepEqual(['net.dx-single', 'net.tgw-blackhole', 'net.client-vpn-wide', 'net.client-vpn-no-log', 'net.privatelink-external', 'net.gcp-psc-external'].map((c) => sev(r, c).length), [1, 1, 1, 1, 1, 1]);
+});
+
+test('flow logs: file names, headers, and each record on the line it travelled (route tables, transit gateway routes, paths across the clouds)', () => {
+  assert.deepEqual(s3Dest('arn:aws:s3:::logs-bucket/vpc/prod'), { bucket: 'logs-bucket', prefix: 'vpc/prod' });
+  assert.equal(dayPrefix({ prefix: 'p', account: PROD, region: 'us-east-1' }, Date.UTC(2026, 0, 5)), `p/AWSLogs/${PROD}/vpcflowlogs/us-east-1/2026/01/05/`);
+  assert.equal(fileTime(`x/${PROD}_vpcflowlogs_us-east-1_fl-1_20260105T1005Z_abc.log.gz`), Date.UTC(2026, 0, 5, 10, 5));
+  const custom = [...parseFlowText('interface-id srcaddr dstaddr srcport dstport protocol bytes packets start action log-status\neni-1 10.0.0.1 10.0.0.2 1 22 6 100 1 0 ACCEPT OK\neni-1 - - - - - - - 0 - NODATA\n')];
+  assert.deepEqual([custom.length, custom[0].dstport, custom[0]['interface-id']], [1, '22', 'eni-1']);
+
+  const items = demoItems(), g = analyzeNetwork(items, estate).graph, route = flowRouter(items, g);
+  const agg = { links: new Map(), exposure: new Map() };
+  const keys = demoFlowKeys({ bucket: 'acme-flow-logs', prefix: dayPrefix({ prefix: '', account: PROD, region: 'us-east-1' }, Date.now() - 864e5) });
+  assert.equal(keys.length, 24);
+  for (const k of keys) aggregate([...parseFlowText(zlib.gunzipSync(demoFlowFile(k.key)).toString())], route, agg);
+  const used = new Set([...agg.links.values()].map((x) => x.link.split(':')[0] + ':' + x.link.split('|').map((y) => y.split(':').pop()).join('|')));
+  const kinds = [...new Set([...agg.links.values()].map((x) => x.link.split(':')[0]))].sort();
+  assert.deepEqual(kinds, ['client-vpn', 'dx', 'internet', 'peering', 'tgw', 'vpn']);
+  assert.ok(![...used].some((x) => x.includes('vpc-0c9c9c9c9c9c90099')), 'nothing on the vendor peering');
+  assert.ok(![...agg.links.values()].some((x) => x.link.includes('198.51.100.200')), 'nothing on the office VPN');
+  const ssh = [...agg.exposure.values()].filter((x) => x.target === 'eni-0a100000000bastion');
+  assert.deepEqual([...new Set(ssh.map((x) => `${x.port}:${x.action}`))].sort(), ['22:ACCEPT', '23:REJECT', '3389:REJECT']);
+  assert.ok([...agg.exposure.values()].some((x) => x.target.endsWith('payments-web/0a1b2c3d4e5f6000') && x.port === 443), 'the load balancer, not its interface');
+  // the S3 call through the gateway endpoint is not internet traffic
+  assert.ok(![...agg.links.values()].some((x) => x.link.startsWith('internet') && x.port === 443 && x.bytes === 40000));
+});
+
+test('the scanner policy reads flow log files and nothing else', () => {
+  const p = scannerPolicy({ network: true }), st = (sid) => p.Statement.find((x) => x.Sid === sid);
+  assert.deepEqual(st('ReadFlowLogFiles').Resource, ['arn:aws:s3:::*/AWSLogs/*/vpcflowlogs/*', 'arn:aws:s3:::*/AWSLogs/aws-account-id=*/aws-service=vpcflowlogs/*']);
+  assert.deepEqual(st('NeverReadOtherObjects').NotResource, st('ReadFlowLogFiles').Resource);
+  assert.ok(st('NeverDecryptOtherData').Condition.StringNotLike);
+  const both = scannerPolicy({ network: true, s3: { bucket: 'trail', prefix: '' } });
+  assert.equal(both.Statement.find((x) => x.Sid === 'NeverReadOtherObjects').NotResource.length, 3);
+  assert.deepEqual(Object.keys(both.Statement.find((x) => x.Sid === 'NeverDecryptOtherData').Condition).sort(), ['Null', 'StringNotLike']);
+  assert.ok(!scannerPolicy({}).Statement.some((x) => x.Sid === 'ReadFlowLogFiles'));
+});
+
 // ---------------------------------------------------------------- with the database
 let pg, db, ext, sync, api, gscan;
 const owner = { id: null, scope_accounts: null };
@@ -188,6 +237,40 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
   assert.ok(so.exposures.every((e) => e.cloud === 'aws' && e.owner === DATA));
   assert.ok((await api.networkFindings(scoped, {})).items.every((x) => x.cloud === 'aws' && x.owner === DATA));
   await assert.rejects(api.networkDetail(scoped, 'gcp:net:projects/acme-shared-ci/global/networks/ci'), /Not found/);
+});
+
+test('flow logs from S3: read once, a budget at a time; lines used, not used, not known; ports nobody uses', async () => {
+  const flows = await import('../src/network/flows.js');
+  const r = await flows.flowTick();
+  assert.ok(r.files >= 7 * 24 && r.errors === 0, JSON.stringify(r));
+  assert.equal((await flows.flowTick())?.files || 0, 0, 'every file is read once');
+  const reads = (await db.query('SELECT * FROM net_flow_reads')).rows;
+  assert.equal(reads.find((x) => x.flow_log === 'fl-0a10000000000001').bucket, 'acme-flow-logs');
+  await sync.analyzeAndFile();
+  (await import('../src/cache.js')).clearCache();
+  const o = await api.networkOverview(owner);
+  const L = (kind, has) => o.links.find((l) => l.kind === kind && (l.from.includes(has) || l.to.includes(has)));
+  assert.equal(L('peering', 'vpc-0b2b2c3d4e5f60020').usage.state, 'used');
+  assert.equal(L('peering', 'vpc-0c9c9c9c9c9c90099').usage.state, 'unused');
+  assert.equal(L('vpn', 'transit').usage.state, 'used');
+  assert.equal(L('vpn', '198.51.100.200').usage.state, 'unused', 'covered through the transit gateway');
+  assert.equal(L('dx', 'dxcon').usage.state, 'used');
+  assert.equal(L('peering', 'acme-data-stg').usage.state, 'unknown', 'only Google Cloud sees it');
+  assert.equal(L('privatelink', 'vpc-0b2b2c3d4e5f60020').usage.state, 'unknown', 'only the consumer side can see PrivateLink, and data-platform has no flow logs');
+  assert.ok(L('peering', 'vpc-0b2b2c3d4e5f60020').usage.ports.some((p) => p.port === 6379));
+  assert.equal(L('vpn', 'transit').usage.hourly.length, 24);
+  const f = (await db.query(`SELECT control, item_name, title FROM net_findings WHERE status = 'open' AND control IN ('net.link-unused', 'net.open-port-unused') ORDER BY control, title`)).rows;
+  assert.ok(f.some((x) => x.control === 'net.link-unused' && /prod-core ↔ vpc-0c9c9c9c9c9c90099/.test(x.title)), JSON.stringify(f));
+  assert.ok(f.some((x) => x.control === 'net.link-unused' && /office-hq/.test(x.title)));
+  assert.ok(f.some((x) => x.control === 'net.open-port-unused' && /tcp 80 on payments-web/.test(x.title)));
+  assert.ok(!f.some((x) => /tcp 22 on bastion/.test(x.title)), 'SSH on the bastion is used');
+  const bastion = o.exposures.find((e) => e.id === 'eni-0a100000000bastion');
+  assert.ok(bastion.ports[0].seen.accepted > 0 && bastion.reached[0].port === 22);
+  // a bucket the scanner may not read
+  await db.query('DELETE FROM net_flow_files'); await db.query('DELETE FROM net_flow_reads');
+  process.env.DEMO_FLOW_DENIED = '1';
+  try { const x = await flows.flowTick(); assert.equal(x.errors, 1); } finally { delete process.env.DEMO_FLOW_DENIED; }
+  assert.match((await db.query('SELECT error FROM net_flow_reads')).rows[0].error, /not allowed to read s3:\/\/acme-flow-logs/);
 });
 
 test('a read that is refused is kept apart; a finding that goes away is resolved; turning it off stops reads', async () => {

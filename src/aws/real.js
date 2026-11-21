@@ -8,6 +8,7 @@ import { IAMClient, ListUsersCommand, GetUserCommand, ListAccessKeysCommand, Get
   GenerateServiceLastAccessedDetailsCommand, GetServiceLastAccessedDetailsCommand, ListSAMLProvidersCommand, GetSAMLProviderCommand } from '@aws-sdk/client-iam';
 import { samlIssuer } from '../identityCenter.js';
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+const FLOW_KEY = /(^|\/)AWSLogs\/(aws-account-id=)?\d{12}\/(aws-service=)?vpcflowlogs\//;
 import { EKSClient, ListClustersCommand, DescribeClusterCommand } from '@aws-sdk/client-eks';
 import { OrganizationsClient, ListAccountsCommand } from '@aws-sdk/client-organizations';
 import { SSOAdminClient, ListInstancesCommand, ListPermissionSetsCommand, DescribePermissionSetCommand, ListAccountsForProvisionedPermissionSetCommand,
@@ -45,6 +46,8 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
   let s3client = null;
   // the bucket's region if set, else the account's first region; followRegionRedirects copes with a wrong guess
   const s3c = () => s3client || (s3client = new S3Client({ region: account.s3_region || account.regions[0] || 'us-east-1', credentials, followRegionRedirects: true }));
+  const flowClients = new Map();
+  const flowS3 = (bucket) => flowClients.get(bucket) || flowClients.set(bucket, new S3Client({ region: account.regions[0] || 'us-east-1', credentials, followRegionRedirects: true })).get(bucket);
   const ct = (region) => trails.get(region) || trails.set(region, new CloudTrailClient({ region, credentials })).get(region);
 
   return {
@@ -130,6 +133,24 @@ export async function realGateway(account, { externalId, sessionName = 'curious-
     },
     /** Networking (the Networking extension), every region of the account: { items, skipped }. */
     async listNetwork() { return awsNetworkReader(credentials).read(account.regions?.length ? account.regions : ['us-east-1']); },
+    /** VPC flow log files under one day's prefix (Networking extension). Only keys under AWSLogs/<account>/vpcflowlogs/. */
+    async listFlowLogObjects({ bucket, prefix }) {
+      if (!FLOW_KEY.test(prefix)) throw new Error('not a VPC flow log prefix');
+      const c = flowS3(bucket), out = []; let ContinuationToken;
+      do {
+        bump('apiCalls');
+        const r = await c.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken }));
+        for (const o of r.Contents || []) if (o.Key.endsWith('.log.gz')) out.push({ key: o.Key, size: o.Size || 0 });
+        ContinuationToken = r.IsTruncated ? r.NextContinuationToken : undefined;
+      } while (ContinuationToken);
+      return out;
+    },
+    async getFlowLogObject({ bucket, key }) {
+      if (!FLOW_KEY.test(key)) throw new Error('not a VPC flow log file');
+      bump('apiCalls');
+      const r = await flowS3(bucket).send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      return Buffer.from(await r.Body.transformToByteArray());
+    },
     async listSamlProviders() {   // the issuer in each provider's metadata says which IdP (or Identity Center instance) it is
       const list = (await iam.send(new ListSAMLProvidersCommand({}))).SAMLProviderList || [];
       const out = [];

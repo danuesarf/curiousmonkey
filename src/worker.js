@@ -6,7 +6,8 @@ import { alertsTick } from './alerts.js';
 import { trustTick, pruneCallers } from './trustSync.js';
 import { policyTick } from './policySync.js';
 import { resourceTick } from './resourceSync.js';
-import { networkTick } from './network/sync.js';
+import { networkTick, analyzeAndFile } from './network/sync.js';
+import { flowTick } from './network/flows.js';
 import { historyFor } from './history.js';
 import { principalFromCallerArn } from './aws/credentials.js';
 // Background worker: claims scan jobs from Postgres and runs them. Run as many replicas as you like.
@@ -243,6 +244,11 @@ export async function startWorker({ concurrency = Number(process.env.WORKER_CONC
   const networkRun = () => { if (networking || stop.stopped) return; networking = true;
     networkTick({ log }).catch((e) => log('error', 'networking read failed', { error: e.message })).finally(() => { networking = false; }); };
   timers.push(setInterval(networkRun, 30_000), setTimeout(networkRun, 12_000));
+  // its VPC flow logs: new files in S3, a budget at a time, then the findings that depend on them
+  let flowing = false;
+  const flowRun = () => { if (flowing || stop.stopped) return; flowing = true;
+    flowTick({ log }).then((r) => (r?.files ? analyzeAndFile() : null)).catch((e) => log('error', 'flow logs failed', { error: e.message })).finally(() => { flowing = false; }); };
+  timers.push(setInterval(flowRun, 60_000), setTimeout(flowRun, 40_000));
   timers.push(setInterval(() => pruneCallers(config.scanner.callerKeepDays, { log }).catch((e) => log('error', 'caller pruning failed', { error: e.message })), 6 * 3600_000));
   const loops = Array.from({ length: concurrency }, (_, i) => loop(stop, i));
   log('info', 'worker started', { concurrency, scheduler });

@@ -58,8 +58,9 @@ export async function loadItems() {
 
 /** Everything worked out again: findings filed (opened, updated, resolved). Returns the analysis for callers that want it. */
 export async function analyzeAndFile() {
-  const [items, estate, policy] = await Promise.all([loadItems(), networkEstate(), loadPolicy()]);
-  const r = analyzeNetwork(items, estate, policy);
+  const { loadUsage } = await import('./flows.js');
+  const [items, estate, policy, usage] = await Promise.all([loadItems(), networkEstate(), loadPolicy(), loadUsage()]);
+  const r = analyzeNetwork(items, estate, policy, usage);
   const acct = (f) => (f.cloud === 'aws' ? estate.awsAccounts.get(f.owner)?.id || null : null);
   const fs = r.findings;
   await tx(async (c) => {
