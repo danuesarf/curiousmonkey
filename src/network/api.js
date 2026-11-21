@@ -4,7 +4,7 @@
 import { query } from '../db.js';
 import { cached, scopeKey } from '../cache.js';
 import { analyzeNetwork, ADMIN_PORTS, DATA_PORTS } from './analyze.js';
-import { loadItems, networkEstate } from './sync.js';
+import { loadItems, networkEstate, pendingNetworkRead } from './sync.js';
 import { loadUsage } from './flows.js';
 import { loadPolicy } from '../controls.js';
 import { environmentOf } from '../environments.js';
@@ -22,8 +22,35 @@ async function model(day = 0) {
       query('SELECT DISTINCT ON (project_id) project_id, name, environment, connection_id FROM gcp_projects ORDER BY project_id').then((r) => r.rows).catch(() => []),
       loadUsage({ hourStart: start }), query('SELECT * FROM net_flow_reads ORDER BY flow_log').then((r) => r.rows).catch(() => [])]);
     const r = analyzeNetwork(items, estate, policy, usage);
-    return { items, ...r, accts, projects, hourStart: start, flowReads };
+    return { items, ...r, accts, projects, hourStart: start, flowReads, targetOf: targets(r.graph, items) };
   }, { freshMs: 30e3, staleMs: 120e3 });
+}
+
+/**
+ * Where on the map a finding is: the line it is about (a VPN, an unused peering, a PrivateLink service shared
+ * outside), else the box (a VPC, a network, a transit gateway, a Direct Connect gateway), else null.
+ */
+function targets(graph, items) {
+  const links = new Set(graph.links.map((l) => l.id));
+  const nodeByNative = new Map(); for (const n of graph.nodes) if (n.nativeId && !nodeByNative.has(n.nativeId)) nodeByNative.set(n.nativeId, n.id);
+  // a line by what it is built from: its own ID, an AWS VPN connection on it, a Google Cloud tunnel on it
+  const linkBy = new Map();
+  const put = (k, l) => { if (k && (!linkBy.has(k) || (l.outside && !linkBy.get(k).outside))) linkBy.set(k, l); };
+  for (const l of graph.links) {
+    put(l.nativeId, l);
+    for (const v of l.vpns || []) put(v.id, l);
+    for (const t of l.tunnels || []) if (t.gcp) put(`tunnel:${t.gcp}`, l);
+  }
+  const tgwOfTable = new Map(items.filter((i) => i.type === 'tgw-route-table').map((i) => [i.id, i.data.tgw]));
+  return (f) => {
+    const native = f.native_id ?? f.nativeId, type = f.item_type ?? f.itemType;
+    if (links.has(native)) return native;
+    const l = linkBy.get(native) || (type === 'vpn-tunnel' ? linkBy.get(`tunnel:${String(native).split('/').pop()}`) : null);
+    if (l && !f.vpc) return l.id;
+    if (type === 'tgw-route-table' && tgwOfTable.get(native)) return `aws:tgw:${tgwOfTable.get(native)}`;
+    if (f.vpc) return f.cloud === 'aws' ? `aws:vpc:${f.owner}:${f.vpc}` : `gcp:net:${f.vpc}`;
+    return nodeByNative.get(native) || null;
+  };
 }
 
 /** Which owners this person may see: AWS account IDs in scope, and Google Cloud only when not limited. */
@@ -46,13 +73,17 @@ export async function networkOverview(user, { day = 0 } = {}) {
   const env = new Map([...m.accts.map((a) => [`aws|${a.account_id}`, { name: a.name, environment: environmentOf(a.environment), id: a.id }]),
     ...m.projects.map((p) => [`gcp|${p.project_id}`, { name: p.project_id, title: p.name, environment: environmentOf(p.environment) }])]);
   for (const n of nodes) { const e = env.get(`${n.cloud}|${n.owner}`); n.environment = e?.environment || null; n.ownerLabel = e?.name || n.ownerName || n.owner; n.accountId = e?.id || null; }
-  const counts = (await query(`SELECT cloud, owner, severity, count(*)::int AS n FROM net_findings WHERE status = 'open' AND decision IS DISTINCT FROM 'expected' GROUP BY 1, 2, 3`)).rows.filter((r) => v.ok(r.cloud, r.owner));
-  const sev = { high: 0, medium: 0, low: 0 }; for (const c of counts) sev[c.severity] += c.n;
+  const open = (await query(`SELECT id, control, severity, title, cloud, owner, item_type, native_id, vpc FROM net_findings WHERE status = 'open' AND decision IS DISTINCT FROM 'expected'
+    ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, title`)).rows.filter((r) => v.ok(r.cloud, r.owner));
+  const sev = { high: 0, medium: 0, low: 0 }; for (const c of open) sev[c.severity]++;
+  // what is open on each line, for its panel (boxes fetch theirs with the detail)
+  const linkIds = new Set(links.map((l) => l.id)), onLinks = {};
+  for (const r of open) { const t = m.targetOf(r); if (linkIds.has(t)) (onLinks[t] ||= []).push({ id: r.id, control: r.control, severity: r.severity, title: r.title }); }
   const owners = [...new Set(nodes.filter((n) => n.cloud && !n.stub).map((n) => `${n.cloud}|${n.owner}`))].map((k) => { const [cloud, owner] = k.split('|'); const e = env.get(k); return { cloud, owner, name: e?.name || owner, title: e?.title || null, environment: e?.environment || null, accountId: e?.id || null }; });
   return {
     reads: reads.map((r) => ({ cloud: r.cloud, owner: r.owner, name: env.get(`${r.cloud}|${r.owner}`)?.name || r.owner, readAt: r.read_at, skipped: r.skipped, error: r.error, counts: r.counts })),
     owners, nodes, links, exposures: m.exposures.filter((e) => v.ok(e.cloud, e.owner)).sort((a, b) => SEV[a.severity] - SEV[b.severity]),
-    findings: sev, ports: { admin: ADMIN_PORTS, data: DATA_PORTS }, hourStart: new Date(m.hourStart).toISOString(),
+    findings: sev, linkFindings: onLinks, pending: await pendingNetworkRead(), ports: { admin: ADMIN_PORTS, data: DATA_PORTS }, hourStart: new Date(m.hourStart).toISOString(),
     flowLogs: m.flowReads.filter((r) => v.ok('aws', r.owner)).map((r) => ({ flowLog: r.flow_log, owner: r.owner, vpcNode: r.vpc_node, bucket: r.bucket, prefix: r.prefix, lastTime: r.last_time, files: r.files,
       bytes: Number(r.bytes || 0), note: r.note, error: r.error, readAt: r.read_at })),
   };
@@ -68,11 +99,18 @@ export async function networkFindings(user, q = {}) {
   if (q.control) add('f.control = ?', String(q.control));
   if (q.owner) add('f.owner = ?', String(q.owner));
   if (q.vpc) add('f.vpc = ?', String(q.vpc));
-  if (q.q) add(`(f.title || ' ' || f.detail || ' ' || coalesce(f.item_name, '') || ' ' || f.owner) ILIKE ?`, `%${String(q.q).replace(/[%_]/g, '\\$&')}%`);
+  // a member limited to some accounts: only those, before the limit, so the list is not cut short by rows they cannot see
+  if (user.scope_accounts) add(`f.cloud = 'aws' AND f.owner = ANY(?)`, [...v.aws]);
+  const names = new Map([...m.accts.map((a) => [`aws|${a.account_id}`, a.name]), ...m.projects.map((x) => [`gcp|${x.project_id}`, x.project_id])]);
+  if (q.q) {
+    // the account's name finds its findings too, as the list shows names, not numbers
+    const text = String(q.q).toLowerCase(), owners = [...names].filter(([, n]) => String(n).toLowerCase().includes(text)).map(([k]) => k.split('|')[1]);
+    p.push(`%${String(q.q).replace(/[%_\\]/g, '\\$&')}%`, owners);
+    where.push(`((f.title || ' ' || f.detail || ' ' || f.control || ' ' || coalesce(f.item_name, '') || ' ' || coalesce(f.native_id, '') || ' ' || f.owner) ILIKE $${p.length - 1} OR f.owner = ANY($${p.length}))`);
+  }
   const rows = (await query(`SELECT f.*, u.name AS decided_by_name FROM net_findings f LEFT JOIN users u ON u.id = f.decided_by WHERE ${where.join(' AND ')}
     ORDER BY CASE f.severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, f.decision NULLS FIRST, f.updated_at DESC LIMIT 1000`, p)).rows.filter((r) => v.ok(r.cloud, r.owner));
-  const names = new Map([...m.accts.map((a) => [`aws|${a.account_id}`, a.name]), ...m.projects.map((x) => [`gcp|${x.project_id}`, x.project_id])]);
-  return { items: rows.map((r) => ({ id: r.id, control: r.control, severity: r.severity, cloud: r.cloud, owner: r.owner, ownerName: names.get(`${r.cloud}|${r.owner}`) || r.owner, itemType: r.item_type,
+  return { items: rows.map((r) => ({ id: r.id, control: r.control, severity: r.severity, cloud: r.cloud, owner: r.owner, ownerName: names.get(`${r.cloud}|${r.owner}`) || r.owner, itemType: r.item_type, target: m.targetOf(r),
     nativeId: r.native_id, itemName: r.item_name, vpc: r.vpc, title: r.title, detail: r.detail, suggestion: r.suggestion, status: r.status, decision: r.decision, note: r.note,
     decidedBy: r.decided_by_name, decidedAt: r.decided_at, openedAt: r.created_at, resolvedAt: r.resolved_at })) };
 }
@@ -85,8 +123,11 @@ export async function networkDetail(user, nodeId) {
   const mine = (i) => i.cloud === n.cloud && i.owner === n.owner && i.vpc === n.nativeId;
   const list = (type) => m.items.filter((i) => i.type === type && mine(i));
   const links = m.graph.links.filter((l) => l.from === n.id || l.to === n.id).map((l) => ({ ...l, other: m.graph.nodes.find((x) => x.id === (l.from === n.id ? l.to : l.from)) }));
-  const findings = (await query(`SELECT id, control, severity, title, detail, suggestion, item_name, item_type, decision FROM net_findings WHERE status = 'open' AND cloud = $1 AND owner = $2 AND (vpc = $3 OR native_id = $3)
-    ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END`, [n.cloud || '', n.owner || '', n.nativeId || ''])).rows;
+  // what is open on this box: in it, or about it (a transit gateway's route table, a Direct Connect gateway)
+  const findings = (await query(`SELECT id, control, severity, title, detail, suggestion, item_name, item_type, native_id, vpc, cloud, owner, decision FROM net_findings WHERE status = 'open' AND cloud = $1
+    ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END`, [n.cloud || ''])).rows
+    .filter((r) => v.ok(r.cloud, r.owner) && ((r.owner === n.owner && (r.vpc === n.nativeId || r.native_id === n.nativeId)) || m.targetOf(r) === n.id))
+    .map(({ native_id: _n, vpc: _v, cloud: _c, owner: _o, ...r }) => r);
   const base = { node: n, links, findings, exposures: m.exposures.filter((e) => e.cloud === n.cloud && e.owner === n.owner && e.vpc === n.nativeId) };
   if (n.kind === 'vpc' && !n.stub) {
     const rts = list('route-table'), subnets = list('subnet');

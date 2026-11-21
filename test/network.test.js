@@ -193,6 +193,14 @@ test('off by default: nothing is read; turning it on reads every account and pro
   assert.ok(r.findings > 10);
   // a second tick has nothing due
   assert.equal(await sync.networkTick(), null);
+  // "Read now": asked for, and done by the next tick; when each owner was read is left alone until then
+  const readAt = async () => (await db.query(`SELECT max(read_at) AS t FROM net_reads`)).rows[0].t.getTime();
+  const was = await readAt();
+  await sync.requestNetworkRead();
+  assert.ok(await sync.pendingNetworkRead());
+  assert.equal(await readAt(), was, 'asking for a read does not make the last read look older');
+  assert.ok(await sync.networkTick());
+  assert.equal(await sync.pendingNetworkRead(), null);
   const reads = (await db.query(`SELECT cloud, owner, error FROM net_reads ORDER BY cloud, owner`)).rows;
   assert.deepEqual(reads.map((x) => `${x.cloud}:${x.owner}:${x.error}`), ['aws:111111111111:null', 'aws:222222222222:null', 'gcp:acme-data-stg:null', 'gcp:acme-payments-prod:null', 'gcp:acme-shared-ci:null']);
   const f = (await db.query(`SELECT control, severity, item_name FROM net_findings WHERE status = 'open' AND control = 'net.sg-admin-open' ORDER BY item_name`)).rows;
@@ -221,6 +229,24 @@ test('the page: overview, a VPC and a network in detail, findings with decisions
   await api.decideNetFinding({ ...owner, id: null }, bastion.id, { decision: 'expected', note: 'IP-restricted at the edge' });
   assert.equal((await api.networkFindings(owner, { severity: 'high' })).items.find((x) => x.id === bastion.id).decision, 'expected');
   await api.undecideNetFinding(owner, bastion.id);
+
+  // each finding says where it is drawn: a VPN that is down is its line, a blackhole route its transit gateway
+  const all = (await api.networkFindings(owner, {})).items;
+  const drawn = new Set([...o.nodes.map((n) => n.id), ...o.links.map((l) => l.id)]);
+  assert.ok(all.filter((x) => x.target).every((x) => drawn.has(x.target)), 'every target is on the map');
+  assert.ok(all.filter((x) => x.vpc).every((x) => x.target), 'everything in a VPC or network has one');
+  const vpnDown = all.find((x) => x.control === 'net.vpn-down');
+  assert.ok(vpnDown && o.links.find((l) => l.id === vpnDown.target)?.kind === 'vpn');
+  assert.ok(o.linkFindings[vpnDown.target].some((x) => x.id === vpnDown.id), "the line's panel lists it");
+  const hole = all.find((x) => x.control === 'net.tgw-blackhole');
+  if (hole) {
+    assert.match(hole.target, /^aws:tgw:/);
+    assert.ok((await api.networkDetail(owner, hole.target)).findings.some((x) => x.control === 'net.tgw-blackhole'), "and the transit gateway's panel");
+  }
+  // the list is searched by what it shows: the account's name, the control
+  const byName = (await api.networkFindings(owner, { q: 'data-platform-stg' })).items;
+  assert.ok(byName.length && byName.some((x) => x.owner === DATA));
+  assert.ok((await api.networkFindings(owner, { q: 'net.sg-admin-open' })).items.every((x) => x.control === 'net.sg-admin-open'));
 
   const inv = await api.networkInventory(owner, { type: 'sg' });
   assert.ok(inv.items.every((i) => i.type === 'sg') && inv.types.vpc >= 4);
