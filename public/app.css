@@ -681,6 +681,8 @@ span.tm2-dot-high{background:var(--red)}span.tm2-dot-medium{background:var(--amb
 /* roles: the account picker */
 .acct-row{gap:8px;flex-wrap:wrap;width:100%}
 .acct-picker{position:relative}
+/* cards clip what overflows them; an open account list must not be cut off at the card's edge (Trust's filter bar) */
+.card:has(.acct-picker[open]){overflow:visible}
 .acct-picker>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px;max-width:340px}
 .acct-picker>summary::-webkit-details-marker{display:none}
 .acct-picker>summary span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
