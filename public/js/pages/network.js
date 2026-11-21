@@ -21,7 +21,7 @@ const RED = 'var(--red)', AMBER = 'var(--amber)';
 const sevColor = (s) => (s === 'high' ? RED : s === 'medium' ? AMBER : 'var(--edge)');
 const LINK = { peering: ['Peering', 'var(--blue)'], tgw: ['Transit gateway', 'var(--green)'], 'tgw-peering': ['Transit gateway peering', 'var(--green)'], vpn: ['VPN', 'var(--banana)'],
   dx: ['Direct Connect', '#ff9f6b'], 'client-vpn': ['Client VPN', '#7fd1ff'], privatelink: ['PrivateLink', '#d6a2ff'], psc: ['Private Service Connect', '#d6a2ff'], ncc: ['Network Connectivity Center', 'var(--green)'],
-  interconnect: ['Interconnect', '#c59bff'], share: ['Shared VPC (AWS RAM)', '#b9a3ff'], internet: ['Internet', 'var(--faint)'] };
+  interconnect: ['Interconnect', '#c59bff'], share: ['Shared VPC', '#b9a3ff'], internet: ['Internet', 'var(--faint)'] };
 const KIND = { vpc: 'VPC', slice: 'SHARED VPC', network: 'NETWORK', tgw: 'TRANSIT GATEWAY', dxgw: 'DIRECT CONNECT GATEWAY', hub: 'NCC HUB', peer: 'PEER', internet: 'INTERNET' };
 const PEER = { dx: 'DIRECT CONNECT', 'client-vpn': 'CLIENT VPN', account: 'ACCOUNT', psc: 'PSC SERVICE' };
 const USE = { used: ['used', 'b-green'], unused: ['not used', 'b-neutral'], quiet: ['quiet so far', 'b-neutral'], unknown: ['not known', 'b-neutral'] };
@@ -188,7 +188,10 @@ export async function networkPage(ctx) {
       l.vpns?.length > 0 && sect('AWS VPN connections', h('ul', { class: 'small' }, l.vpns.map((v) => h('li', null, `${v.name} (${v.id}) to ${v.cgw || 'unknown address'} · ${v.state}`)))),
       l.kind === 'dx' && l.vif && kv([['Virtual interface', `${l.vif} · VLAN ${l.vlan}`], ['BGP', `${l.up}/${l.total} sessions up`], l.prefixes?.length && ['Prefixes', l.prefixes.join(', ')]]),
       l.kind === 'dx' && !l.vif && l.prefixes?.length > 0 && kv([['Allowed prefixes', l.prefixes.join(', ')]]),
-      l.kind === 'share' && h('p', { class: 'small muted' }, `${a?.ownerLabel || a?.owner || 'A member account'} runs its resources in ${b?.label || 'a VPC'}, which ${b?.ownerLabel || b?.owner || 'another account'} owns and shares with it through AWS RAM: they sit in the owner's subnets, behind its route tables, gateways and network ACLs.${l.interfaces != null ? ` ${l.interfaces} network interface${l.interfaces === 1 ? '' : 's'} today.` : ''}`),
+      l.kind === 'share' && h('p', { class: 'small muted' }, a?.cloud === 'gcp'
+        ? (l.attachedOnly ? `${a?.ownerLabel || a?.owner} is a service project of ${b?.ownerLabel || b?.owner}'s Shared VPC and runs nothing in its networks yet.`
+          : `${a?.ownerLabel || a?.owner || 'A service project'} runs its VMs in ${b?.label || 'a network'}, which host project ${b?.ownerLabel || b?.owner || ''} shares with it (Shared VPC): they sit in the host's subnets, under its firewall rules, routes and Cloud NAT. ${plural(l.instances, 'instance')} today.`)
+        : `${a?.ownerLabel || a?.owner || 'A member account'} runs its resources in ${b?.label || 'a VPC'}, which ${b?.ownerLabel || b?.owner || 'another account'} owns and shares with it through AWS RAM: they sit in the owner's subnets, behind its route tables, gateways and network ACLs.${l.interfaces != null ? ` ${plural(l.interfaces, 'network interface')} today.` : ''}`),
       l.kind === 'client-vpn' && l.rules?.length > 0 && sect('Who may reach what', h('ul', { class: 'small' }, l.rules.map((r) => h('li', null, `${r.everyone ? 'every user' : `group ${r.group}`} → ${r.cidr}`)))),
       usageSect(l),
       h('div', { class: 'row' }, a && !a.stub && a.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(a.id) }, `Open ${a.label}`), b && !b.stub && b.kind !== 'internet' && h('button', { class: 'btn sm', onClick: () => pick(b.id) }, `Open ${b.label}`)));
@@ -206,32 +209,46 @@ export async function networkPage(ctx) {
       u.hourly && h('div', { class: 'net-spark', title: 'Bytes by the hour, the last 24 hours' }, u.hourly.map((b) => h('span', { style: `height:${Math.max(1, Math.round((b.bytes / max) * 26))}px`, class: b.rejected && !b.bytes ? 'rej' : '' }))),
       u.ports.length > 0 && h('div', { class: 'tiny' }, 'Ports: ', u.ports.map((p) => `${p.proto} ${p.port} (${human(p.bytes)})`).join(', ')));
   }
-  // an account by the name it goes by here
-  const accountName = (id) => d.owners.find((o) => o.cloud === 'aws' && o.owner === id)?.name || d.nodes.find((n) => n.owner === id && n.ownerLabel)?.ownerLabel || id;
-  // what a shared VPC panel says first: whose it is, and what is not known
+  // an account or project by the name it goes by here
+  const accountName = (id) => d.owners.find((o) => o.owner === id)?.name || d.nodes.find((n) => n.owner === id && n.ownerLabel)?.ownerLabel || id;
+  const plural = (k, one, many = `${one}s`) => `${num(k || 0)} ${k === 1 ? one : many}`;
+  // what a shared VPC (AWS) or Shared VPC network (Google Cloud) panel says first: whose it is, and what is not known
   function sharedNote(n, x) {
+    // AWS accounts go by their names here, Google Cloud projects by their IDs (as on the planes and cards)
+    const gcp = n.cloud === 'gcp', host = gcp ? n.vpcOwner : n.vpcOwnerName || n.vpcOwner, who = gcp ? n.owner : accountName(n.owner);
     if (n.kind === 'slice') return h('div', { class: 'net-note' },
-      h('p', { class: 'small' }, `${accountName(n.owner)} runs ${num(n.interfaces || 0)} network interface${n.interfaces === 1 ? '' : 's'} in this VPC, which ${n.vpcOwnerName || n.vpcOwner} owns and shares with it (AWS RAM). Its subnets, route tables, gateways and network ACLs are the owner's; the resources below are ${accountName(n.owner)}'s.`),
-      x.vpcNode && h('button', { class: 'btn sm', onClick: () => select(x.vpcNode) }, 'Open the whole VPC'));
+      h('p', { class: 'small' }, !gcp ? `${who} runs ${plural(n.interfaces, 'network interface')} in this VPC, which ${host} owns and shares with it (AWS RAM). Its subnets, route tables, gateways and network ACLs are the owner's; the resources below are ${who}'s.`
+        : n.attachedOnly ? `${who} is a service project of ${host}'s Shared VPC and runs nothing in its networks yet. It is drawn on ${n.label}, the host's busiest network: it may use any subnet the host grants it.`
+          : `${who} runs ${plural(n.instances, 'instance')} in this network, which ${host} shares with it (Shared VPC). Its subnets, firewall rules, routes and Cloud NAT are the host project's; the instances below are ${who}'s.`),
+      x.vpcNode && h('button', { class: 'btn sm', onClick: () => select(x.vpcNode) }, gcp ? 'Open the whole network' : 'Open the whole VPC'));
     const notes = [];
-    if (n.ownerNotRead) notes.push(`The account that owns it (${n.owner}${n.ownerName ? `, ${n.ownerName}` : ''}) is not connected, so its route tables, gateways and network ACLs are not known: which subnets are public, and the way out, are not either. Connect it to see them.`);
+    if (n.ownerNotRead) notes.push(gcp ? `The host project (${n.owner}) is not connected, so this network's subnets, firewall rules, routes and Cloud NAT are not known. Connect it to see them.`
+      : `The account that owns it (${n.owner}${n.ownerName ? `, ${n.ownerName}` : ''}) is not connected, so its route tables, gateways and network ACLs are not known: which subnets are public, and the way out, are not either. Connect it to see them.`);
     if (n.participantView) notes.push('Shared with an account you can see: only what that account runs here is shown.');
     return notes.length ? h('div', { class: 'net-note' }, notes.map((t) => h('p', { class: 'small' }, t))) : null;
   }
-  // who runs what in a shared VPC: the owner, each member account, and accounts it is shared with that run nothing yet
-  function tenantsSect(list) {
-    const how = (t) => (t.owner ? 'owner' : [t.via?.includes('read') && 'read in its account', t.via?.includes('interfaces') && "seen in the owner's subnets", t.via?.includes('ram') && `RAM share${t.share ? ` ${t.share}` : ''}`].filter(Boolean).join(' · '));
-    return sect(`Who runs what here (${list.length} accounts)`, h('table', { class: 'net-table' },
-      h('thead', null, h('tr', null, ['Account', 'Interfaces', 'Subnets', 'Groups', 'Exposed'].map((y) => h('th', null, y)))),
+  // who runs what in a shared VPC or a Shared VPC network: the owner (host), each member (service project), and those
+  // it is shared with that run nothing yet
+  function tenantsSect(list, n) {
+    const gcp = n.cloud === 'gcp';
+    const how = (t) => (t.owner ? (gcp ? 'host project' : 'owner') : [t.via?.includes('read') && 'read in its account', t.via?.includes('interfaces') && "seen in the owner's subnets",
+      t.via?.includes('instances') && 'runs instances here', t.via?.includes('xpn') && "attached to the host's Shared VPC", t.via?.includes('ram') && `RAM share${t.share ? ` ${t.share}` : ''}`].filter(Boolean).join(' · '));
+    const cols = gcp ? ['Project', 'Instances', 'External IPs', 'Subnets', 'Exposed'] : ['Account', 'Interfaces', 'Subnets', 'Groups', 'Exposed'];
+    const cells = (t) => (gcp ? [t.instances, t.externalIps, (t.subnets || []).length] : [t.interfaces, (t.subnets || []).length, t.securityGroups]);
+    return sect(`Who runs what here (${plural(list.length, gcp ? 'project' : 'account')})`, h('table', { class: 'net-table' },
+      h('thead', null, h('tr', null, cols.map((y) => h('th', null, y)))),
       h('tbody', null, list.map((t) => {
-        const slice = d.nodes.find((y) => y.kind === 'slice' && y.owner === t.account && y.vpcOwner === list.find((z) => z.owner)?.account);
+        // its part of this VPC or network, when it has one drawn
+        const slice = d.nodes.find((y) => y.kind === 'slice' && y.owner === t.account && y.nativeId === n.nativeId && y.vpcOwner === n.owner);
         return h('tr', { class: slice ? 'link' : '', onClick: slice ? () => select(slice.id) : null, title: slice ? `Open ${t.name || t.account}'s part` : null },
-          h('td', { class: 'small', title: t.hidden ? null : `How it is known: ${how(t)}` }, t.hidden ? h('span', { class: 'muted' }, `${t.name || t.account} (not yours to see)`) : t.name || t.account,
-            h('div', { class: 'tiny muted' }, t.hidden ? '' : `${t.account} · ${t.owner ? 'owner' : t.read ? 'member' : 'not connected'}${t.yours === false ? ' · outside your estate' : ''}`)),
-          h('td', { class: 'tiny' }, t.hidden ? '' : num(t.interfaces || 0)), h('td', { class: 'tiny' }, t.hidden ? '' : num((t.subnets || []).length)),
-          h('td', { class: 'tiny' }, t.hidden ? '' : num(t.securityGroups || 0)), h('td', null, t.exposed ? h('span', { class: 'badge b-medium' }, String(t.exposed)) : h('span', { class: 'tiny muted' }, t.hidden ? '' : '0')));
+          h('td', { class: 'small', style: 'width:42%', title: t.hidden ? null : `${gcp && t.name ? `${t.name}. ` : ''}How it is known: ${how(t)}` },
+            t.hidden ? h('span', { class: 'muted' }, `${t.name || t.account} (not yours to see)`) : gcp ? h('span', { class: 'mono' }, t.account) : t.name || t.account,
+            h('div', { class: 'tiny muted' }, t.hidden ? '' : `${gcp ? '' : `${t.account} · `}${t.owner ? (gcp ? 'host' : 'owner') : t.read ? (gcp ? 'service project' : 'member') : gcp ? 'service project, not connected' : 'not connected'}${t.yours === false ? ' · outside your estate' : ''}`)),
+          ...cells(t).map((v) => h('td', { class: 'tiny' }, t.hidden ? '' : num(v || 0))),
+          h('td', null, t.exposed ? h('span', { class: 'badge b-medium' }, String(t.exposed)) : h('span', { class: 'tiny muted' }, t.hidden ? '' : '0')));
       }))),
-      h('p', { class: 'tiny muted' }, 'The owner shares its subnets through AWS RAM; each account runs its own instances, databases and security groups in them, behind the owner\'s routes.'));
+      h('p', { class: 'tiny muted' }, gcp ? "The host project shares its networks with service projects (Shared VPC); each runs its own VMs and load balancers in the host's subnets, under the host's firewall rules and routes."
+        : "The owner shares its subnets through AWS RAM; each account runs its own instances, databases and security groups in them, behind the owner's routes."));
   }
   function nodePanel(x) {
     const n = x.node;
@@ -240,7 +257,7 @@ export async function networkPage(ctx) {
     const conns = sect(`Connections (${x.links.length})`, x.links.length ? h('div', { class: 'stack', style: 'gap:4px' }, x.links.map(linkLine)) : h('p', { class: 'small muted' }, 'Not connected to anything.'));
     const exp = x.exposures.length ? sect(`Reachable from the internet (${x.exposures.filter((e) => e.ports.length).length})`, exposureTable(x.exposures, true)) : null;
     const finds = sect(`Findings (${x.findings.length})`, findingRows(x.findings));
-    if (n.kind === 'vpc' || n.kind === 'slice') {
+    if (n.kind === 'vpc' || (n.kind === 'slice' && n.cloud === 'aws')) {
       const pub = x.subnets.filter((s) => s.public).length;
       const shared = (x.tenants || []).length > 1, acct = (id) => (shared ? h('span', { class: 'tiny muted' }, ` · ${accountName(id)}`) : null);
       return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow,
@@ -248,7 +265,7 @@ export async function networkPage(ctx) {
           shared && h('span', { class: 'badge b-neutral', title: 'Shared through AWS RAM' }, n.kind === 'slice' ? 'your part of a shared VPC' : `shared with ${x.tenants.length - 1} account${x.tenants.length === 2 ? '' : 's'}`)),
         h('div', { class: 'row tiny muted' }, h('span', { class: 'mono' }, n.nativeId), h('button', { class: 'btn sm', onClick: () => copy(n.nativeId) }, 'Copy ID')),
         sharedNote(n, x),
-        shared && n.kind !== 'slice' && tenantsSect(x.tenants),
+        shared && n.kind !== 'slice' && tenantsSect(x.tenants, n),
         kv([['Address range', n.cidrs.join(', ')], ['Subnets', `${x.subnets.length}: ${pub} public, ${x.subnets.length - pub} private`], ['Internet gateway', n.igw || 'none'],
           ['NAT', n.nats ? `${n.nats}${n.natIps?.length ? ` (${n.natIps.join(', ')})` : ''}` : 'none'], ['Flow logs', x.flowLogs ? 'on' : h('span', { class: 'badge b-medium' }, 'off')],
           ['Network Firewall', x.firewalls.length ? x.firewalls.map((y) => y.name).join(', ') : 'none'], ['Endpoints', x.endpoints.length ? x.endpoints.map((e) => `${e.service.split('.').pop()} (${e.kind.toLowerCase()})`).join(', ') : 'none']]),
@@ -277,13 +294,17 @@ export async function networkPage(ctx) {
         h('details', null, h('summary', { class: 'small' }, `Network interfaces (${x.interfaces.length})`), h('table', { class: 'net-table' }, h('tbody', null, x.interfaces.map((e) => h('tr', null,
           h('td', { class: 'small' }, e.instance || e.name, acct(e.account), h('div', { class: 'mono tiny muted' }, e.id)), h('td', { class: 'mono tiny' }, e.privateIp || ''), h('td', { class: 'mono tiny' }, e.publicIp || ''), h('td', { class: 'tiny' }, e.groups.join(', '))))))));
     }
-    if (n.kind === 'network') {
+    if (n.kind === 'network' || (n.kind === 'slice' && n.cloud === 'gcp')) {
+      const shared = (x.tenants || []).length > 1;
       return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow,
-        h('div', { class: 'row' }, h('b', { class: 'name' }, n.label), x.auto && h('span', { class: 'badge b-medium' }, 'auto subnets')),
+        h('div', { class: 'row' }, h('b', { class: 'name' }, n.label), x.auto && h('span', { class: 'badge b-medium' }, 'auto subnets'),
+          shared && h('span', { class: 'badge b-neutral', title: 'Google Cloud Shared VPC' }, n.kind === 'slice' ? 'its part of a Shared VPC network' : `Shared VPC: ${plural(x.tenants.length - 1, 'service project')}`)),
         h('div', { class: 'row tiny muted' }, h('span', { class: 'mono' }, n.nativeId), h('button', { class: 'btn sm', onClick: () => copy(n.nativeId) }, 'Copy')),
+        sharedNote(n, x),
+        shared && n.kind !== 'slice' && tenantsSect(x.tenants, n),
         kv([['Routing', x.routingMode || '—'], ['Subnets', `${x.subnets.length} in ${[...new Set(x.subnets.map((s) => s.region))].length} region${[...new Set(x.subnets.map((s) => s.region))].length === 1 ? '' : 's'}`],
           ['Cloud NAT', x.routers.flatMap((r) => r.nats.map((m) => `${m.name} (${r.region})`)).join(', ') || 'none'], ['Instances', `${x.instances.length}, ${x.instances.filter((i) => i.interfaces.some((y) => y.natIps.length)).length} with an external address`],
-          n.sharedWith?.length && ['Used by projects', n.sharedWith.join(', ')]]),
+          !shared && n.sharedWith?.length && ['Used by projects', n.sharedWith.join(', ')]]),
         finds, exp, conns,
         sect(`Firewall rules (${x.firewallRules.length})`, h('div', { class: 'stack', style: 'gap:4px' }, x.firewallRules.map((r) => h('div', { class: `net-rule-box${r.direction === 'INGRESS' && r.action === 'allow' && world(r.sourceRanges) && !r.disabled ? ' net-world-box' : ''}` },
           h('div', { class: 'row' }, h('b', { class: 'small' }, r.name), h('span', { class: 'tiny muted' }, `priority ${r.priority}${r.disabled ? ' · disabled' : ''}${r.logging ? ' · logged' : ''}`)),
@@ -431,10 +452,10 @@ export async function networkPage(ctx) {
       const on = f.sel === n.id, hit = match(n);
       const chips = n.kind === 'vpc' && !n.stub ? [`${n.subnets.public}/${n.subnets.total} public`, n.igw ? 'IGW' : null, n.nats ? `NAT×${n.nats}` : null, n.firewall ? 'firewall' : null,
         n.shared ? `shared ×${(n.tenants || []).length - 1}` : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
-        : n.kind === 'slice' ? [`${num(n.interfaces || 0)} interface${n.interfaces === 1 ? '' : 's'}`, `${n.subnets?.total || 0} subnet${n.subnets?.total === 1 ? '' : 's'}`, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
+        : n.kind === 'slice' ? (n.attachedOnly ? ['attached, nothing running'] : [n.cloud === 'gcp' ? plural(n.instances, 'instance') : plural(n.interfaces, 'interface'), plural(n.subnets?.total, 'subnet'), n.exposed ? `${n.exposed} exposed` : null].filter(Boolean))
         : n.kind === 'network' && !n.stub ? [`${n.subnets.total} subnets`, n.auto ? 'auto' : null, n.nats ? 'Cloud NAT' : null, n.externalIps ? `${n.externalIps} ext. IP` : null, n.exposed ? `${n.exposed} exposed` : null].filter(Boolean)
         : n.kind === 'peer' ? [n.ip || 'peer'] : n.stub ? [n.yours ? 'yours, not read' : 'not yours', ...(n.cidrs || []).slice(0, 1)] : [];
-      const sub = n.kind === 'internet' ? '' : n.kind === 'slice' ? `in ${n.vpcOwnerName || n.vpcOwner}'s VPC` : n.kind === 'tgw' || n.kind === 'dxgw' || n.kind === 'hub' ? `${n.kind === 'hub' ? 'NCC hub' : n.kind === 'dxgw' ? 'Direct Connect gateway' : 'transit gateway'} · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
+      const sub = n.kind === 'internet' ? '' : n.kind === 'slice' ? `in ${n.vpcOwnerName || n.vpcOwner}'s ${n.cloud === 'gcp' ? 'network' : 'VPC'}` : n.kind === 'tgw' || n.kind === 'dxgw' || n.kind === 'hub' ? `${n.kind === 'hub' ? 'NCC hub' : n.kind === 'dxgw' ? 'Direct Connect gateway' : 'transit gateway'} · ${n.ownerName || n.owner}` : n.stub ? `${n.cloud === 'aws' ? 'account' : 'project'} ${n.ownerName || n.owner}` : (n.cidrs || []).slice(0, 2).join(', ') + ((n.cidrs || []).length > 2 ? ` +${n.cidrs.length - 2}` : '');
       const stroke = on ? 'var(--banana)' : n.kind === 'internet' ? 'var(--faint)' : sevColor(n.worst);
       g.push(svg('g', { class: 'net-node', opacity: hit ? dim(n.id) : 0.15, onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': `${KIND[n.kind]} ${n.label}`,
         onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.id); } } },

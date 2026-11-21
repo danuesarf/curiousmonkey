@@ -131,14 +131,15 @@ export async function networkFindings(user, q = {}) {
     decidedBy: r.decided_by_name, decidedAt: r.decided_at, openedAt: r.created_at, resolvedAt: r.resolved_at })) };
 }
 
-const RESOURCE = new Set(['eni', 'sg', 'lb', 'endpoint', 'client-vpn', 'resolver-endpoint']);
+// what an account or project runs in a VPC or network (the rest of it is the owner's)
+const RESOURCE = new Set(['eni', 'sg', 'lb', 'endpoint', 'client-vpn', 'resolver-endpoint', 'instance', 'forwarding-rule', 'psc-endpoint', 'ilb']);
 /** One VPC (AWS) or network (Google Cloud), with everything in it; or a member account's part of a shared VPC. */
 export async function networkDetail(user, nodeId) {
   const m = await model(), v = visible(user, m);
   const asked = m.graph.nodes.find((x) => x.id === nodeId);
   if (!asked || (asked.cloud && !v.node(asked))) throw new NetError(404, 'Not found.');
-  // a member's slice of a shared VPC: the VPC, with that account's part of it only
-  const n = asked.kind === 'slice' ? m.graph.nodes.find((x) => x.id === `aws:vpc:${asked.vpcOwner}:${asked.nativeId}`) : asked;
+  // a member's slice of a shared VPC (or a service project's of a Shared VPC network): the VPC, with its part only
+  const n = asked.kind === 'slice' ? m.graph.nodes.find((x) => x.id === (asked.cloud === 'gcp' ? `gcp:net:${asked.nativeId}` : `aws:vpc:${asked.vpcOwner}:${asked.nativeId}`)) : asked;
   if (!n) throw new NetError(404, 'Not found.');
   const only = asked.kind === 'slice' ? asked.owner : null;
   // in a VPC: its structure (subnets, route tables, gateways, ACLs) is the owner's; resources belong to whoever runs
@@ -152,8 +153,7 @@ export async function networkDetail(user, nodeId) {
   const inIt = (r) => r.vpc === n.nativeId && m.vpcOwnerOf(r.owner, r.vpc) === n.owner && (!only || r.owner === only);
   const findings = (await query(`SELECT id, control, severity, title, detail, suggestion, item_name, item_type, native_id, vpc, cloud, owner, decision FROM net_findings WHERE status = 'open' AND cloud = $1
     ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END`, [n.cloud || ''])).rows
-    .filter((r) => v.ok(r.cloud, r.owner) && (n.cloud === 'aws' ? inIt(r) || (!only && ((r.owner === n.owner && r.native_id === n.nativeId) || m.targetOf(r) === n.id))
-      : (r.owner === n.owner && (r.vpc === n.nativeId || r.native_id === n.nativeId)) || m.targetOf(r) === n.id))
+    .filter((r) => v.ok(r.cloud, r.owner) && (inIt(r) || (!only && ((r.owner === n.owner && r.native_id === n.nativeId) || m.targetOf(r) === n.id))))
     .map(({ native_id: _n, vpc: _v, cloud: _c, ...r }) => r);
   const base = { node: only ? { ...n, ...asked } : participantView(n, v), vpcNode: only ? n.id : null, tenants: participantView(n, v).tenants || null, links, findings,
     exposures: m.exposures.filter((e) => e.cloud === n.cloud && (e.vpcOwner || e.owner) === n.owner && e.vpc === n.nativeId && v.ok(e.cloud, e.owner) && (!only || e.owner === only)) };
@@ -184,10 +184,10 @@ export async function networkDetail(user, nodeId) {
       endpointServices: m.items.filter((i) => i.cloud === 'aws' && i.owner === n.owner && i.type === 'endpoint-service' && list('lb').some((b) => i.data.nlbs.includes(b.id) || i.data.glbs.includes(b.id)))
         .map((v) => ({ id: v.id, name: v.name, acceptance: v.data.acceptance, connections: v.data.connections })) };
   }
-  if (n.kind === 'network' && !n.stub) {
+  if (n.kind === 'network' && (!n.stub || only)) {
     const nets = m.items.filter((i) => i.cloud === 'gcp' && i.type === 'network' && i.id === n.nativeId);
     const fw = m.items.filter((i) => i.cloud === 'gcp' && i.type === 'firewall' && i.vpc === n.nativeId);
-    const insts = m.items.filter((i) => i.cloud === 'gcp' && i.type === 'instance' && i.data.interfaces.some((x) => x.network === n.nativeId));
+    const insts = m.items.filter((i) => i.cloud === 'gcp' && i.type === 'instance' && i.data.interfaces.some((x) => x.network === n.nativeId) && (!only || i.owner === only));
     return { ...base, peerings: nets[0]?.data.peerings || [], routingMode: nets[0]?.data.routingMode || null, auto: !!nets[0]?.data.autoSubnets,
       subnets: m.items.filter((i) => i.cloud === 'gcp' && i.type === 'subnet' && i.vpc === n.nativeId).map((s) => ({ id: s.id, name: s.name, region: s.region, cidr: s.data.cidr, privateGoogleAccess: s.data.privateGoogleAccess, flowLogs: s.data.flowLogs, purpose: s.data.purpose })),
       firewallRules: fw.map((f) => ({ id: f.id, name: f.name, ...f.data })).sort((a, b) => a.priority - b.priority),
