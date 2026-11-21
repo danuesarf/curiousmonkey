@@ -5,7 +5,7 @@
 // Lines are arcs above the planes. With VPC flow logs read, a line carries light while it carries traffic, the hour
 // bar replays the last 24 hours, a line with nothing on it in days is dashed and marked NOT USED.
 // Drag to turn, Shift+drag or two fingers to move, wheel or pinch to zoom.
-import { h, svg, num } from '../lib.js';
+import { h, svg, fmtClock } from '../lib.js';
 import { wheelKind } from './spaceRelated.js';
 
 const W = 1400, H = 820, D = 2600, HOME = { az: 0, el: 56 };
@@ -71,12 +71,13 @@ function layout(d, envColor) {
 }
 
 /**
- * The scene, in `host`. `pick(id)` selects a node or a line (the page shows its panel); `sel()` says what is selected.
- * Returns { el, redraw(), destroy() }.
+ * The scene. `pick(id)` selects a node or a line (the page shows its panel); `sel()` says what is selected;
+ * `match(node)` false dims a node (the page's search); `tools` go at the front of the bar above; `internet()` and
+ * `onInternet(on)` keep the beams to the internet on or off across redraws. Returns { el, redraw(), destroy() }.
  */
-export function networkScene(d, { pick, sel, envColor, onHour }) {
+export function networkScene(d, { pick, sel, envColor, onHour, match = () => true, tools = [], internet = () => true, onInternet = () => {} }) {
   const L = layout(d, envColor);
-  const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, playing: false, internet: true };
+  const st = { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0, hour: 23, playing: false, internet: internet() };
   const hasFlows = d.links.some((l) => l.usage && l.usage.state !== 'unknown');
   const hourly = Array.from({ length: 24 }, (_, i) => d.links.reduce((n, l) => n + (l.kind === 'internet' ? 0 : l.usage?.hourly?.[i]?.bytes || 0), 0));
   const stage = svg('svg', { class: 'ns-stage', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Network scene' });
@@ -106,7 +107,11 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
   function draw() {
     const P = camera(), cur = sel(), out = [];
     const rel = new Set(); if (cur) { rel.add(cur); for (const l of d.links) if (l.id === cur || l.from === cur || l.to === cur) { rel.add(l.id); rel.add(l.from); rel.add(l.to); } }
-    const fade = (id) => (cur && !rel.has(id) ? 0.16 : 1);
+    const byId = new Map(d.nodes.map((n) => [n.id, n]));
+    const found = (id) => { const n = byId.get(id); return !n || match(n); };
+    const fade = (id) => (cur && !rel.has(id) ? 0.16 : found(id) ? 1 : 0.14);
+    // a line fades with what it joins when a search leaves both ends out
+    const lfade = (l) => (cur ? (rel.has(l.id) ? 1 : 0.16) : found(l.from) || found(l.to) ? 1 : 0.14);
     // the planes and their zones
     for (const z of L.zones) {
       const pts = [[z.x0, z.y0], [z.x1, z.y0], [z.x1, z.y1], [z.x0, z.y1]].map(([x, y]) => P(x, y, 0));
@@ -130,17 +135,17 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
       if (u.state === 'unused') { stroke = IDLE; dash = '7 6'; op = 0.75; w = 1.4; }
       else if (u.state === 'unknown') { op = l.kind === 'internet' ? 0.35 : 0.6; }
       if (hasFlows && u.hourly && !hourBytes && u.state === 'used') op *= 0.55;
-      out.push(svg('g', { opacity: fade(l.id) },
+      out.push(svg('g', { opacity: lfade(l) },
         svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(on ? w + 1.8 : w), 'stroke-dasharray': dash, opacity: op, 'stroke-linecap': 'round' }),
         hourBytes > 0 && svg('path', { d: g.d, fill: 'none', stroke, 'stroke-width': f(w + 3), opacity: 0.35, filter: 'url(#ns-glow)' }),
         svg('path', { d: g.d, fill: 'none', stroke: '#000', 'stroke-opacity': 0, 'stroke-width': 14, class: 'ns-hit', onClick: () => pick(l.id) },
-          svg('title', null, `${l.kind}${l.name ? ` · ${l.name}` : ''} · ${u.state === 'used' ? `used, ${human(u.bytes)} in ${d.flowDays || 7} days` : u.state === 'unused' ? `not used in ${Math.floor(u.coveredDays)} days of flow logs` : u.state === 'quiet' ? 'nothing yet (flow logs read for less than 3 days)' : 'use not known (no flow logs on either side)'}`))));
-      if (u.state === 'unused' && (on || !cur)) { const m = g.pts[12]; out.push(svg('g', { opacity: fade(l.id), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 32), y: f(m[1] - 9), width: 64, height: 16, rx: 2, fill: '#030d08', stroke: IDLE }), svg('text', { x: f(m[0]), y: f(m[1] + 3), 'text-anchor': 'middle', class: 'ns-tag-t', fill: '#a9bfb2' }, 'NOT USED'))); }
-      if (l.kind === 'vpn' && l.tunnels?.length && (l.up ?? 0) < l.tunnels.length) { const m = g.pts[12]; out.push(svg('g', { opacity: fade(l.id), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 30), y: f(m[1] + 10), width: 60, height: 16, rx: 2, fill: '#030d08', stroke: RED }), svg('text', { x: f(m[0]), y: f(m[1] + 22), 'text-anchor': 'middle', class: 'ns-tag-t', fill: RED }, `${l.up}/${l.tunnels.length} UP`))); }
+          svg('title', null, `${l.kind}${l.name ? ` · ${l.name}` : ''} · ${u.state === 'used' ? `used, ${human(u.bytes)} in ${Math.max(1, Math.floor(u.coveredDays || 0))} day${Math.floor(u.coveredDays || 0) > 1 ? 's' : ''} of flow logs` : u.state === 'unused' ? `not used in ${Math.floor(u.coveredDays)} days of flow logs` : u.state === 'quiet' ? 'nothing yet (flow logs read for less than 3 days)' : 'use not known (no flow logs on either side)'}`))));
+      if (u.state === 'unused' && (on || !cur)) { const m = g.pts[12]; out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 32), y: f(m[1] - 9), width: 64, height: 16, rx: 2, fill: '#030d08', stroke: IDLE }), svg('text', { x: f(m[0]), y: f(m[1] + 3), 'text-anchor': 'middle', class: 'ns-tag-t', fill: '#a9bfb2' }, 'NOT USED'))); }
+      if (l.kind === 'vpn' && l.tunnels?.length && (l.up ?? 0) < l.tunnels.length) { const m = g.pts[12]; out.push(svg('g', { opacity: lfade(l), class: 'ns-tag', onClick: () => pick(l.id) }, svg('rect', { x: f(m[0] - 30), y: f(m[1] + 10), width: 60, height: 16, rx: 2, fill: '#030d08', stroke: RED }), svg('text', { x: f(m[0]), y: f(m[1] + 22), 'text-anchor': 'middle', class: 'ns-tag-t', fill: RED }, `${l.up}/${l.tunnels.length} UP`))); }
       // light travelling along a line that carried traffic in the hour shown
       if (hourBytes > 0 && !document.hidden && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
         const n = Math.min(3, 1 + Math.floor(Math.log10(1 + hourBytes) / 3));
-        for (let i = 0; i < n; i++) parts.push(svg('circle', { r: 2.6, fill: stroke, filter: 'url(#ns-glow)', opacity: fade(l.id) },
+        for (let i = 0; i < n; i++) parts.push(svg('circle', { r: 2.6, fill: stroke, filter: 'url(#ns-glow)', opacity: lfade(l) },
           svg('animateMotion', { dur: `${f(2.4 + (i * 0.7))}s`, repeatCount: 'indefinite', path: g.d, begin: `${f(-i * 0.8)}s` })));
       }
     }
@@ -182,7 +187,7 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
           svg('text', { x: f(lp[0]), y: f(lp[1] + 27), 'text-anchor': 'middle', class: 'ns-sub' }, `${(n.cidrs || []).slice(0, 1).join('')}${n.flowDays ? ` · flow logs ${n.flowDays} d` : ''}`));
       }
       out.push(svg('g', { class: 'ns-node', opacity: fade(n.id), onClick: () => pick(n.id), tabindex: 0, role: 'button', 'aria-label': n.label,
-        onKeydown: (e) => { if (e.key === 'Enter') pick(n.id); } }, g, svg('title', null, `${n.label}${n.ownerLabel ? ` · ${n.ownerLabel}` : ''}`)));
+        onKeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(n.id); } } }, g, svg('title', null, `${n.label}${n.ownerLabel ? ` · ${n.ownerLabel}` : ''}`)));
     }
     layer.replaceChildren(...out, ...parts);
   }
@@ -192,7 +197,7 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
   const bars = h('div', { class: 'ns-bars' });
   const hourText = h('span', { class: 'mono small' });
   const start = new Date(d.hourStart).getTime();
-  const label = (i) => new Date(start + i * 36e5).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const label = (i) => fmtClock(start + i * 36e5);   // in the workspace's time zone, as everywhere else
   const drawBars = () => {
     bars.replaceChildren(...hourly.map((v, i) => h('button', { type: 'button', class: `ns-bar${i === st.hour ? ' on' : ''}`, title: `${label(i)} · ${human(v)}`, onClick: () => { st.hour = i; st.playing = false; playBtn.textContent = '▶'; tick(); } },
       h('span', { style: `height:${Math.max(2, Math.round((v / max) * 34))}px` }))));
@@ -204,10 +209,10 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
   playBtn.addEventListener('click', () => {
     st.playing = !st.playing; playBtn.textContent = st.playing ? '❚❚' : '▶';
     clearInterval(timer);
-    if (st.playing) timer = setInterval(() => { st.hour = (st.hour + 1) % 24; tick(); }, 1200);
+    if (st.playing) timer = setInterval(() => { if (document.hidden) return; st.hour = (st.hour + 1) % 24; tick(); }, 1200);
   });
-  const internetBox = h('input', { type: 'checkbox', checked: true });
-  internetBox.addEventListener('change', () => { st.internet = internetBox.checked; draw(); });
+  const internetBox = h('input', { type: 'checkbox', checked: st.internet });
+  internetBox.addEventListener('change', () => { st.internet = internetBox.checked; onInternet(st.internet); draw(); });
 
   // ---------------------------------------------------------------- turning, moving, zooming
   const wrap = h('div', { class: 'ns-wrap' }, stage);
@@ -219,7 +224,8 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
     if (drag.pan) { st.px = drag.px + dx; st.py = drag.py + dy; } else { st.az = drag.az + dx * 0.25; st.el = Math.max(8, Math.min(80, drag.el + dy * 0.2)); }
     draw();
   });
-  wrap.addEventListener('pointerup', () => { drag = null; wrap.classList.remove('grabbing'); });
+  const drop = () => { drag = null; wrap.classList.remove('grabbing'); };
+  wrap.addEventListener('pointerup', drop); wrap.addEventListener('pointercancel', drop); wrap.addEventListener('lostpointercapture', drop);
   wrap.addEventListener('wheel', (e) => {
     e.preventDefault();
     const kind = wheelKind(e, mem), r = stage.getBoundingClientRect(), k = W / r.width;
@@ -230,7 +236,7 @@ export function networkScene(d, { pick, sel, envColor, onHour }) {
   const reset = () => { Object.assign(st, { az: HOME.az, el: HOME.el, zoom: 1, px: 0, py: 0 }); draw(); };
   const btn = (t, fn, aria) => { const b = h('button', { class: 'btn sm', 'aria-label': aria || t }, t); b.addEventListener('click', fn); return b; };
   const el = h('div', { class: 'ns' },
-    h('div', { class: 'filters' }, h('span', { class: 'small muted' }, 'Drag to turn · Shift+drag or two fingers to move · wheel or pinch to zoom'),
+    h('div', { class: 'filters' }, ...tools, h('span', { class: 'small muted', title: 'Drag to turn. Shift+drag or two fingers to move. Wheel or pinch to zoom. Esc lets go of what is selected.' }, 'Drag: turn · Shift+drag: move · wheel: zoom'),
       h('label', { class: 'small row', style: 'gap:6px' }, internetBox, 'Beams to the internet'), h('span', { style: 'flex:1' }),
       btn('⟲', () => { st.az -= 15; draw(); }, 'Turn left'), btn('⟳', () => { st.az += 15; draw(); }, 'Turn right'), btn('+', () => { st.zoom = Math.min(4, st.zoom * 1.2); draw(); }, 'Zoom in'), btn('−', () => { st.zoom = Math.max(0.35, st.zoom / 1.2); draw(); }, 'Zoom out'), btn('Reset', reset)),
     wrap,

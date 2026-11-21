@@ -115,9 +115,20 @@ export async function readGcpNetwork(conn, { gw = gcpGateway(conn) } = {}) {
 }
 
 /** Ask for a fresh read of everything (after the extension is turned on, or "Read now"). */
+// The request is a time stamp, not a flag: the worker clears only the request it served, so one made while a read
+// is under way is served by the next pass. When each owner was last read is left alone, so the page keeps saying
+// when it really was.
 export async function requestNetworkRead() {
-  await query(`UPDATE net_reads SET read_at = now() - make_interval(hours => $1)`, [EVERY_HOURS + 1]);
-  await query(`INSERT INTO extensions(key, settings) VALUES ('networking', '{"readNow": true}') ON CONFLICT (key) DO UPDATE SET settings = extensions.settings || '{"readNow": true}'`);
+  const at = `to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+  await query(`INSERT INTO extensions(key, settings) VALUES ('networking', jsonb_build_object('readNow', ${at}))
+    ON CONFLICT (key) DO UPDATE SET settings = extensions.settings || jsonb_build_object('readNow', ${at})`);
+}
+/** When a read was asked for and not yet done, or null. */
+export async function pendingNetworkRead() {
+  const v = (await query(`SELECT settings->>'readNow' AS v FROM extensions WHERE key = 'networking'`)).rows[0]?.v;
+  if (!v) return null;
+  const t = new Date(v);   // a request from before this was a time stamp is just `true`
+  return (Number.isNaN(t.getTime()) ? new Date() : t).toISOString();
 }
 
 /**
@@ -130,7 +141,7 @@ export async function networkTick({ log = () => {}, awsGw = null, gcpGw = null }
   try {
     if (!(await client.query('SELECT pg_try_advisory_lock($1) AS ok', [LOCK])).rows[0].ok) return null;
     try {
-      const now = (await query(`SELECT (settings->>'readNow')::boolean AS now FROM extensions WHERE key = 'networking'`)).rows[0]?.now;
+      const now = (await query(`SELECT settings->>'readNow' AS now FROM extensions WHERE key = 'networking'`)).rows[0]?.now || null;
       const stale = `(SELECT read_at FROM net_reads r WHERE r.cloud = $1 AND r.owner = $2) IS NULL OR (SELECT read_at FROM net_reads r WHERE r.cloud = $1 AND r.owner = $2) < now() - make_interval(hours => ${EVERY_HOURS})`;
       const accounts = (await query(`SELECT * FROM cloud_accounts WHERE status <> 'planned' ORDER BY name`)).rows;
       const out = { aws: 0, gcp: 0, errors: 0 };
@@ -148,7 +159,7 @@ export async function networkTick({ log = () => {}, awsGw = null, gcpGw = null }
         const r = await readGcpNetwork(c, { gw: gcpGw ? gcpGw(c) : gcpGateway(c) });
         out.gcp += r.projects; out.errors += r.errors;
       }
-      if (now) await query(`UPDATE extensions SET settings = settings - 'readNow' WHERE key = 'networking'`);
+      if (now) await query(`UPDATE extensions SET settings = settings - 'readNow' WHERE key = 'networking' AND settings->>'readNow' = $1`, [now]);
       // a net.* control changed on the Policy page: findings filed again from what is stored, with no new read
       const policy = await loadPolicy();
       const sig = [...(policy.over || new Map())].filter(([id]) => id.startsWith('net.')).map(([id, o]) => `${id}:${o.severity}:${o.enabled}`).sort().join('|');
