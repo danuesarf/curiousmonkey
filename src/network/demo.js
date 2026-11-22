@@ -12,6 +12,7 @@
 import { normalizeAwsRegion } from './awsReader.js';
 import { gzipSync } from 'node:zlib';
 import { normalizeGcpProject } from './gcpReader.js';
+import { isLargeEstate, largeAwsNetwork } from './demoLarge.js';
 
 const tag = (name) => [{ Key: 'Name', Value: name }];
 const all = (cidr = '0.0.0.0/0') => ({ IpRanges: [{ CidrIp: cidr }] });
@@ -208,6 +209,7 @@ function data(region) {
 /** One AWS account's networking in its first region, normalised. */
 export function demoAwsNetwork(accountId, region) {
   if (process.env.DEMO_NETWORK_DENIED === '1') return { items: [], skipped: ['ec2:DescribeVpcs'] };
+  if (isLargeEstate(accountId)) return { items: largeAwsNetwork(accountId, region), skipped: [] };   // node src/cli.js demo-large
   const raw = accountId === PROD ? merge(prod(region), sharedOwner(region)) : accountId === DATA ? merge(data(region), sharedMember(region)) : defaultVpc(accountId, region, 9);
   return { items: normalizeAwsRegion(region, raw), skipped: [] };
 }

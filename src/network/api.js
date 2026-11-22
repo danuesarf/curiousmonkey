@@ -232,7 +232,16 @@ export async function networkDetail(user, nodeId) {
   if (n.kind === 'tgw') {
     const atts = m.items.filter((i) => i.cloud === 'aws' && i.type === 'tgw-attachment' && i.data.tgw === n.nativeId);
     const seen = new Set();
-    return { ...base, attachments: atts.filter((a) => !seen.has(a.id) && seen.add(a.id)).map((a) => ({ id: a.id, name: a.name, resourceType: a.data.resourceType, resourceId: a.data.resourceId, resourceOwner: a.data.resourceOwner, state: a.data.state })),
+    // what each attaches, by name where its account may be seen (a VPC, a VPN, a Direct Connect gateway, a peer transit gateway)
+    const named = new Map(m.items.filter((i) => i.cloud === 'aws' && ['vpc', 'vpn', 'dx-gateway', 'tgw'].includes(i.type)).map((i) => [i.id, i]));
+    const acctName = new Map(m.accts.map((x) => [x.account_id, x.name]));
+    const kindOrder = { vpc: 0, vpn: 1, 'direct-connect-gateway': 2, peering: 3 };
+    return { ...base, attachments: atts.filter((a) => !seen.has(a.id) && seen.add(a.id)).map((a) => {
+      const it = named.get(a.data.resourceId), mayName = v.ok('aws', a.data.resourceOwner);
+      return { id: a.id, name: a.name, resourceType: a.data.resourceType, resourceId: a.data.resourceId, resourceOwner: a.data.resourceOwner, state: a.data.state,
+        resourceName: mayName && it && it.name !== it.id ? it.name : null, ownerName: mayName ? acctName.get(a.data.resourceOwner) || null : null,
+        node: a.data.resourceType === 'vpc' && mayName ? `aws:vpc:${a.data.resourceOwner}:${a.data.resourceId}` : null };
+    }).sort((x, y) => (kindOrder[x.resourceType] ?? 9) - (kindOrder[y.resourceType] ?? 9) || String(x.resourceName || x.resourceId).localeCompare(String(y.resourceName || y.resourceId), undefined, { numeric: true })),
       routeTables: m.items.filter((i) => i.cloud === 'aws' && i.type === 'tgw-route-table' && i.data.tgw === n.nativeId).map((t) => ({ id: t.id, name: t.name, default: t.data.default, associations: t.data.associations, routes: t.data.routes })) };
   }
   if (n.kind === 'dxgw') {
@@ -249,10 +258,13 @@ export async function networkDetail(user, nodeId) {
 export async function networkInventory(user, q = {}) {
   const m = await model(), v = visible(user, m);
   const text = String(q.q || '').toLowerCase();
+  // an account by its name as well as its ID (with dozens of accounts, the IDs alone say little)
+  const names = new Map([...m.accts.map((a) => [`aws|${a.account_id}`, a.name]), ...m.projects.map((p) => [`gcp|${p.project_id}`, p.project_id])]);
+  const ownerName = (i) => names.get(`${i.cloud}|${i.owner}`) || null;
   const rows = m.items.filter((i) => v.ok(i.cloud, i.owner) && (!q.type || i.type === q.type) && (!q.cloud || i.cloud === q.cloud)
-    && (!text || `${i.name} ${i.id} ${i.owner} ${i.vpc || ''} ${JSON.stringify(i.data)}`.toLowerCase().includes(text)));
+    && (!text || `${i.name} ${i.id} ${i.owner} ${ownerName(i) || ''} ${i.vpc || ''} ${JSON.stringify(i.data)}`.toLowerCase().includes(text)));
   const types = {}; for (const i of m.items.filter((x) => v.ok(x.cloud, x.owner))) types[i.type] = (types[i.type] || 0) + 1;
-  return { total: rows.length, types, items: rows.slice(0, 500).map((i) => ({ cloud: i.cloud, owner: i.owner, region: i.region, type: i.type, id: i.id, name: i.name, vpc: i.vpc, data: i.data })) };
+  return { total: rows.length, types, items: rows.slice(0, 500).map((i) => ({ cloud: i.cloud, owner: i.owner, ownerName: ownerName(i), region: i.region, type: i.type, id: i.id, name: i.name, vpc: i.vpc, data: i.data })) };
 }
 
 export async function decideNetFinding(user, id, { decision, note }) {
