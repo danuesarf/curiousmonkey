@@ -14,6 +14,7 @@
 import { h, svg, get, post, api, ago, num, toast, busy, syncUrl, tile, searchBox, loadEnvironments, envs, copy, poll, fmtDay } from '../lib.js';
 import { session } from '../main.js';
 import { networkScene } from './netSpace.js';
+import { mapLayout } from './netMapLayout.js';
 
 const TABS = [['space', 'Space'], ['map', 'Map'], ['exposure', 'Exposure'], ['findings', 'Findings'], ['inventory', 'Inventory']];
 const SEV = { high: 0, medium: 1, low: 2, none: 3 };
@@ -301,7 +302,7 @@ export async function networkPage(ctx) {
   function nodePanel(x) {
     const n = x.node;
     const headRow = h('div', { class: 'row', style: 'justify-content:space-between' }, h('div', { class: 'eyebrow' }, n.kind === 'slice' ? `SHARED VPC · ${accountName(n.owner).toUpperCase()}'S PART${n.region ? ` · ${n.region}` : ''}`
-      : `${KIND[n.kind]} · ${CLOUD[n.cloud] || ''} · ${n.ownerLabel || n.owner}${n.region ? ` · ${n.region}` : ''}`), close);
+      : `${KIND[n.kind]} · ${CLOUD[n.cloud] || ''} · ${n.ownerLabel || accountName(n.owner)}${n.region ? ` · ${n.region}` : ''}`), close);
     const conns = sect(`Connections (${x.links.length})`, x.links.length ? h('div', { class: 'stack', style: 'gap:4px' }, x.links.map(linkLine)) : h('p', { class: 'small muted' }, 'Not connected to anything.'));
     const exp = x.exposures.length ? sect(`Reachable from the internet (${x.exposures.filter((e) => e.ports.length).length})`, exposureTable(x.exposures, true)) : null;
     const finds = sect(`Findings (${x.findings.length})`, findingRows(x.findings));
@@ -369,7 +370,11 @@ export async function networkPage(ctx) {
     }
     return h('div', { class: 'stack', style: 'gap:12px;padding:14px' }, headRow, h('b', { class: 'name' }, n.label), h('div', { class: 'mono tiny muted' }, n.nativeId),
       x.attachments && sect(`Attachments (${x.attachments.length})`, h('table', { class: 'net-table' }, h('tbody', null, x.attachments.map((a) => h('tr', null,
-        h('td', { class: 'small' }, a.resourceType), h('td', { class: 'mono tiny' }, a.resourceId), h('td', { class: 'tiny' }, `account ${a.resourceOwner}`), h('td', { class: 'tiny' }, a.state)))))),
+        h('td', { class: 'small nowrap' }, a.resourceType),
+        // by name (a VPC's a link to it), its ID and account under; its state only when it is not available
+        h('td', null, a.node && d.nodes.some((y) => y.id === a.node) ? h('button', { type: 'button', class: 'link-btn small', onClick: () => pick(a.node) }, a.resourceName || a.resourceId) : h('span', { class: 'small' }, a.resourceName || a.resourceId),
+          h('div', { class: 'mono tiny muted' }, [a.resourceName && a.resourceId, a.ownerName || `account ${a.resourceOwner}`].filter(Boolean).join(' · '))),
+        h('td', { class: 'tiny' }, a.state === 'available' ? null : h('span', { class: 'badge b-amber' }, a.state))))))),
       x.routeTables?.length > 0 && h('details', null, h('summary', { class: 'small' }, `Route tables (${x.routeTables.length})`), h('div', { class: 'stack', style: 'gap:8px;margin-top:8px' }, x.routeTables.map((t) => h('div', { class: 'net-rule-box' },
         h('div', { class: 'row' }, h('b', { class: 'small' }, t.name), t.default && h('span', { class: 'badge b-neutral' }, 'default'), h('span', { class: 'tiny muted' }, `${t.associations.length} associated`)),
         h('ul', { class: 'tiny mono' }, t.routes.map((r) => h('li', { class: r.state === 'blackhole' ? 'net-world' : '' }, `${r.dest} → ${r.attachments.map((a) => `${a.resourceType} ${a.resourceId}`).join(', ') || 'nothing'} (${r.type}${r.state === 'blackhole' ? ', blackhole' : ''})`))))))),
@@ -399,35 +404,8 @@ export async function networkPage(ctx) {
   ctx.onLeave(() => document.removeEventListener('keydown', onKey));
 
   // ---------------------------------------------------------------- the map
-  const COL = 548, MID = 250, GAP = 44, NW = 252, NH = 94, PAD = 14, HEAD = 40;
-  const X_AWS = 0, X_MID = COL + GAP, X_GCP = COL + GAP + MID + GAP, WIDTH = X_GCP + COL;
   let view = null, layout = null;
-  function computeLayout() {
-    const pos = new Map(), cards = [];
-    const shown = (n) => !f.cloud || !n.cloud || n.cloud === f.cloud || n.kind === 'peer';
-    const placeCloud = (cloud, x0) => {
-      let y = 110;
-      for (const o of d.owners.filter((o) => o.cloud === cloud && (!f.cloud || f.cloud === cloud))) {
-        // its own VPCs or networks, then its part of VPCs other accounts share with it
-        const list = d.nodes.filter((n) => n.cloud === cloud && n.owner === o.owner && !n.stub && (n.kind === 'vpc' || n.kind === 'network' || n.kind === 'slice'))
-          .sort((a, b) => (a.kind === 'slice' ? 1 : 0) - (b.kind === 'slice' ? 1 : 0) || (a.isDefault ? 1 : 0) - (b.isDefault ? 1 : 0) || (SEV[a.worst] ?? 3) - (SEV[b.worst] ?? 3) || a.label.localeCompare(b.label));
-        if (!list.length) continue;
-        const rows = Math.ceil(list.length / 2), hgt = HEAD + rows * (NH + 14) + PAD - 14 + PAD;
-        cards.push({ x: x0, y, w: COL, h: hgt, owner: o });
-        list.forEach((n, i) => pos.set(n.id, { x: x0 + PAD + (i % 2) * (NW + 16), y: y + HEAD + Math.floor(i / 2) * (NH + 14), w: NW, h: NH }));
-        y += hgt + 22;
-      }
-      return y;
-    };
-    const yA = placeCloud('aws', X_AWS), yG = placeCloud('gcp', X_GCP);
-    // the middle: internet on top, transit gateways, then everything not read (peers, outside networks)
-    if (f.internet && d.nodes.some((n) => n.kind === 'internet')) pos.set('internet', { x: X_MID + 25, y: 4, w: MID - 50, h: 52 });
-    let y = 110;
-    const hubish = (n) => ['tgw', 'dxgw', 'hub'].includes(n.kind);
-    const midNodes = d.nodes.filter((n) => shown(n) && (hubish(n) || n.kind === 'peer' || n.stub)).sort((a, b) => (hubish(a) ? 0 : 1) - (hubish(b) ? 0 : 1) || (a.kind === 'peer' ? 1 : 0) - (b.kind === 'peer' ? 1 : 0));
-    for (const n of midNodes) { pos.set(n.id, { x: X_MID, y, w: MID, h: 76 }); y += 94; }
-    return { pos, cards, height: Math.max(yA, yG, y) + 20 };
-  }
+  const computeLayout = () => mapLayout(d, { cloud: f.cloud, internet: f.internet, rank: (n) => SEV[n.worst] ?? 3 });
   const svgEl = svg('svg', { class: 'net-map', role: 'img', 'aria-label': 'Network map' });
   const mapWrap = h('div', { class: 'net-map-wrap' }, svgEl);
   // pan and zoom: drag to move, wheel to zoom about the pointer
@@ -436,14 +414,19 @@ export async function networkPage(ctx) {
     e.preventDefault();
     const r = svgEl.getBoundingClientRect(), k = Math.exp(Math.sign(e.deltaY) * Math.min(0.25, Math.abs(e.deltaY) / 400));
     const px = view.x + ((e.clientX - r.left) / r.width) * view.w, py = view.y + ((e.clientY - r.top) / r.height) * view.h;
-    const w = Math.max(300, Math.min(WIDTH * 3, view.w * k)), hh = (w / view.w) * view.h;
+    const w = Math.max(300, Math.min(layout.width * 3, view.w * k)), hh = (w / view.w) * view.h;
     view = { x: px - ((px - view.x) * w) / view.w, y: py - ((py - view.y) * hh) / view.h, w, h: hh }; applyView();
   }, { passive: false });
   mapWrap.addEventListener('pointerdown', (e) => { if (e.target.closest('.net-node, .net-hit')) return; drag = { x: e.clientX, y: e.clientY, v: { ...view } }; mapWrap.setPointerCapture(e.pointerId); mapWrap.classList.add('grabbing'); });
   mapWrap.addEventListener('pointermove', (e) => { if (!drag) return; const r = svgEl.getBoundingClientRect(); view = { ...drag.v, x: drag.v.x - ((e.clientX - drag.x) / r.width) * drag.v.w, y: drag.v.y - ((e.clientY - drag.y) / r.height) * drag.v.h }; applyView(); });
   mapWrap.addEventListener('pointerup', () => { drag = null; mapWrap.classList.remove('grabbing'); });
   const applyView = () => svgEl.setAttribute('viewBox', `${view.x} ${view.y} ${view.w} ${view.h}`);
-  const fit = () => { const r = mapWrap.getBoundingClientRect(), aspect = (r.height || 640) / (r.width || 1000); const w = WIDTH + 240; view = { x: -120, y: -8, w, h: Math.max(layout.height + 20, w * aspect) }; applyView(); };
+  // the whole map in view, as large as it fits (a tall one is centred across)
+  const fit = () => {
+    const r = mapWrap.getBoundingClientRect(), aspect = (r.height || 640) / (r.width || 1000), w0 = layout.width + 240, h0 = layout.height + 20;
+    const w = Math.max(w0, h0 / aspect);
+    view = { x: -120 - (w - w0) / 2, y: -8, w, h: w * aspect }; applyView();
+  };
   const zoom = (k) => { const cx = view.x + view.w / 2, cy = view.y + view.h / 2, w = view.w * k, hh = view.h * k; view = { x: cx - w / 2, y: cy - hh / 2, w, h: hh }; applyView(); };
 
   const anchor = (p, toward) => {
@@ -466,8 +449,8 @@ export async function networkPage(ctx) {
         svg('text', { x: c.x + 14, y: c.y + 17, class: 'net-card-eyebrow' }, `${o.cloud === 'aws' ? 'AWS ACCOUNT' : 'GOOGLE CLOUD PROJECT'}${o.environment ? ` · ${envName(o.environment).toUpperCase()}` : ''}`),
         svg('text', { x: c.x + 14, y: c.y + 32, class: 'net-card-title' }, `${o.name}${o.cloud === 'aws' && o.name !== o.owner ? `  ·  ${o.owner}` : o.title && o.title !== o.name ? `  ·  ${o.title}` : ''}`)));
     }
-    g.push(svg('text', { x: X_AWS, y: 80, class: 'net-col-title' }, f.cloud === 'gcp' ? '' : 'AWS'), svg('text', { x: X_GCP, y: 80, class: 'net-col-title' }, f.cloud === 'aws' ? '' : 'GOOGLE CLOUD'),
-      svg('text', { x: X_MID + MID / 2, y: 80, class: 'net-col-title mid', 'text-anchor': 'middle' }, 'HUBS · PEERS · OUTSIDE'));
+    g.push(svg('text', { x: 0, y: 80, class: 'net-col-title' }, f.cloud === 'gcp' ? '' : 'AWS'), svg('text', { x: layout.xGcp, y: 80, class: 'net-col-title' }, f.cloud === 'aws' ? '' : 'GOOGLE CLOUD'),
+      svg('text', { x: layout.xMid + layout.midW / 2, y: 80, class: 'net-col-title mid', 'text-anchor': 'middle' }, 'HUBS · PEERS · OUTSIDE'));
     // lines under the boxes
     const lines = [];
     for (const l of d.links) {
@@ -475,7 +458,7 @@ export async function networkPage(ctx) {
       const a = pos.get(l.from), b = pos.get(l.to); if (!a || !b) continue;
       const ca = [a.x + a.w / 2, a.y + a.h / 2], cb = [b.x + b.w / 2, b.y + b.h / 2];
       const [x1, y1] = anchor(a, cb), [x2, y2] = anchor(b, ca);
-      const same = Math.abs(ca[0] - cb[0]) < 40, side = ca[0] < X_MID ? -1 : 1;
+      const same = Math.abs(ca[0] - cb[0]) < 40, side = ca[0] < layout.xMid ? -1 : 1;
       const path = same ? `M${x1 - (side < 0 ? a.w / 2 : -a.w / 2) + (side < 0 ? 0 : 0)},${ca[1]} C${ca[0] + side * (a.w / 2 + 70)},${ca[1]} ${cb[0] + side * (b.w / 2 + 70)},${cb[1]} ${cb[0] + side * (b.w / 2)},${cb[1]}`
         : `M${x1},${y1} C${x1 + (x2 - x1) * 0.45},${y1} ${x2 - (x2 - x1) * 0.45},${y2} ${x2},${y2}`;
       const down = l.kind === 'vpn' && (l.up ?? 0) < (l.tunnels?.length || 0), none = l.kind === 'vpn' && !l.up;
@@ -640,6 +623,8 @@ export async function networkPage(ctx) {
       : i.type === 'ncc-hub' ? `gcp:ncc:${i.id}` : i.vpc ? (i.cloud === 'aws' ? `aws:vpc:${i.owner}:${i.vpc}` : `gcp:net:${i.vpc}`) : null;
     return id && d.nodes.some((n) => n.id === id && !n.stub) ? id : null;
   };
+  // an account by its name, and its ID when the name is not it
+  const where = (i) => (i.ownerName && i.ownerName !== i.owner ? `${i.ownerName} (${i.owner})` : i.owner);
   function inventoryView() {
     const detail = h('div', { class: 'inbox-detail' }, h('div', { class: 'empty' }, 'Pick a row.'));
     const list = h('div', null, h('div', { class: 'muted small', style: 'padding:16px' }, 'Loading…'));
@@ -653,7 +638,7 @@ export async function networkPage(ctx) {
       active = `${i.type}|${i.id}`;
       for (const tr of list.querySelectorAll('tr[data-k]')) tr.classList.toggle('active', tr.dataset.k === active);
       const node = graphNodeOf(i);
-      detail.replaceChildren(h('div', { class: 'eyebrow' }, `${CLOUD[i.cloud]} · ${i.owner}${i.region ? ` · ${i.region}` : ''} · ${TYPE_LABEL[i.type] || i.type}`), h('b', null, i.name), h('div', { class: 'row tiny muted' }, h('span', { class: 'mono' }, i.id), h('button', { class: 'btn sm', onClick: () => copy(i.id) }, 'Copy ID')),
+      detail.replaceChildren(h('div', { class: 'eyebrow' }, `${CLOUD[i.cloud]} · ${where(i)}${i.region ? ` · ${i.region}` : ''} · ${TYPE_LABEL[i.type] || i.type}`), h('b', null, i.name), h('div', { class: 'row tiny muted' }, h('span', { class: 'mono' }, i.id), h('button', { class: 'btn sm', onClick: () => copy(i.id) }, 'Copy ID')),
         i.vpc && h('div', { class: 'tiny' }, 'In ', h('span', { class: 'mono' }, i.vpc)), node && h('div', { class: 'row' }, h('button', { class: 'btn sm', onClick: () => show(node) }, showLabel())),
         h('pre', { class: 'tiny' }, JSON.stringify(i.data, null, 2)));
     };
@@ -669,7 +654,7 @@ export async function networkPage(ctx) {
         h('tbody', null, inv.items.map((i) => h('tr', { class: `link${active === `${i.type}|${i.id}` ? ' active' : ''}`, 'data-k': `${i.type}|${i.id}`, tabindex: 0, onClick: () => show1(i), onKeydown: (e) => { if (e.key === 'Enter') show1(i); } },
           h('td', { class: 'tiny nowrap' }, TYPE_LABEL[i.type] || i.type),
           h('td', null, h('div', { class: 'small' }, i.name), i.name !== i.id && h('div', { class: 'mono tiny muted' }, i.id.length > 60 ? `…${i.id.slice(-58)}` : i.id)),
-          h('td', { class: 'tiny' }, `${CLOUD[i.cloud]} · ${i.owner}${i.region ? ` · ${i.region}` : ''}`)))))) : h('div', { class: 'empty' }, 'Nothing matches.'));
+          h('td', { class: 'tiny' }, `${CLOUD[i.cloud]} · ${where(i)}${i.region ? ` · ${i.region}` : ''}`)))))) : h('div', { class: 'empty' }, 'Nothing matches.'));
     }
     load();
     return h('div', null, h('div', { class: 'filters' }, search, cloudSeg(), typeSel, count), h('div', { class: 'inbox' }, list, detail));
@@ -698,7 +683,7 @@ export async function networkPage(ctx) {
     const search = searchBox({ value: f.q, placeholder: 'Find a VPC, network, account or range', label: 'Find in Space', onSearch: (v) => { f.q = v.trim(); toUrl(); scene?.redraw(); } });
     search.classList.add('ns-find');
     ctx.onLeave(search.cancel);
-    return networkScene(d, { pick, sel: () => f.sel, envColor, tools: [search], match: (n) => matchNode(n, f.q),
+    return networkScene(d, { pick, sel: () => f.sel, envColor, envRank: (id) => { const i = envs().findIndex((e) => e.id === id); return i < 0 ? 99 : i; }, tools: [search], match: (n) => matchNode(n, f.q),
       internet: () => f.internet, onInternet: (v) => { f.internet = v; toUrl(); } });
   }
   drawHead(); drawTiles(); drawTabs();
